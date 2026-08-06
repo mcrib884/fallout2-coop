@@ -1613,6 +1613,16 @@ bool MpProfileBindLocal(uint8_t netId, const MpPlayerProfile& profile, Object* o
         return false;
     }
     gObjectToRuntime[object] = netId;
+    if (gMpIsClient && netId > 0 && netId <= NET_MAX_PLAYERS) {
+        // The local dude's reverse-map entry must survive the rebind: the
+        // destroy above scrubbed nothing (gDude exempt), but re-registering
+        // here also heals any earlier wipe (e.g. a map-change cleanup that
+        // ran before the slot's obj was set).
+        MultiplayerPlayer* p = &gMpSession.players[netId - 1];
+        if (p->isConnected && p->objNetId != 0) {
+            MpRegisterObjNetId(object, p->objNetId);
+        }
+    }
     debugFilePrint("MPROF: bind local done netId=%u name='%s'", netId, profile.name);
     return true;
 }
@@ -1988,10 +1998,13 @@ void MpProfileDestroyRuntime(uint8_t netId)
     MpPlayerRuntime& runtime = it->second;
     if (runtime.object != nullptr) {
         gObjectToRuntime.erase(runtime.object);
-        if (gMpIsClient && gMpSession.netIdToObj != nullptr) {
-            // Drop the reverse-map entry for the dying avatar so a stale
-            // pointer can never linger on a destroyed object — the fresh
-            // runtime re-registers on creation.
+        // Drop the reverse-map entry for the dying avatar so a stale
+        // pointer can never linger on a destroyed object — the fresh
+        // runtime re-registers on creation. The LOCAL dude is exempt: his
+        // object is never destroyed here (the bind keeps it) and his
+        // netId entry is the only thing that makes self-targeting
+        // (MpGetObjNetId(gDude)) resolve.
+        if (gMpIsClient && runtime.object != gDude && gMpSession.netIdToObj != nullptr) {
             for (int i = 1; i < gMpSession.netIdToObjCount; i++) {
                 if (gMpSession.netIdToObj[i] == runtime.object) {
                     gMpSession.netIdToObj[i] = nullptr;

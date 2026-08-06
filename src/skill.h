@@ -28,6 +28,10 @@ void skillsSetTagged(Skill* skills, int count);
 void skillsGetTagged(Skill* skills, int count);
 bool skillIsTagged(Skill skill);
 int skillGetValue(Object* critter, Skill skill);
+// Co-op: client-side formatting of a routed skill-use feedback message (the
+// host sends the message id + args; the text comes from the shared message
+// list). Returns false when the message id is unknown.
+bool skillGetMessageText(int messageId, char* dest, size_t size, int arg2, int arg3);
 void skillSetMaximum(int maximum);
 int skillGetDefaultValue(Skill skill);
 int skillAdd(Object* critter, Skill skill);

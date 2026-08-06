@@ -16,6 +16,8 @@
 #include "interface.h"
 #include "item.h"
 #include "message.h"
+#include "multiplayer.h"
+#include "multiplayer_combat.h"
 #include "multiplayer_profile.h"
 #include "object.h"
 #include "palette.h"
@@ -561,6 +563,75 @@ static void _show_skill_use_messages(Object* obj, Skill skill, Object* target, i
     }
 }
 
+// Co-op: client-side formatting of a routed skill-use feedback message. The
+// host sends the message id + args; the text comes from the shared message
+// list and is formatted exactly like the vanilla display path.
+bool skillGetMessageText(int messageId, char* dest, size_t size, int arg2, int arg3)
+{
+    MessageListItem item;
+    item.num = messageId;
+    if (!messageListGetItem(&gSkillsMessageList, &item)) {
+        return false;
+    }
+    switch (messageId) {
+    case 500: // You heal %d hit points.
+    case 503: // You fail to do any healing.
+        snprintf(dest, size, item.text, arg2);
+        break;
+    case 502: { // %s looks healthy already
+        Object* target = MpFindObjByNetId((uint32_t)arg3);
+        snprintf(dest, size, item.text,
+            target != nullptr ? objectGetName(target) : "?");
+        break;
+    }
+    case 520: // You heal your %s.
+    case 521: // You heal the %s.
+    case 525: // You fail to heal your %s.
+    case 526: { // You fail to heal the %s.
+        MessageListItem limb;
+        limb.num = arg2;
+        if (!messageListGetItem(&gSkillsMessageList, &limb)) {
+            return false;
+        }
+        snprintf(dest, size, item.text, limb.text);
+        break;
+    }
+    default: // 501, 512-514, 590-592 — no placeholders
+        strncpy(dest, item.text, size);
+        dest[size - 1] = '\0';
+        break;
+    }
+    return true;
+}
+
+// Co-op: host-resolved skill use by a remote player. Vanilla feedback
+// (monitor messages, the time-skip palette fade) would render on the HOST's
+// screen — or nowhere, when gated on gDude — but must reach the performing
+// player's client. Returns the performer's netId, or 0 for the host's own
+// dude / singleplayer (vanilla behavior).
+static uint8_t mpSkillRemoteNetId(const Object* obj)
+{
+    if (!gMpActive || !gMpIsHost || obj == nullptr || obj == gDude) {
+        return 0;
+    }
+    return MpCombatGetCritterPlayerNetId(const_cast<Object*>(obj));
+}
+
+// Displays the message locally (host's own dude) or routes it to the
+// performing player's client. |arg2|/|arg3| are the formatting args the
+// client needs (healed HP, limb message id, target netId); |fade| makes the
+// client play the time-skip blackout.
+static void mpSkillFeedback(Object* obj, const MessageListItem* item,
+    int arg2, int arg3, int fade)
+{
+    uint8_t netId = mpSkillRemoteNetId(obj);
+    if (netId != 0) {
+        MpSendSkillUseFeedback(netId, item->num, arg2, arg3, fade);
+    } else {
+        displayMonitorAddMessage(item->text);
+    }
+}
+
 // skill_use
 // 0x4AAD08
 int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
@@ -603,7 +674,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
             // 592: The strain might kill you.
             messageListItem.num = 590 + randomBetween(0, 2);
             if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
+                mpSkillFeedback(obj, &messageListItem, 0, 0, 0);
             }
 
             return -1;
@@ -622,7 +693,9 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
         }
 
         if (currentHp < maximumHp) {
-            paletteFadeTo(gPaletteBlack);
+            if (mpSkillRemoteNetId(obj) == 0) {
+                paletteFadeTo(gPaletteBlack);
+            }
 
             int roll;
             if (critterGetBodyType(target) == BODY_TYPE_ROBOTIC) {
@@ -648,6 +721,8 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
 
                     snprintf(text, sizeof(text), messageListItem.text, hpToHeal);
                     displayMonitorAddMessage(text);
+                } else if (mpSkillRemoteNetId(obj) != 0) {
+                    MpSendSkillUseFeedback(mpSkillRemoteNetId(obj), 500, hpToHeal, 0, 1);
                 }
 
                 target->data.critter.combat.maneuver &= ~CRITTER_MANUEVER_FLEEING;
@@ -667,11 +742,13 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                 }
 
                 snprintf(text, sizeof(text), messageListItem.text, hpToHeal);
-                displayMonitorAddMessage(text);
+                mpSkillFeedback(obj, &messageListItem, hpToHeal, 0, 1);
             }
 
             scriptsExecMapUpdateProc();
-            paletteFadeTo(_cmap);
+            if (mpSkillRemoteNetId(obj) == 0) {
+                paletteFadeTo(_cmap);
+            }
         } else {
             if (obj == gDude) {
                 // 501: You look healty already
@@ -689,6 +766,12 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
 
                 displayMonitorAddMessage(text);
                 giveExp = false;
+            } else if (mpSkillRemoteNetId(obj) != 0) {
+                uint8_t perfNetId = mpSkillRemoteNetId(obj);
+                MpSendSkillUseFeedback(perfNetId,
+                    (target == gDude ? 501 : 502), 0,
+                    target != gDude ? MpGetObjNetId(target) : 0, 0);
+                giveExp = false;
             }
         }
 
@@ -704,7 +787,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
             // 592: The strain might kill you.
             messageListItem.num = 590 + randomBetween(0, 2);
             if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
+                mpSkillFeedback(obj, &messageListItem, 0, 0, 0);
             }
 
             return -1;
@@ -716,13 +799,15 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
             // 514: It's dead, get over it.
             messageListItem.num = 512 + randomBetween(0, 2);
             if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
+                mpSkillFeedback(obj, &messageListItem, 0, 0, 0);
             }
             break;
         }
 
         if (currentHp < maximumHp || critterIsCrippled(target)) {
-            paletteFadeTo(gPaletteBlack);
+            if (mpSkillRemoteNetId(obj) == 0) {
+                paletteFadeTo(gPaletteBlack);
+            }
 
             if (critterGetBodyType(target) != BODY_TYPE_ROBOTIC && critterIsCrippled(target)) {
                 int flags[HEALABLE_DAMAGE_FLAGS_LENGTH];
@@ -769,7 +854,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                         }
 
                         snprintf(text, sizeof(text), prefix.text, messageListItem.text);
-                        displayMonitorAddMessage(text);
+                        mpSkillFeedback(obj, &prefix, messageListItem.num, 0, 1);
                         _show_skill_use_messages(obj, skill, target, successCount, skillBonus);
 
                         giveExp = false;
@@ -801,6 +886,8 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                     }
                     snprintf(text, sizeof(text), messageListItem.text, hpToHeal);
                     displayMonitorAddMessage(text);
+                } else if (mpSkillRemoteNetId(obj) != 0) {
+                    MpSendSkillUseFeedback(mpSkillRemoteNetId(obj), 500, hpToHeal, 0, 1);
                 }
 
                 if (!skillUseSlotAdded) {
@@ -827,10 +914,12 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                 }
 
                 snprintf(text, sizeof(text), messageListItem.text, hpToHeal);
-                displayMonitorAddMessage(text);
+                mpSkillFeedback(obj, &messageListItem, hpToHeal, 0, 1);
 
                 scriptsExecMapUpdateProc();
-                paletteFadeTo(_cmap);
+                if (mpSkillRemoteNetId(obj) == 0) {
+                    paletteFadeTo(_cmap);
+                }
             }
         } else {
             if (obj == gDude) {
@@ -850,6 +939,12 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                 displayMonitorAddMessage(text);
 
                 giveExp = false;
+            } else if (mpSkillRemoteNetId(obj) != 0) {
+                uint8_t perfNetId = mpSkillRemoteNetId(obj);
+                MpSendSkillUseFeedback(perfNetId,
+                    (target == gDude ? 501 : 502), 0,
+                    target != gDude ? MpGetObjNetId(target) : 0, 0);
+                giveExp = false;
             }
         }
 
@@ -867,14 +962,14 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
     case SKILL_TRAPS:
         messageListItem.num = 551; // You fail to find any traps.
         if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
-            displayMonitorAddMessage(messageListItem.text);
+            mpSkillFeedback(obj, &messageListItem, 0, 0, 0);
         }
 
         return -1;
     case SKILL_SCIENCE:
         messageListItem.num = 552; // You fail to learn anything.
         if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
-            displayMonitorAddMessage(messageListItem.text);
+            mpSkillFeedback(obj, &messageListItem, 0, 0, 0);
         }
 
         return -1;
@@ -883,7 +978,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
             // You cannot repair that.
             messageListItem.num = 553;
             if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
+                mpSkillFeedback(obj, &messageListItem, 0, 0, 0);
             }
             return -1;
         }
@@ -894,7 +989,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
             // 592: The strain might kill you.
             messageListItem.num = 590 + randomBetween(0, 2);
             if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
+                mpSkillFeedback(obj, &messageListItem, 0, 0, 0);
             }
             return -1;
         }
@@ -903,7 +998,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
             // The robotic unit is beyond repair.
             messageListItem.num = 601;
             if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
+                mpSkillFeedback(obj, &messageListItem, 0, 0, 0);
             }
             break;
         }
@@ -912,7 +1007,9 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
             int flags[REPAIRABLE_DAMAGE_FLAGS_LENGTH];
             memcpy(flags, gRepairableDamageFlags, sizeof(gRepairableDamageFlags));
 
-            paletteFadeTo(gPaletteBlack);
+            if (mpSkillRemoteNetId(obj) == 0) {
+                paletteFadeTo(gPaletteBlack);
+            }
 
             for (int index = 0; index < REPAIRABLE_DAMAGE_FLAGS_LENGTH; index++) {
                 if ((target->data.critter.combat.results & flags[index]) != 0) {
@@ -954,7 +1051,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                     }
 
                     snprintf(text, sizeof(text), prefix.text, messageListItem.text);
-                    displayMonitorAddMessage(text);
+                    mpSkillFeedback(obj, &prefix, messageListItem.num, 0, 1);
 
                     _show_skill_use_messages(obj, skill, target, successCount, skillBonus);
                     giveExp = false;
@@ -980,6 +1077,8 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                     }
                     snprintf(text, sizeof(text), messageListItem.text, hpToHeal);
                     displayMonitorAddMessage(text);
+                } else if (mpSkillRemoteNetId(obj) != 0) {
+                    MpSendSkillUseFeedback(mpSkillRemoteNetId(obj), 500, hpToHeal, 0, 1);
                 }
 
                 if (!skillUseSlotAdded) {
@@ -995,7 +1094,9 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                 successCount = 1;
                 _show_skill_use_messages(obj, skill, target, successCount, skillBonus);
                 scriptsExecMapUpdateProc();
-                paletteFadeTo(_cmap);
+                if (mpSkillRemoteNetId(obj) == 0) {
+                    paletteFadeTo(_cmap);
+                }
 
                 giveExp = false;
             } else {
@@ -1006,10 +1107,12 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                 }
 
                 snprintf(text, sizeof(text), messageListItem.text, hpToHeal);
-                displayMonitorAddMessage(text);
+                mpSkillFeedback(obj, &messageListItem, hpToHeal, 0, 1);
 
                 scriptsExecMapUpdateProc();
-                paletteFadeTo(_cmap);
+                if (mpSkillRemoteNetId(obj) == 0) {
+                    paletteFadeTo(_cmap);
+                }
             }
         } else {
             if (obj == gDude) {
@@ -1023,6 +1126,12 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                 snprintf(text, sizeof(text), messageListItem.text, objectGetName(target));
                 displayMonitorAddMessage(text);
 
+                giveExp = false;
+            } else if (mpSkillRemoteNetId(obj) != 0) {
+                uint8_t perfNetId = mpSkillRemoteNetId(obj);
+                MpSendSkillUseFeedback(perfNetId,
+                    (target == gDude ? 501 : 502), 0,
+                    target != gDude ? MpGetObjNetId(target) : 0, 0);
                 giveExp = false;
             }
         }

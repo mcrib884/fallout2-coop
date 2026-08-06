@@ -189,6 +189,9 @@ void MpReplayLocalAttackResult(int damage, int attackerFlags, int defenderFlags)
 // apply (client)
 void MpApplyPlayerStatus(const NetPlayerStatusPayload* payload);
 void MpApplyGameOver(const NetGameOverPayload* payload);
+// Host: route a skill-use feedback (monitor message + optional time-skip
+// fade) to the performing player's client. netId 0 = no-op.
+void MpSendSkillUseFeedback(uint8_t netId, int messageId, int arg2, int arg3, int fade);
 
 // Co-op: if the destination tile holds a live critter (not the mover),
 // truncate the destination to the last free tile on the straight line

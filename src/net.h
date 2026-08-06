@@ -393,6 +393,7 @@ enum NetPlayerEventOpcode {
     NET_PLAYER_EVENT_DOWNED = 1,        // arg1: 1 downed / 0 revived; arg2: hp
     NET_PLAYER_EVENT_GAME_OVER = 2,     // arg1: reason
     NET_PLAYER_EVENT_ATTACK_RESULT = 3, // arg1: damage; arg2: attackerFlags; arg3: defenderFlags; arg4: targetNetId
+    NET_PLAYER_EVENT_SKILL_USE = 4,     // arg1: skill message id; arg2: format arg (hp / limb msg id); arg3: target netId; arg4: 1 = play time-skip fade
 };
 #pragma pack(pop)
 

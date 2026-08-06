@@ -72,6 +72,10 @@ void MpCombatOnEndedPacket();                                        // host -> 
 // clients; the acting client suppresses its own predicted combat messages in
 // favor of the host's broadcast version.
 void MpCombatBroadcastMonitorMessage(const char* text);
+// Host: temporarily suppress the display-monitor broadcast (the host's own
+// first-person lines are routed locally only — see combat.cc mpCombatMonitorLine).
+void MpCombatSetMonitorBroadcastSuppressed(bool suppress);
+bool MpCombatMonitorBroadcastSuppressed();
 void MpCombatOnMonitorMessage(const char* text, size_t textLength);
 void MpCombatBeginLocalAttackPrediction();
 void MpCombatEndLocalAttackPrediction();

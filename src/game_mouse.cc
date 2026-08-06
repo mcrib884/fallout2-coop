@@ -345,6 +345,14 @@ static bool gameMouseSendPlayerAction(uint8_t action, Object* target, uint8_t sk
 
     uint32_t targetNetId = MpGetObjNetId(target);
     if (targetNetId == 0) {
+        uint8_t localNetId = gMpSession.localNetId;
+        MultiplayerPlayer* localPlayer = localNetId > 0 && localNetId <= NET_MAX_PLAYERS
+            ? &gMpSession.players[localNetId - 1]
+            : nullptr;
+        debugFilePrint("MPDBG: player action send failed action=%d obj=%p pid=0x%X localSlotNetId=%u localObjNetId=%u",
+            action, (void*)target, target->pid,
+            localPlayer != nullptr ? localPlayer->netId : 0,
+            localPlayer != nullptr ? localPlayer->objNetId : 0);
         return false;
     }
 
@@ -1265,6 +1273,11 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
             || gGameMouseMode == GAME_MOUSE_MODE_USE_REPAIR) {
             Object* object = gameMouseGetObjectUnderCursor(-1, true, gElevation);
             if (gMpActive && gMpIsClient) {
+                debugFilePrint("MPDBG: skill click client mode=%d obj=%p pid=0x%X fidType=%d tile=%d",
+                    gGameMouseMode, (void*)object,
+                    object != nullptr ? object->pid : 0,
+                    object != nullptr ? FID_TYPE(object->fid) : -1,
+                    object != nullptr ? object->tile : -1);
                 if (object != nullptr) {
                     gameMouseSendPlayerAction(NET_PLAYER_ACTION_USE_SKILL, object,
                         (uint8_t)gGameMouseModeSkills[gGameMouseMode - FIRST_GAME_MOUSE_MODE_SKILL]);

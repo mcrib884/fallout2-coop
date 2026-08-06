@@ -246,7 +246,14 @@ void displayMonitorAddMessage(const char* str)
     // flight — see MpCombatBeginLocalAttackPrediction.
     if (gMpActive && MpCombatIsActive()) {
         if (gMpIsHost) {
-            MpCombatBroadcastMonitorMessage(str);
+            // Co-op: the host's own first-person lines ("You missed", the
+            // bad-shot messages) must not reach the clients — they would
+            // read "you" as themselves. The combat display routes those
+            // through this suppression window; remote-subject lines are
+            // name-based and keep broadcasting.
+            if (!MpCombatMonitorBroadcastSuppressed()) {
+                MpCombatBroadcastMonitorMessage(str);
+            }
         } else if (MpCombatMonitorSuppressed()) {
             return;
         }

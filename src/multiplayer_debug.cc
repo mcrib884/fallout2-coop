@@ -44,8 +44,6 @@ constexpr int DBG_BTN_PREV = 700;
 constexpr int DBG_BTN_NEXT = 701;
 constexpr int DBG_BTN_DEC = 702;
 constexpr int DBG_BTN_INC = 703;
-constexpr int DBG_BTN_JUMP_DEC = 704;
-constexpr int DBG_BTN_JUMP_INC = 705;
 constexpr int DBG_BTN_BACK = 706;
 
 constexpr int kDbgWindowWidth = 320;
@@ -64,13 +62,18 @@ void dbgCenteredPos(int width, int height, int* outX, int* outY)
     }
 }
 
-// Heal the local dude. On a co-op client the HP is host-authoritative: the
-// request goes to the host, which applies it to the avatar and lets the
-// regular state/status broadcast carry the result back. The local apply is
-// only for instant feedback — the echo converges within a round trip.
+// Heal the local dude. On the host this runs the same authoritative apply a
+// client heal uses (MpDebugApplyHeal) — it also revives a downed host. On a
+// co-op client the HP is host-authoritative: the request goes to the host,
+// which applies it to the avatar and lets the regular state/status broadcast
+// carry the result back; the local apply is display-only convergence.
 void dbgHeal(int amount)
 {
     if (gDude == nullptr) {
+        return;
+    }
+    if (gMpActive && gMpIsHost) {
+        MpDebugApplyHeal(gDude, amount);
         return;
     }
     if (gMpActive && gMpIsClient) {
@@ -92,7 +95,6 @@ void dbgHeal(int amount)
 struct SubmenuCallbacks {
     const char* title;
     int count;
-    int jump;      // list jump step (0 = hide jump buttons)
     int incAmount; // value delta per INC/DEC click
     const char* (*name)(int);
     int (*value)(int);
@@ -133,7 +135,10 @@ const char* dbgStatName(int index)
 
 int dbgStatValue(int index)
 {
-    return gDude != nullptr ? critterGetStat(gDude, static_cast<Stat>(index)) : 0;
+    // The base stat — the same number the character editor shows. The
+    // effective value (with trait/perk modifiers) would make the +/- edits
+    // land on the wrong base.
+    return gDude != nullptr ? critterGetBaseStat(gDude, static_cast<Stat>(index)) : 0;
 }
 
 void dbgStatModify(int index, int delta)
@@ -142,7 +147,9 @@ void dbgStatModify(int index, int delta)
         return;
     }
     Stat stat = static_cast<Stat>(index);
-    int next = std::clamp(critterGetStat(gDude, stat) + delta, 1, 10);
+    debugFilePrint("MPDBG: stat modify index=%d delta=%d stat=%s before=%d",
+        index, delta, statGetName(stat), critterGetBaseStat(gDude, stat));
+    int next = std::clamp(critterGetBaseStat(gDude, stat) + delta, 1, 10);
     critterSetBaseStat(gDude, stat, next);
     critterUpdateDerivedStats(gDude);
     interfaceRenderHitPoints(true);
@@ -175,10 +182,10 @@ void dbgPerkModify(int index, int delta)
     }
 }
 
-// Runs the modal loop for an editor submenu. The current entry line is drawn
-// every frame (plain windowDrawText — no DRAW_TEXT_FLAG_NO_BG — so the fill
-// erases the previous frame's glyphs). Returns the pressed button code or 0
-// on KEY_ESCAPE.
+// Runs the modal loop for an editor submenu. The current entry line is
+// cleared and redrawn every frame — the centered x shifts with the string
+// width, so the text's own background fill covers a different rect each time
+// and would leave ghost tails without an explicit full-line clear.
 int dbgSubmenuModal(int win, const SubmenuCallbacks* cb, int current)
 {
     char buf[96];
@@ -186,10 +193,24 @@ int dbgSubmenuModal(int win, const SubmenuCallbacks* cb, int current)
     while (rc == -1) {
         sharedFpsLimiter.mark();
 
+        // Full-line clear must cover the whole glyph cell (the text at y=30
+        // with the 16px default font spans to ~46) — a shorter rect leaves
+        // the old glyphs' bottom pixels behind as dots.
+        windowFill(win, 8, 24, kDbgWindowWidth - 16, 24, COLOR_BLACK);
         int value = cb->value(current);
         snprintf(buf, sizeof(buf), "%s  %d", cb->name(current), value);
         int x = (kDbgWindowWidth - fontGetStringWidth(buf)) / 2;
         windowDrawText(win, buf, 0, x, 30, COLOR_WHITE);
+        // The info rect's own dirty marking does not reliably reach the blit;
+        // only a full-window refresh does (a click reveals the line because it
+        // triggers one). Force it every frame so the line shows immediately.
+        windowRefresh(win);
+
+        // Show THIS frame before waiting for input. With the blit after
+        // inputGetInput the visible frame is always the previous iteration's
+        // (static menus hide the lag; a live info line falls one action
+        // behind — clicking Next shows the old stat until the next click).
+        renderPresent();
 
         // Keep the session alive behind the modal: the profile sync, deferred
         // drains and host detect all run from MpTick, which the main loop
@@ -205,8 +226,6 @@ int dbgSubmenuModal(int win, const SubmenuCallbacks* cb, int current)
         case DBG_BTN_NEXT:
         case DBG_BTN_DEC:
         case DBG_BTN_INC:
-        case DBG_BTN_JUMP_DEC:
-        case DBG_BTN_JUMP_INC:
         case DBG_BTN_BACK:
             rc = keyCode;
             break;
@@ -214,7 +233,6 @@ int dbgSubmenuModal(int win, const SubmenuCallbacks* cb, int current)
             break;
         }
 
-        renderPresent();
         sharedFpsLimiter.throttle();
     }
     return rc;
@@ -246,16 +264,14 @@ void dbgSubmenuShow(const SubmenuCallbacks* cb)
     _win_register_text_button(win, 170, 55, -1, -1, -1, DBG_BTN_NEXT, "Next", 0);
     _win_register_text_button(win, 30, 85, -1, -1, -1, DBG_BTN_DEC, decLabel, 0);
     _win_register_text_button(win, 170, 85, -1, -1, -1, DBG_BTN_INC, incLabel, 0);
-    if (cb->jump > 0) {
-        _win_register_text_button(win, 30, 115, -1, -1, -1, DBG_BTN_JUMP_DEC, "-10", 0);
-        _win_register_text_button(win, 170, 115, -1, -1, -1, DBG_BTN_JUMP_INC, "+10", 0);
-    }
-    _win_register_text_button(win, 30, 145, -1, -1, -1, DBG_BTN_BACK, "Back", 0);
+    _win_register_text_button(win, 30, 115, -1, -1, -1, DBG_BTN_BACK, "Back", 0);
     windowRefresh(win);
 
     int current = 0;
     for (;;) {
         int choice = dbgSubmenuModal(win, cb, current);
+        debugFilePrint("MPDBG: submenu %s choice=%d current=%d name='%s' value=%d",
+            cb->title, choice, current, cb->name(current), cb->value(current));
         if (choice == 0 || choice == DBG_BTN_BACK) {
             break;
         }
@@ -271,12 +287,6 @@ void dbgSubmenuShow(const SubmenuCallbacks* cb)
             break;
         case DBG_BTN_INC:
             cb->modify(current, cb->incAmount);
-            break;
-        case DBG_BTN_JUMP_DEC:
-            current = (current + cb->count - cb->jump) % cb->count;
-            break;
-        case DBG_BTN_JUMP_INC:
-            current = (current + cb->jump) % cb->count;
             break;
         }
     }
@@ -329,13 +339,13 @@ void MpDebugMenuShow()
     windowRefresh(win);
 
     SubmenuCallbacks skillsCb {
-        "SKILLS", SKILL_COUNT, 5, 10, dbgSkillName, dbgSkillValue, dbgSkillModify,
+        "SKILLS", SKILL_COUNT, 10, dbgSkillName, dbgSkillValue, dbgSkillModify,
     };
     SubmenuCallbacks statsCb {
-        "STATS", 7, 0, 1, dbgStatName, dbgStatValue, dbgStatModify,
+        "STATS", 7, 1, dbgStatName, dbgStatValue, dbgStatModify,
     };
     SubmenuCallbacks perksCb {
-        "PERKS", PERK_COUNT, 10, 1, dbgPerkName, dbgPerkValue, dbgPerkModify,
+        "PERKS", PERK_COUNT, 1, dbgPerkName, dbgPerkValue, dbgPerkModify,
     };
 
     bool keepGoing = true;
@@ -344,12 +354,12 @@ void MpDebugMenuShow()
         while (rc == -1) {
             sharedFpsLimiter.mark();
 
-            // Keep the session alive behind the modal: the profile sync, deferred
-        // drains and host detect all run from MpTick, which the main loop
-        // cannot reach while this modal blocks it. Same pattern as the vote
-        // modal. No-ops when not in a session.
-        MpTick();
-        int keyCode = inputGetInput();
+            // Keep the session alive behind the modal: the profile sync,
+            // deferred drains and host detect all run from MpTick, which the
+            // main loop cannot reach while this modal blocks it. Same pattern
+            // as the vote modal. No-ops when not in a session.
+            MpTick();
+            int keyCode = inputGetInput();
             switch (keyCode) {
             case KEY_ESCAPE:
                 rc = 0;

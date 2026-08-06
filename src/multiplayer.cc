@@ -29,6 +29,8 @@
 #include "multiplayer_debug.h"
 #include "multiplayer_profile.h"
 #include "object.h"
+#include "palette.h"
+#include "skill.h"
 #include "party_member.h"
 #include "proto.h"
 #include "proto_instance.h"
@@ -1237,6 +1239,15 @@ static int mpHostRegisterPlayerMovement(Object* obj, bool isRun, int tile, int e
     return 0;
 }
 
+// Process-local UI helpers (hex cursor, bouncing cursor, crosshair, exit-grid
+// markers) are OBJ_TYPE_INTERFACE objects that exist on every machine. They
+// must never be networked: a broadcast cursor state would render one player's
+// tile highlight on the other's screen and ghost the local cursor.
+static bool mpIsLocalUiObject(const Object* obj)
+{
+    return obj != nullptr && FID_TYPE(obj->fid) == OBJ_TYPE_INTERFACE;
+}
+
 static bool mpBuildObjectState(Object* obj, NetMapFullSyncObjectPayload* state)
 {
     if (obj == nullptr || state == nullptr) {
@@ -1249,7 +1260,7 @@ static bool mpBuildObjectState(Object* obj, NetMapFullSyncObjectPayload* state)
     }
     uint32_t netId = netIt->second;
     if (netId == 0 || (obj->flags & OBJECT_HIDDEN) != 0
-        || mpObjectIsInAnyPlayerInventory(obj)) {
+        || mpObjectIsInAnyPlayerInventory(obj) || mpIsLocalUiObject(obj)) {
         return false;
     }
 
@@ -2807,6 +2818,22 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                 }
                 break;
             }
+            case NET_PLAYER_EVENT_SKILL_USE: {
+                if (evt->netId != gMpSession.localNetId) {
+                    break;
+                }
+                char text[256];
+                if (skillGetMessageText(evt->arg1, text, sizeof(text), evt->arg2, evt->arg3)) {
+                    if (evt->arg4 != 0) {
+                        paletteFadeTo(gPaletteBlack);
+                    }
+                    displayMonitorAddMessage(text);
+                    if (evt->arg4 != 0) {
+                        paletteFadeTo(_cmap);
+                    }
+                }
+                break;
+            }
             default:
                 debugFilePrint("MP: player event unknown opcode=%u", evt->opcode);
                 break;
@@ -3098,6 +3125,31 @@ static void mpRestoreStandingVisual(Object* critter, int32_t origFid, bool refre
     if (refreshRect) {
         tileWindowRefreshRect(&updatedRect, elevation);
     }
+}
+
+// Host: route a skill-use feedback (monitor message + optional time-skip
+// fade) to the performing player's client, so player-specific feedback
+// reaches the right screen (never the host's for a remote performer).
+void MpSendSkillUseFeedback(uint8_t netId, int messageId, int arg2, int arg3, int fade)
+{
+    if (!gMpIsHost || !gMpActive || netId == 0 || netId > NET_MAX_PLAYERS) {
+        return;
+    }
+    MultiplayerPlayer* p = &gMpSession.players[netId - 1];
+    if (!p->isConnected || p->peer == nullptr) {
+        return;
+    }
+    NetPlayerEventPayload payload;
+    payload.opcode = NET_PLAYER_EVENT_SKILL_USE;
+    payload.netId = netId;
+    payload.arg1 = messageId;
+    payload.arg2 = arg2;
+    payload.arg3 = arg3;
+    payload.arg4 = (uint32_t)fade;
+    NetSendPacket(p->peer, NET_CHANNEL_RELIABLE, NET_PKT_PLAYER_EVENT,
+        &payload, sizeof(payload));
+    debugFilePrint("MP: skill use feedback sent netId=%u msg=%d arg2=%d fade=%d",
+        netId, messageId, arg2, fade);
 }
 
 // Host: broadcast the downed-state change for [netId] to every client.
@@ -3544,7 +3596,7 @@ void MpBroadcastObjectStates()
                     break;
                 }
             }
-            if (!isPlayer) {
+            if (!isPlayer && FID_TYPE(oldRecord.state.fid) != OBJ_TYPE_INTERFACE) {
                 debugFilePrint("MP: object removed broadcast netId=%u pid=0x%X fid=0x%X tile=%d",
                     oldRecord.netId, oldRecord.state.pid, oldRecord.state.fid, oldRecord.state.tile);
                 NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE,
@@ -4142,6 +4194,14 @@ static Object* mpApplyObjectStateInternal(const NetMapFullSyncObjectPayload* sta
         return obj;
     }
 
+    // Local UI helpers (hex cursor etc.) are never sent by the host; a stray
+    // INTERFACE-type state is corruption — refuse to materialize it.
+    if (FID_TYPE(state->fid) == OBJ_TYPE_INTERFACE) {
+        debugFilePrint("MPDBG: rejected interface-type object state netId=%u pid=0x%X",
+            state->netId, state->pid);
+        return nullptr;
+    }
+
     // The local player object must stay the vault-dude critter. A non-critter
     // state bound to his netId is corruption (it would turn gDude into a wall
     // and zero his stats); refuse to apply it.
@@ -4318,6 +4378,17 @@ void MpApplyPlayerState(const NetPlayerStateUpdatePayload* s)
     // path uses, not a one-off blit.
     if (isLocalPlayer && obj->data.critter.combat.ap != oldLocalAp) {
         interfaceRenderActionPoints(obj->data.critter.combat.ap, _combat_free_move);
+        // Trace the mirror's AP trajectory (throttled): explains any
+        // lost/regained AP the player perceives during combat.
+        if (MpCombatIsActive()) {
+            static uint32_t gMpStateApLogTick = 0;
+            uint32_t nowTicks = getTicks();
+            if (nowTicks - gMpStateApLogTick > 500) {
+                gMpStateApLogTick = nowTicks;
+                debugFilePrint("MP: state ap %d->%d free=%d",
+                    oldLocalAp, obj->data.critter.combat.ap, _combat_free_move);
+            }
+        }
     }
     // Bounds sanity on the authoritative channel: a wild value here would
     // corrupt the local mirror (defense against upstream bugs, not remote
@@ -4680,8 +4751,10 @@ void MpAssignNetIdsToAllObjects()
     Object* obj = objectFindFirst();
     while (obj != nullptr) {
         // Keyed by object pointer, so duplicate obj ids (common in map
-        // files) can never collapse two objects onto one netId.
-        if (gMpHostObjNetIds.find(obj) == gMpHostObjNetIds.end()) {
+        // files) can never collapse two objects onto one netId. Local UI
+        // helpers (hex cursor etc.) are never networked.
+        if (gMpHostObjNetIds.find(obj) == gMpHostObjNetIds.end()
+            && !mpIsLocalUiObject(obj)) {
             gMpHostObjNetIds[obj] = MpAllocObjNetId();
         }
         obj = objectFindNext();

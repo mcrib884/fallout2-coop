@@ -5432,6 +5432,23 @@ static void _damage_object(Object* target, int damage, bool animated, int hitUni
     }
 }
 
+// Co-op: a combat monitor line routed by its first-person subject. The
+// vanilla builder writes "you"-forms only for the host's gDude; those lines
+// must display on the host alone — the clients would read "you" as
+// themselves. Remote-subject lines are already name-based and keep flowing
+// through the normal broadcast. Inert on the client (combat lines never
+// originate there).
+static void mpCombatMonitorLine(Object* subject, const char* text)
+{
+    if (gMpActive && gMpIsHost && subject == gDude) {
+        MpCombatSetMonitorBroadcastSuppressed(true);
+        displayMonitorAddMessage(text);
+        MpCombatSetMonitorBroadcastSuppressed(false);
+        return;
+    }
+    displayMonitorAddMessage(text);
+}
+
 // Print attack description to monitor.
 //
 // 0x425170
@@ -5551,7 +5568,7 @@ void _combat_display(Attack* attack)
 
         strcat(text, ".");
 
-        displayMonitorAddMessage(text);
+        mpCombatMonitorLine(mainCritter, text);
     }
 
     if ((attack->attackerFlags & DAM_HIT) != 0) {
@@ -5640,7 +5657,7 @@ void _combat_display(Attack* attack)
 
                     if ((attack->defenderFlags & DAM_DEAD) != 0) {
                         strcat(text, ".");
-                        displayMonitorAddMessage(text);
+                        mpCombatMonitorLine(mainCritter, text);
 
                         if (attack->defender == gDude) {
                             if (critterGetStat(attack->defender, STAT_GENDER) == GENDER_MALE) {
@@ -5670,7 +5687,7 @@ void _combat_display(Attack* attack)
 
                 strcat(text, ".");
 
-                displayMonitorAddMessage(text);
+                mpCombatMonitorLine(mainCritter, text);
             }
         }
     }
@@ -5709,7 +5726,7 @@ void _combat_display(Attack* attack)
 
             strcat(text, ".");
 
-            displayMonitorAddMessage(text);
+            mpCombatMonitorLine(mainCritter, text);
         }
 
         if ((attack->attackerFlags & DAM_HIT) != 0 || (attack->attackerFlags & DAM_CRITICAL) == 0) {
@@ -5717,7 +5734,7 @@ void _combat_display(Attack* attack)
                 combatCopyDamageAmountDescription(text, sizeof(text), attack->attacker, attack->attackerDamage);
                 combatAddDamageFlagsDescription(text, attack->attackerFlags, attack->attacker);
                 strcat(text, ".");
-                displayMonitorAddMessage(text);
+                mpCombatMonitorLine(attack->attacker, text);
             }
         }
     }
@@ -5729,7 +5746,7 @@ void _combat_display(Attack* attack)
             combatAddDamageFlagsDescription(text, attack->extrasFlags[index], critter);
             strcat(text, ".");
 
-            displayMonitorAddMessage(text);
+            mpCombatMonitorLine(critter, text);
         }
     }
 }
@@ -6317,7 +6334,7 @@ void _combat_attack_this(Object* target)
         item = critterGetWeaponForHitMode(gDude, hitMode);
         messageListItem.num = 101; // Out of ammo.
         if (messageListGetItem(&gCombatMessageList, &messageListItem)) {
-            displayMonitorAddMessage(messageListItem.text);
+            mpCombatMonitorLine(gDude, messageListItem.text);
         }
 
         sfx = sfxBuildWeaponName(WEAPON_SOUND_EFFECT_OUT_OF_AMMO, item, hitMode, nullptr);
@@ -6326,7 +6343,7 @@ void _combat_attack_this(Object* target)
     case COMBAT_BAD_SHOT_OUT_OF_RANGE:
         messageListItem.num = 102; // Target out of range.
         if (messageListGetItem(&gCombatMessageList, &messageListItem)) {
-            displayMonitorAddMessage(messageListItem.text);
+            mpCombatMonitorLine(gDude, messageListItem.text);
         }
         return;
     case COMBAT_BAD_SHOT_NOT_ENOUGH_AP:
@@ -6335,7 +6352,7 @@ void _combat_attack_this(Object* target)
         if (messageListGetItem(&gCombatMessageList, &messageListItem)) {
             int actionPointsRequired = weaponGetActionPointCost(gDude, hitMode, aiming);
             snprintf(formattedText, sizeof(formattedText), messageListItem.text, actionPointsRequired);
-            displayMonitorAddMessage(formattedText);
+            mpCombatMonitorLine(gDude, formattedText);
         }
         return;
     case COMBAT_BAD_SHOT_ALREADY_DEAD:
@@ -6343,19 +6360,19 @@ void _combat_attack_this(Object* target)
     case COMBAT_BAD_SHOT_AIM_BLOCKED:
         messageListItem.num = 104; // Your aim is blocked.
         if (messageListGetItem(&gCombatMessageList, &messageListItem)) {
-            displayMonitorAddMessage(messageListItem.text);
+            mpCombatMonitorLine(gDude, messageListItem.text);
         }
         return;
     case COMBAT_BAD_SHOT_ARM_CRIPPLED:
         messageListItem.num = 106; // You cannot use two-handed weapons with a crippled arm.
         if (messageListGetItem(&gCombatMessageList, &messageListItem)) {
-            displayMonitorAddMessage(messageListItem.text);
+            mpCombatMonitorLine(gDude, messageListItem.text);
         }
         return;
     case COMBAT_BAD_SHOT_BOTH_ARMS_CRIPPLED:
         messageListItem.num = 105; // You cannot use weapons with both arms crippled.
         if (messageListGetItem(&gCombatMessageList, &messageListItem)) {
-            displayMonitorAddMessage(messageListItem.text);
+            mpCombatMonitorLine(gDude, messageListItem.text);
         }
         return;
     default:

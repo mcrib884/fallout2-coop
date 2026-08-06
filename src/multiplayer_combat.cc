@@ -365,6 +365,14 @@ int MpCombatHostRemoteTurn(Object* critter, uint8_t netId)
     int ap = critter->data.critter.combat.ap;
     int maxAp = critterGetStat(critter, STAT_MAXIMUM_ACTION_POINTS);
 
+    // Co-op: the vanilla free-move global is only ever set for the host's own
+    // dude (combat.cc _combat_turn). While a remote player's turn resolves on
+    // the host, the move machinery consumes free points first (animation.cc
+    // _object_move) — point it at the REMOTE avatar's own Bonus Move, or the
+    // avatar's real AP is charged for every tile while its free points go
+    // unused (and the owner's mirror sees a phantom golden bar).
+    _combat_free_move = 2 * perkGetRank(critter, PERK_BONUS_MOVE);
+
     NetCombatTurnStartPayload payload;
     payload.netId = netId;
     payload.ap = (uint16_t)std::clamp(ap, 0, 65535);
@@ -418,6 +426,9 @@ int MpCombatHostRemoteTurn(Object* critter, uint8_t netId)
     gMpCombat.waitingForTurnEnd = 0;
     gMpCombat.whoseTurn = 0;
     gMpCombat.turnEndPending = false;
+    // The remote avatar's free move must not leak into the host's own next
+    // turn (the vanilla dude-turn re-derives its own value at combat.cc:3373).
+    _combat_free_move = 0;
     debugFilePrint("MPCOMBAT: host remote turn end netId=%u", netId);
 
     return (gCombatState & COMBAT_STATE_EXIT_REQUESTED) != 0 ? -1 : 0;
@@ -465,7 +476,9 @@ static void mpCombatResolveMove(MultiplayerPlayer* player, const NetCombatCmdPay
         animationRegisterMoveToTile(critter, targetTile, cmd->elevation, ap, 0);
     }
     reg_anim_end();
-    debugFilePrint("MPCOMBAT: move resolved netId=%u tile=%d elev=%d run=%d", player->netId, targetTile, cmd->elevation, isRun ? 1 : 0);
+    debugFilePrint("MPCOMBAT: move resolved netId=%u tile=%d elev=%d run=%d ap=%d free=%d",
+        player->netId, targetTile, cmd->elevation, isRun ? 1 : 0,
+        critter->data.critter.combat.ap, _combat_free_move);
 }
 
 static void mpCombatResolveAttack(MultiplayerPlayer* player, const NetCombatCmdPayload* cmd)
@@ -998,6 +1011,18 @@ void MpCombatSendMoveIntent(int tile, int elevation, bool isRun)
     payload.elevation = elevation;
     mpCombatSend(NET_PKT_COMBAT_CMD, &payload, sizeof(payload));
     debugFilePrint("MPCOMBAT: move intent sent tile=%d elev=%d run=%d", tile, elevation, isRun ? 1 : 0);
+
+    // Client-side free-move prediction: the host consumes the avatar's Bonus
+    // Move points first (one per resolved tile), then real AP. Mirror that
+    // locally so the golden bar shrinks live and the turn's soft exit fires
+    // when both pools are empty. The real AP itself is tick-owned — the
+    // state sync carries the authoritative value; only the free pool (which
+    // is not on the wire) needs this local mirror.
+    if (_combat_free_move > 0) {
+        _combat_free_move--;
+        interfaceRenderActionPoints(
+            gDude != nullptr ? gDude->data.critter.combat.ap : 0, _combat_free_move);
+    }
 }
 
 void MpCombatSendInventoryApCost(int cost)
@@ -1091,6 +1116,22 @@ void MpCombatForceExit()
 // ---------------------------------------------------------------------------
 // display-monitor sync (host -> clients)
 // ---------------------------------------------------------------------------
+
+// Host: the display-monitor broadcast suppression window. Set around the
+// display of the host's OWN first-person combat lines (mpCombatMonitorLine
+// in combat.cc) so they render on the host's screen only — the clients would
+// read "you" as themselves.
+static bool gMpMonitorBroadcastSuppressed = false;
+
+void MpCombatSetMonitorBroadcastSuppressed(bool suppress)
+{
+    gMpMonitorBroadcastSuppressed = suppress;
+}
+
+bool MpCombatMonitorBroadcastSuppressed()
+{
+    return gMpMonitorBroadcastSuppressed;
+}
 
 void MpCombatBroadcastMonitorMessage(const char* text)
 {

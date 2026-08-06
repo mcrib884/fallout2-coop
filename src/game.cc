@@ -693,12 +693,10 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
     case KEY_LOWERCASE_C:
         if (interfaceBarEnabled()) {
             soundPlayFile("ib1p1xx1");
-            if (gMpActive && gMpIsClient) {
-                // Co-op: the character profile is host-authoritative; local
-                // edits would diverge from the synced profile.
-                win_timed_msg("Character editor is unavailable in co-op", COLOR_RED);
-                break;
-            }
+            // Co-op: every player owns their own character sheet. Client
+            // edits land on the local gDude and ride up to the host through
+            // the regular profile sync (mpClientSyncLocalProfile), so the
+            // host's copy of the player stays canonical on the next upload.
             bool isoWasEnabled = isoDisable();
             characterEditorShow(false);
             if (isoWasEnabled) {

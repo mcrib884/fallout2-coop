@@ -3115,6 +3115,13 @@ int _dude_move_to_tile(int tile, int elevation, int actionPoints, bool* isRun)
         return -1;
     }
 
+    // Co-op: never walk ONTO a tile occupied by another critter (vanilla
+    // allows stacking; a stacked avatar breaks targeting for both sides).
+    // Both players truncate locally so neither avatar ever overlaps.
+    if (gMpActive) {
+        tile = MpTruncateDestinationAtOccupant(gDude, tile, elevation);
+    }
+
     bool run = lastDestination == tile;
     lastDestination = tile;
     if (isRun != nullptr) {
@@ -3149,6 +3156,13 @@ int _dude_run_to_tile(int tile, int elevation, int actionPoints)
     // Co-op: a downed player cannot move (see _dude_move_to_tile).
     if (gMpActive && (gDude->data.critter.combat.results & DAM_DEAD) != 0) {
         return -1;
+    }
+
+    // Co-op: never walk ONTO a tile occupied by another critter (see
+    // _dude_move_to_tile). Re-truncating here is a no-op for the move path
+    // (already truncated); it covers direct run callers.
+    if (gMpActive) {
+        tile = MpTruncateDestinationAtOccupant(gDude, tile, elevation);
     }
 
     if (!perkGetRank(gDude, PERK_SILENT_RUNNING)) {

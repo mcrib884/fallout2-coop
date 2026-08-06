@@ -447,15 +447,23 @@ static void mpCombatResolveMove(MultiplayerPlayer* player, const NetCombatCmdPay
         return;
     }
 
+    // Co-op: never resolve onto a tile occupied by another critter (see
+    // MpTruncateDestinationAtOccupant) — stacked avatars break targeting.
+    int targetTile = MpTruncateDestinationAtOccupant(critter, cmd->tile, cmd->elevation);
+    if (targetTile != cmd->tile) {
+        debugFilePrint("MPCOMBAT: move truncated netId=%u tile=%d->%d (occupied)",
+            player->netId, cmd->tile, targetTile);
+    }
+
     bool isRun = (cmd->reserved & 0x01) != 0;
     reg_anim_begin(ANIMATION_REQUEST_RESERVED);
     if (isRun) {
-        animationRegisterRunToTile(critter, cmd->tile, cmd->elevation, ap, 0);
+        animationRegisterRunToTile(critter, targetTile, cmd->elevation, ap, 0);
     } else {
-        animationRegisterMoveToTile(critter, cmd->tile, cmd->elevation, ap, 0);
+        animationRegisterMoveToTile(critter, targetTile, cmd->elevation, ap, 0);
     }
     reg_anim_end();
-    debugFilePrint("MPCOMBAT: move resolved netId=%u tile=%d elev=%d run=%d", player->netId, cmd->tile, cmd->elevation, isRun ? 1 : 0);
+    debugFilePrint("MPCOMBAT: move resolved netId=%u tile=%d elev=%d run=%d", player->netId, targetTile, cmd->elevation, isRun ? 1 : 0);
 }
 
 static void mpCombatResolveAttack(MultiplayerPlayer* player, const NetCombatCmdPayload* cmd)
@@ -488,6 +496,23 @@ static void mpCombatResolveAttack(MultiplayerPlayer* player, const NetCombatCmdP
         player->netId, cmd->targetNetId, (int)hitMode, (int)hitLocation);
 }
 
+static void mpCombatResolveInventoryApCost(MultiplayerPlayer* player, const NetCombatCmdPayload* cmd)
+{
+    Object* critter = player->obj;
+    if (critter == nullptr) {
+        debugFilePrint("MPCOMBAT: inv ap cost rejected (no critter) netId=%u", player->netId);
+        return;
+    }
+    int cost = std::clamp(cmd->tile, 0, 100);
+    if (cost <= 0) {
+        return;
+    }
+    int apBefore = critter->data.critter.combat.ap;
+    critter->data.critter.combat.ap = std::max(apBefore - cost, 0);
+    debugFilePrint("MPCOMBAT: inv ap cost resolved netId=%u cost=%d ap=%d->%d",
+        player->netId, cost, apBefore, critter->data.critter.combat.ap);
+}
+
 static void mpCombatDrainQueue()
 {
     if (gCombatCmdQueue.empty()) {
@@ -513,6 +538,9 @@ static void mpCombatDrainQueue()
             break;
         case NET_COMBAT_CMD_ATTACK:
             mpCombatResolveAttack(player, &queued.payload);
+            break;
+        case NET_COMBAT_CMD_INV_AP_COST:
+            mpCombatResolveInventoryApCost(player, &queued.payload);
             break;
         default:
             debugFilePrint("MPCOMBAT: unknown cmd %d netId=%u", queued.payload.cmd, queued.netId);
@@ -933,6 +961,19 @@ void MpCombatSendMoveIntent(int tile, int elevation, bool isRun)
     payload.elevation = elevation;
     mpCombatSend(NET_PKT_COMBAT_CMD, &payload, sizeof(payload));
     debugFilePrint("MPCOMBAT: move intent sent tile=%d elev=%d run=%d", tile, elevation, isRun ? 1 : 0);
+}
+
+void MpCombatSendInventoryApCost(int cost)
+{
+    if (!gMpIsClient || !gMpActive || !gMpCombat.inCombat || !gMpCombat.turnActive) {
+        return;
+    }
+    NetCombatCmdPayload payload;
+    memset(&payload, 0, sizeof(payload));
+    payload.cmd = NET_COMBAT_CMD_INV_AP_COST;
+    payload.tile = cost; // the cost rides in the tile field
+    mpCombatSend(NET_PKT_COMBAT_CMD, &payload, sizeof(payload));
+    debugFilePrint("MPCOMBAT: inv ap cost sent cost=%d", cost);
 }
 
 void MpCombatSendAttackIntent(Object* target, HitMode hitMode, HitLocation hitLocation)

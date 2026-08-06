@@ -983,6 +983,57 @@ static MultiplayerPlayer* mpHostFindPlayerByObject(Object* obj)
     return nullptr;
 }
 
+// ---------------------------------------------------------------------------
+// destination truncation (co-op: never stack two avatars on one tile)
+// ---------------------------------------------------------------------------
+
+int MpTruncateDestinationAtOccupant(Object* mover, int tile, int elevation)
+{
+    if (mover == nullptr || tile == mover->tile || elevation != mover->elevation) {
+        return tile;
+    }
+
+    // Does the destination tile hold a live critter other than the mover?
+    bool occupied = false;
+    Object* obj = objectFindFirstAtLocation(elevation, tile);
+    while (obj != nullptr) {
+        if (obj != mover && FID_TYPE(obj->fid) == OBJ_TYPE_CRITTER && !critterIsDead(obj)) {
+            occupied = true;
+            break;
+        }
+        obj = objectFindNextAtLocation();
+    }
+    if (!occupied) {
+        return tile;
+    }
+
+    // Walk the straight line toward the destination and stop at the last
+    // free tile before the occupant.
+    int rotation = tileGetRotationTo(mover->tile, tile);
+    int distance = objectGetDistanceBetweenTiles(mover, mover->tile, mover, tile);
+    int lastFree = mover->tile;
+    for (int step = 0; step < distance; step++) {
+        int next = tileGetTileInDirection(lastFree, rotation, 1);
+        if (next == lastFree || next == tile) {
+            break;
+        }
+        bool free = true;
+        Object* check = objectFindFirstAtLocation(elevation, next);
+        while (check != nullptr) {
+            if (check != mover && FID_TYPE(check->fid) == OBJ_TYPE_CRITTER && !critterIsDead(check)) {
+                free = false;
+                break;
+            }
+            check = objectFindNextAtLocation();
+        }
+        if (!free) {
+            break;
+        }
+        lastFree = next;
+    }
+    return lastFree;
+}
+
 static int mpHostRegisterPlayerMovement(Object* obj, bool isRun, int tile, int elevation)
 {
     if (obj == nullptr) {
@@ -1010,6 +1061,15 @@ static int mpHostRegisterPlayerMovement(Object* obj, bool isRun, int tile, int e
         debugFilePrint("MP: movement rejected in combat obj=%p tile=%d elev=%d",
             (void*)obj, tile, elevation);
         return -1;
+    }
+
+    // Co-op: a walk must never resolve onto a tile occupied by another
+    // critter — stacked avatars break targeting for both players.
+    int targetTile = MpTruncateDestinationAtOccupant(obj, tile, elevation);
+    if (targetTile != tile) {
+        debugFilePrint("MP: move truncated obj=%p tile=%d->%d (occupied)",
+            (void*)obj, tile, targetTile);
+        tile = targetTile;
     }
 
     // A networked click has the same interrupt semantics as a local click.

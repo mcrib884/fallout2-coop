@@ -82,6 +82,7 @@ void MpCombatSendStartRequest(Object* defender); // defender = the attacked targ
 void MpCombatSendEndRequest();
 void MpCombatSendMoveIntent(int tile, int elevation, bool isRun);
 void MpCombatSendAttackIntent(Object* target, HitMode hitMode, HitLocation hitLocation);
+void MpCombatSendInventoryApCost(int cost);
 // Blocking client turn: the co-op input loop with network pump. Returns -1
 // when combat ended while the player was acting.
 int MpCombatClientTurnLoop();

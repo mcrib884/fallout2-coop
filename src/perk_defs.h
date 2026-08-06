@@ -3,6 +3,16 @@
 
 namespace fallout {
 
+// Co-op note (player-specific perks): the following perks have NO engine-side
+// read — their gameplay is implemented in game scripts, which only ever run
+// on the host and are checked against the host dude. Until client dialogue
+// sync exists, they are effectively host-character perks by construction;
+// re-evaluate each one for per-player routing when dialogue sync lands:
+//   PERK_PRESENCE, PERK_MENTAL_BLOCK, PERK_FRIENDLY_FOE,
+//   PERK_CULT_OF_PERSONALITY, PERK_SCROUNGER, PERK_ANIMAL_FRIEND,
+//   PERK_MYSTERIOUS_STRANGER, PERK_KAMA_SUTRA_MASTER, PERK_KARMA_BEACON,
+//   PERK_LIGHT_STEP, PERK_MAGNETIC_PERSONALITY
+
 enum Perk : int {
     PERK_INVALID = -1,
     PERK_AWARENESS,

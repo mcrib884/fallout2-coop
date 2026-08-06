@@ -182,6 +182,13 @@ void MpCombatEndReviveDowned();
 void MpApplyPlayerStatus(const NetPlayerStatusPayload* payload);
 void MpApplyGameOver(const NetGameOverPayload* payload);
 
+// Co-op: if the destination tile holds a live critter (not the mover),
+// truncate the destination to the last free tile on the straight line
+// toward it. Vanilla allows sprite stacking, and a stacked avatar breaks
+// targeting for both players — player walks must never resolve onto an
+// occupied tile. Returns the (possibly unchanged) destination.
+int MpTruncateDestinationAtOccupant(Object* mover, int tile, int elevation);
+
 } // namespace fallout
 
 #endif /* FALLOUT_MULTIPLAYER_H_ */

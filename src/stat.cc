@@ -17,6 +17,8 @@
 #include "item.h"
 #include "memory.h"
 #include "message.h"
+#include "multiplayer.h"
+#include "multiplayer_combat.h"
 #include "multiplayer_profile.h"
 #include "object.h"
 #include "party_member.h"
@@ -346,7 +348,19 @@ int critterGetStat(Object* critter, Stat stat)
             break;
         case STAT_ARMOR_CLASS:
             if (isInCombat()) {
-                if (_combat_whose_turn() != critter) {
+                bool applyUnspentApBonus;
+                if (gMpActive && gMpIsClient) {
+                    // Co-op: the vanilla whose-turn global (_combat_turn_obj)
+                    // is only advanced by the host's real combat loop, so it
+                    // never reflects the mirror's turn on the client. Use the
+                    // mirror's own turn state: vanilla suspends the bonus
+                    // during the critter's own turn.
+                    applyUnspentApBonus = !(gMpCombat.turnActive
+                        && gMpCombat.whoseTurn == gMpSession.localNetId);
+                } else {
+                    applyUnspentApBonus = (_combat_whose_turn() != critter);
+                }
+                if (applyUnspentApBonus) {
                     int armorClassBonus = critter->data.critter.combat.ap * unspentApBonus;
 
                     if (critter == gDude || MpProfileIsNetworkPlayer(critter)) {
@@ -374,7 +388,7 @@ int critterGetStat(Object* critter, Stat stat)
                             }
 
                             if (!hasWeapon) {
-                                armorClassBonus += critter->data.critter.combat.ap * perkGetRank(gDude, PERK_HTH_EVADE) * unspentApPerkBonus;
+                                armorClassBonus += critter->data.critter.combat.ap * perkGetRank(critter, PERK_HTH_EVADE) * unspentApPerkBonus;
                                 value += skillGetValue(critter, SKILL_UNARMED) / 12;
                             }
                         }

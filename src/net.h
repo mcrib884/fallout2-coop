@@ -90,6 +90,10 @@ typedef struct NetCombatStartRequestPayload {
 enum NetCombatCmdType {
     NET_COMBAT_CMD_MOVE = 1,
     NET_COMBAT_CMD_ATTACK = 2,
+    // Client->host: the acting client spent AP on inventory (open cost,
+    // item use). The host deducts it from its authoritative copy so the
+    // next state sync confirms it instead of refunding the client.
+    NET_COMBAT_CMD_INV_AP_COST = 3,
 };
 
 typedef struct NetCombatCmdPayload {

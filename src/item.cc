@@ -21,6 +21,7 @@
 #include "map.h"
 #include "memory.h"
 #include "message.h"
+#include "multiplayer.h"
 #include "object.h"
 #include "party_member.h"
 #include "perk.h"
@@ -1677,7 +1678,9 @@ int weaponGetRange(Object* critter, HitMode hitMode)
         }
 
         if (weaponGetAttackTypeForHitMode(weapon, hitMode) == ATTACK_TYPE_THROW) {
-            if (critter == gDude) {
+            // Co-op: the Heave Ho! throw-range bonus applies to every player's
+            // avatar, not just the host's dude.
+            if (critter == gDude || (gMpActive && MpIsCoopPlayerCritter(critter))) {
                 effectiveStrength = critterGetStat(critter, STAT_STRENGTH) + 2 * perkGetRank(critter, PERK_HEAVE_HO);
 
                 // SFALL: Fix for Heave Ho! increasing effective strength above
@@ -1745,8 +1748,11 @@ int weaponGetActionPointCost(Object* critter, HitMode hitMode, bool aiming)
                 actionPoints = weaponGetSecondaryActionPointCost(weapon);
             }
 
-            if (critter == gDude) {
-                if (traitIsSelected(TRAIT_FAST_SHOT)) {
+            // Co-op: FAST_SHOT and the attack-AP perks belong to every
+            // player's avatar, not just the host's dude — the host computes
+            // AP costs for remote players' attacks.
+            if (critter == gDude || (gMpActive && MpIsCoopPlayerCritter(critter))) {
+                if (traitIsSelectedFor(critter, TRAIT_FAST_SHOT)) {
                     if (weaponGetRange(critter, hitMode) > 2) {
                         actionPoints--;
                     }
@@ -1757,16 +1763,16 @@ int weaponGetActionPointCost(Object* critter, HitMode hitMode, bool aiming)
         }
     }
 
-    if (critter == gDude) {
+    if (critter == gDude || (gMpActive && MpIsCoopPlayerCritter(critter))) {
         AttackType attackType = weaponGetAttackTypeForHitMode(weapon, hitMode);
 
-        if (perkHasRank(gDude, PERK_BONUS_HTH_ATTACKS)) {
+        if (perkHasRank(critter, PERK_BONUS_HTH_ATTACKS)) {
             if (attackType == ATTACK_TYPE_MELEE || attackType == ATTACK_TYPE_UNARMED) {
                 actionPoints -= 1;
             }
         }
 
-        if (perkHasRank(gDude, PERK_BONUS_RATE_OF_FIRE)) {
+        if (perkHasRank(critter, PERK_BONUS_RATE_OF_FIRE)) {
             if (attackType == ATTACK_TYPE_RANGED) {
                 actionPoints -= 1;
             }

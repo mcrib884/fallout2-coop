@@ -1453,6 +1453,14 @@ int actionUseSkill(Object* user, Object* target, Skill skill)
     // skill in entire party, and this skill is his/her own best.
     Object* performer = hookResult.userOverridden ? user : gDude;
 
+    // Co-op: a remote player's skill use must roll against THEIR avatar —
+    // the vanilla default above would roll the host dude's skills. Their own
+    // party members must not substitute either: the remote player's skill
+    // check is their own.
+    if (user != gDude && gMpIsHost && gMpActive && MpCombatIsPlayerCritter(user)) {
+        performer = user;
+    }
+
     if (user == gDude && !hookResult.userOverridden) {
         Object* partyMember = partyMemberGetBestInSkill(skill);
 

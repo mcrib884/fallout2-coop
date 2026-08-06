@@ -1589,6 +1589,13 @@ static int inventoryMessageListFree()
 void inventoryOpen()
 {
     if (isInCombat()) {
+        if (gMpActive) {
+            debugFilePrint("MPINV: open attempt client=%d invenDudeIsDude=%d cost=%d ap=%d qp=%d",
+                gMpIsClient ? 1 : 0, _inven_dude == gDude ? 1 : 0,
+                inventoryGetInvenApCost(),
+                gDude != nullptr ? gDude->data.critter.combat.ap : -1,
+                gDude != nullptr ? perkGetRank(gDude, PERK_QUICK_POCKETS) : -1);
+        }
         if (gMpActive && gMpIsClient) {
             // Co-op: combat is host-authoritative. The vanilla whose-turn
             // global (_combat_turn_obj) is only ever advanced by the host's
@@ -1597,6 +1604,8 @@ void inventoryOpen()
             // mirror's own turn tracking: same rule as vanilla — only the
             // acting player opens inventory during combat.
             if (!gMpCombat.turnActive || gMpCombat.whoseTurn != gMpSession.localNetId) {
+                debugFilePrint("MPINV: open blocked (not client's turn) turnActive=%d whoseTurn=%u local=%u",
+                    gMpCombat.turnActive ? 1 : 0, gMpCombat.whoseTurn, gMpSession.localNetId);
                 return;
             }
         } else if (_combat_whose_turn() != _inven_dude) {
@@ -1612,6 +1621,10 @@ void inventoryOpen()
         if (_inven_dude == gDude) {
             int actionPointsRequired = inventoryGetInvenApCost();
             if (actionPointsRequired > 0 && actionPointsRequired > gDude->data.critter.combat.ap) {
+                if (gMpActive) {
+                    debugFilePrint("MPINV: open blocked (not enough AP) cost=%d ap=%d",
+                        actionPointsRequired, gDude->data.critter.combat.ap);
+                }
                 inventoryDisplayMessage(19); // You don't have enough action points to use inventory.
 
                 // NOTE: Uninline.
@@ -1621,12 +1634,24 @@ void inventoryOpen()
             }
 
             if (actionPointsRequired > 0) {
+                int apBefore = gDude->data.critter.combat.ap;
                 if (actionPointsRequired > gDude->data.critter.combat.ap) {
                     gDude->data.critter.combat.ap = 0;
                 } else {
                     gDude->data.critter.combat.ap -= actionPointsRequired;
                 }
                 interfaceRenderActionPoints(gDude->data.critter.combat.ap, _combat_free_move);
+                if (gMpActive && gMpIsClient) {
+                    // Co-op: the local deduction is prediction only — the
+                    // host must deduct from its authoritative copy or the
+                    // next state sync refunds the AP.
+                    MpCombatSendInventoryApCost(actionPointsRequired);
+                }
+                if (gMpActive) {
+                    debugFilePrint("MPINV: open consumed cost=%d apBefore=%d apAfter=%d client=%d",
+                        actionPointsRequired, apBefore, gDude->data.critter.combat.ap,
+                        gMpIsClient ? 1 : 0);
+                }
             }
         }
     }

@@ -35,6 +35,8 @@
 #include "map.h"
 #include "message.h"
 #include "mouse.h"
+#include "multiplayer.h"
+#include "multiplayer_combat.h"
 #include "object.h"
 #include "party_member.h"
 #include "perk.h"
@@ -1587,7 +1589,17 @@ static int inventoryMessageListFree()
 void inventoryOpen()
 {
     if (isInCombat()) {
-        if (_combat_whose_turn() != _inven_dude) {
+        if (gMpActive && gMpIsClient) {
+            // Co-op: combat is host-authoritative. The vanilla whose-turn
+            // global (_combat_turn_obj) is only ever advanced by the host's
+            // real combat loop, so it stays null on the client and the
+            // vanilla gate below would block inventory forever. Use the
+            // mirror's own turn tracking: same rule as vanilla — only the
+            // acting player opens inventory during combat.
+            if (!gMpCombat.turnActive || gMpCombat.whoseTurn != gMpSession.localNetId) {
+                return;
+            }
+        } else if (_combat_whose_turn() != _inven_dude) {
             return;
         }
     }

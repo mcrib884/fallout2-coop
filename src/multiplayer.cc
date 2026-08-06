@@ -11,8 +11,11 @@
 #include "actions.h"
 #include "art.h"
 #include "combat.h"
+#include "combat_defs.h"
 #include "color.h"
+#include "critter.h"
 #include "debug.h"
+#include "display_monitor.h"
 #include "game.h"
 #include "geometry.h"
 #include "input.h"
@@ -96,7 +99,7 @@ static void mpBuildMapSyncPayload(NetMapSyncPayload* payload);
 static bool mpSendProfile(ENetPeer* peer, uint8_t netId, uint32_t objNetId,
     const MpPlayerProfile& profile);
 static void mpBroadcastProfileToClients(uint8_t netId, uint32_t objNetId,
-    const MpPlayerProfile& profile);
+    const MpPlayerProfile& profile, bool skipOwner);
 static void mpApplyReceivedProfile(uint8_t netId, uint32_t objNetId,
     const MpPlayerProfile& profile);
 static void mpClientTryFinishMapSync();
@@ -435,8 +438,13 @@ static void mpHostAcceptProfile(MultiplayerPlayer* player, ENetPeer* peer,
         }
         mpSendProfileAck(peer, player->netId, streamId, player->profileGeneration, true);
         // Other clients must see the updated sheet (perks/items/stats) too.
+        // The owner is skipped: it just uploaded this exact generation, and
+        // the echo's inventory rebuild is pure waste. Host-side changes to
+        // this player's sheet are still broadcast back to it by the per-tick
+        // detect (mpHostSyncProfiles, skipOwner=false).
         mpBroadcastProfileToClients(player->netId, player->objNetId,
-            runtime != nullptr ? runtime->profile : profile);
+            runtime != nullptr ? runtime->profile : profile, /*skipOwner=*/true);
+        player->lastProfileBroadcastGeneration = player->profileGeneration;
         return;
     }
 
@@ -1623,13 +1631,21 @@ static void mpHostRemovePlayer(MultiplayerPlayer* player)
 }
 
 static void mpBroadcastProfileToClients(uint8_t netId, uint32_t objNetId,
-    const MpPlayerProfile& profile)
+    const MpPlayerProfile& profile, bool skipOwner)
 {
     for (int index = 0; index < NET_MAX_PLAYERS; index++) {
         MultiplayerPlayer* other = &gMpSession.players[index];
-        if (other->isConnected && other->isHandshaken && other->peer != nullptr) {
-            mpSendProfile(other->peer, netId, objNetId, profile);
+        if (!other->isConnected || !other->isHandshaken || other->peer == nullptr) {
+            continue;
         }
+        if (skipOwner && other->netId == netId) {
+            // The owner is the canonical source of this sheet — it just
+            // uploaded it. Echoing it back wastes a full transfer and forces
+            // a needless inventory rebuild on the sender. Host-side changes
+            // still reach the owner through the detect path (skipOwner=false).
+            continue;
+        }
+        mpSendProfile(other->peer, netId, objNetId, profile);
     }
 }
 
@@ -1743,8 +1759,21 @@ static void mpHostSyncProfiles()
         }
         strncpy(player->name, runtime->profile.name, NET_PEER_NAME_LENGTH - 1);
         player->name[NET_PEER_NAME_LENGTH - 1] = '\0';
-        mpBroadcastProfileToClients(netId, player->objNetId, runtime->profile);
-        debugFilePrint("MP: profile changed netId=%u generation=%u",
+        // Generation dedup: a client's own upload was already echoed by the
+        // accept path (lastProfileBroadcastGeneration). Only genuinely newer
+        // generations — host-side changes the clients cannot know about (XP
+        // grants, host-resolved drops, script rewards) — go out here. This
+        // breaks the upload->apply->detect->rebroadcast feedback loop.
+        if (runtime->profile.generation <= player->lastProfileBroadcastGeneration) {
+            debugFilePrint("MP: profile change suppressed netId=%u generation=%u lastBroadcast=%u",
+                netId, runtime->profile.generation,
+                player->lastProfileBroadcastGeneration);
+            continue;
+        }
+        mpBroadcastProfileToClients(netId, player->objNetId, runtime->profile,
+            /*skipOwner=*/false);
+        player->lastProfileBroadcastGeneration = runtime->profile.generation;
+        debugFilePrint("MP: profile changed netId=%u generation=%u broadcast",
             netId, runtime->profile.generation);
     }
 }
@@ -2504,6 +2533,20 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             MpApplyPlayerState((const NetPlayerStateUpdatePayload*)payload);
             break;
         }
+        case NET_PKT_PLAYER_STATUS: {
+            if (payloadLen != sizeof(NetPlayerStatusPayload)) {
+                return;
+            }
+            MpApplyPlayerStatus((const NetPlayerStatusPayload*)payload);
+            break;
+        }
+        case NET_PKT_GAME_OVER: {
+            if (payloadLen != sizeof(NetGameOverPayload)) {
+                return;
+            }
+            MpApplyGameOver((const NetGameOverPayload*)payload);
+            break;
+        }
         case NET_PKT_OBJECT_STATE_UPDATE: {
             if (payloadLen != sizeof(NetMapFullSyncObjectPayload)
                 || gMpSession.state != MP_STATE_CLIENT_PLAYING) {
@@ -2660,12 +2703,351 @@ void MpSendPlayerAction(uint8_t action, uint32_t targetNetId, int32_t tile, int3
 // Broadcast (host → clients)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// downed state (co-op: players are downed instead of killed)
+// ---------------------------------------------------------------------------
+
+// True when [critter] is a player-owned critter in the active co-op session.
+// Host: the host's own dude or any connected remote player's critter.
+// Client: only its own dude — the host is authoritative for everyone else.
+bool MpIsCoopPlayerCritter(const Object* critter)
+{
+    if (!gMpActive || critter == nullptr) {
+        return false;
+    }
+    if (gMpIsHost) {
+        if (critter == gDude) {
+            return true;
+        }
+        for (int i = 0; i < NET_MAX_PLAYERS; i++) {
+            const MultiplayerPlayer* p = &gMpSession.players[i];
+            if (p->isConnected && !p->isLocal && p->obj == critter) {
+                return true;
+            }
+        }
+        return false;
+    }
+    return critter == gDude;
+}
+
+bool MpPlayerIsDownedByNetId(uint8_t netId)
+{
+    if (netId == 0 || netId > NET_MAX_PLAYERS) {
+        return false;
+    }
+    return gMpSession.players[netId - 1].downed;
+}
+
+// The vanilla critterKill visual: pick the lying death frame, flatten the
+// critter, drop collision and kill its light. Shared by the host's downing
+// and the client's mirror so both render the body identically.
+static void mpApplyDownedVisual(Object* critter, bool refreshRect)
+{
+    int elevation = critter->elevation;
+
+    bool shouldChangeFid = false;
+    int fid;
+    if (critterIsProne(critter)) {
+        AnimationType current = animationTypeFromFid(critter->fid);
+        if (current == ANIM_FALL_BACK || current == ANIM_FALL_FRONT) {
+            bool back = false;
+            if (current == ANIM_FALL_BACK) {
+                back = true;
+            } else {
+                fid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, ANIM_FALL_FRONT_SF, weaponAnimationFromFid(critter->fid), critter->rotation + 1);
+                if (!artExists(fid)) {
+                    back = true;
+                }
+            }
+
+            if (back) {
+                fid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, ANIM_FALL_BACK_SF, weaponAnimationFromFid(critter->fid), critter->rotation + 1);
+            }
+
+            shouldChangeFid = true;
+        }
+    } else {
+        fid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, LAST_SF_DEATH_ANIM, weaponAnimationFromFid(critter->fid), critter->rotation + 1);
+        _obj_fix_violence_settings(&fid);
+        if (!artExists(fid)) {
+            fid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, ANIM_FALL_BACK_BLOOD_SF, weaponAnimationFromFid(critter->fid), critter->rotation + 1);
+            _obj_fix_violence_settings(&fid);
+        }
+
+        shouldChangeFid = true;
+    }
+
+    Rect updatedRect;
+    Rect tempRect;
+    objectGetRect(critter, &updatedRect);
+
+    if (shouldChangeFid) {
+        objectSetFrame(critter, 0, &updatedRect);
+        objectSetFid(critter, fid, &tempRect);
+        rectUnion(&updatedRect, &tempRect, &updatedRect);
+    }
+
+    if (!critterFlagCheck(critter->pid, CRITTER_FLAT)) {
+        critter->flags |= OBJECT_NO_BLOCK;
+        _obj_toggle_flat(critter, &tempRect);
+        rectUnion(&updatedRect, &tempRect, &updatedRect);
+    }
+
+    _obj_turn_off_light(critter, &tempRect);
+    rectUnion(&updatedRect, &tempRect, &updatedRect);
+
+    if (refreshRect) {
+        tileWindowRefreshRect(&updatedRect, elevation);
+    }
+}
+
+// Reverse of mpApplyDownedVisual: restore the standing fid, re-enable
+// collision and un-flatten. Shared by the host's revive and the client's
+// mirror so both render the get-up identically.
+static void mpRestoreStandingVisual(Object* critter, int32_t origFid, bool refreshRect)
+{
+    int elevation = critter->elevation;
+
+    Rect updatedRect;
+    Rect tempRect;
+    objectGetRect(critter, &updatedRect);
+
+    if (origFid != 0 && critter->fid != origFid) {
+        objectSetFrame(critter, 0, &updatedRect);
+        objectSetFid(critter, origFid, &tempRect);
+        rectUnion(&updatedRect, &tempRect, &updatedRect);
+    }
+
+    if (!critterFlagCheck(critter->pid, CRITTER_FLAT)) {
+        if ((critter->flags & OBJECT_FLAT) != 0) {
+            _obj_toggle_flat(critter, &tempRect);
+            rectUnion(&updatedRect, &tempRect, &updatedRect);
+        }
+        critter->flags &= ~OBJECT_NO_BLOCK;
+    }
+
+    _obj_turn_on_light(critter, &tempRect);
+    rectUnion(&updatedRect, &tempRect, &updatedRect);
+
+    if (refreshRect) {
+        tileWindowRefreshRect(&updatedRect, elevation);
+    }
+}
+
+// Host: broadcast the downed-state change for [netId] to every client.
+static void mpBroadcastPlayerStatus(uint8_t netId, bool downed, int32_t hp)
+{
+    if (!gMpIsHost || gMpSession.enetHost == nullptr || netId == 0) {
+        return;
+    }
+    NetPlayerStatusPayload payload;
+    payload.netId = netId;
+    payload.downed = downed ? 1 : 0;
+    payload.hp = hp;
+    NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE,
+        NET_PKT_PLAYER_STATUS, &payload, sizeof(payload));
+    debugFilePrint("MP: player status broadcast netId=%u downed=%d hp=%d",
+        netId, downed ? 1 : 0, hp);
+}
+
+// Host: every connected player is downed — the game is over. Broadcast and
+// exit through the normal quit path (mainLoop -> gameExit -> MpShutdown ->
+// main menu). The clients follow either via GAME_OVER or the disconnect.
+static void mpCheckAllPlayersDown()
+{
+    if (!gMpIsHost || !gMpActive) {
+        return;
+    }
+    int connected = 0;
+    int downedCount = 0;
+    for (int i = 0; i < NET_MAX_PLAYERS; i++) {
+        const MultiplayerPlayer* p = &gMpSession.players[i];
+        if (!p->isConnected) {
+            continue;
+        }
+        connected++;
+        if (p->downed) {
+            downedCount++;
+        }
+    }
+    if (connected > 0 && downedCount >= connected) {
+        debugFilePrint("MP: GAME OVER — all %d players downed", connected);
+        NetGameOverPayload payload;
+        payload.reason = 1;
+        NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE,
+            NET_PKT_GAME_OVER, &payload, sizeof(payload));
+        _game_user_wants_to_quit = GAME_QUIT_REQUEST_MAIN_MENU;
+    }
+}
+
+// A player critter was killed: convert the death into the downed state
+// instead. HP drops to 0 and DAM_DEAD is set, so every vanilla check treats
+// the critter as dead (turns skipped, untargetable, lying body) — but the
+// irreversible death side effects (party removal, script teardown, death
+// ending) never run, and the player revives when combat ends. Called from
+// critterKill on both sides; only the host decides the game-over check.
+void MpPlayerDown(Object* critter)
+{
+    if (!gMpActive || critter == nullptr || PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
+        return;
+    }
+
+    uint8_t netId = 0;
+    if (gMpIsHost) {
+        if (critter == gDude) {
+            netId = gMpSession.players[0].netId;
+        } else {
+            for (int i = 0; i < NET_MAX_PLAYERS; i++) {
+                MultiplayerPlayer* p = &gMpSession.players[i];
+                if (p->isConnected && !p->isLocal && p->obj == critter) {
+                    netId = p->netId;
+                    break;
+                }
+            }
+        }
+    } else if (critter == gDude) {
+        netId = gMpSession.localNetId;
+    }
+    if (netId == 0 || netId > NET_MAX_PLAYERS) {
+        debugFilePrint("MP: downed request without player netId critter=%p",
+            (void*)critter);
+        return;
+    }
+
+    MultiplayerPlayer* player = &gMpSession.players[netId - 1];
+    if (player->downed) {
+        debugFilePrint("MP: downed ignored (already downed) netId=%u", netId);
+        return;
+    }
+
+    player->downed = true;
+    player->downedOrigFid = critter->fid;
+    critter->data.critter.hp = 0;
+    critter->data.critter.combat.results |= DAM_DEAD;
+    mpApplyDownedVisual(critter, true);
+
+    debugFilePrint("MP: player downed netId=%u critter=%p tile=%d fid=0x%X",
+        netId, (void*)critter, critter->tile, critter->fid);
+
+    if (gMpIsHost) {
+        // The monitor message mirrors to every client while combat runs.
+        displayMonitorAddMessage("A player has been downed!");
+        mpBroadcastPlayerStatus(netId, true, 0);
+        mpCheckAllPlayersDown();
+    } else {
+        win_timed_msg("You have been downed!", COLOR_RED);
+    }
+}
+
+// Host: revive every downed player with 5% of their max HP. Runs when combat
+// ends successfully (called from the host's combat end path).
+void MpCombatEndReviveDowned()
+{
+    if (!gMpIsHost || !gMpActive) {
+        return;
+    }
+    for (int i = 0; i < NET_MAX_PLAYERS; i++) {
+        MultiplayerPlayer* p = &gMpSession.players[i];
+        if (!p->isConnected || !p->downed) {
+            continue;
+        }
+        Object* critter = p->obj != nullptr ? p->obj : gDude;
+        if (critter == nullptr) {
+            continue;
+        }
+
+        p->downed = false;
+        critter->data.critter.combat.results &= ~(DAM_DEAD | DAM_KNOCKED_OUT | DAM_KNOCKED_DOWN | DAM_LOSE_TURN);
+        int maxHp = critterGetStat(critter, STAT_MAXIMUM_HIT_POINTS);
+        int reviveHp = maxHp * 5 / 100;
+        if (reviveHp < 1) {
+            reviveHp = 1;
+        }
+        critter->data.critter.hp = reviveHp;
+        mpRestoreStandingVisual(critter, p->downedOrigFid, true);
+        p->downedOrigFid = 0;
+
+        debugFilePrint("MP: player revived netId=%u hp=%d/%d fid=0x%X",
+            p->netId, reviveHp, maxHp, critter->fid);
+        // The monitor message mirrors to every client while combat runs.
+        displayMonitorAddMessage("A downed player gets back up!");
+        mpBroadcastPlayerStatus(p->netId, false, reviveHp);
+    }
+}
+
+// Client: a player's downed state changed (host authoritative).
+void MpApplyPlayerStatus(const NetPlayerStatusPayload* s)
+{
+    if (!gMpIsClient || s == nullptr || s->netId == 0 || s->netId > NET_MAX_PLAYERS) {
+        return;
+    }
+    MultiplayerPlayer* p = &gMpSession.players[s->netId - 1];
+
+    if (s->netId != gMpSession.localNetId) {
+        // Remote player downed/revived — their visual arrives through the
+        // state broadcast; nothing to apply for a non-local avatar.
+        debugFilePrint("MP: player status remote netId=%u downed=%d hp=%d",
+            s->netId, s->downed, s->hp);
+        return;
+    }
+
+    Object* dude = gDude;
+    bool wasDowned = p->downed;
+    p->downed = s->downed != 0;
+
+    if (dude == nullptr) {
+        debugFilePrint("MP: player status self netId=%u downed=%d (no dude yet)",
+            s->netId, s->downed);
+        return;
+    }
+
+    if (s->downed) {
+        if (!wasDowned) {
+            p->downedOrigFid = dude->fid;
+            // Cancel any local prediction (walk SADs) — the body must not
+            // keep moving after the player drops.
+            reg_anim_clear(dude);
+        }
+        dude->data.critter.hp = 0;
+        dude->data.critter.combat.results |= DAM_DEAD;
+        // Guarantee the lying visual even if the unreliable state packet is
+        // lost — the host heartbeat re-sends it within 2s either way.
+        mpApplyDownedVisual(dude, true);
+        debugFilePrint("MP: player status self downed hp=0 fid=0x%X", dude->fid);
+        win_timed_msg("You have been downed!", COLOR_RED);
+    } else {
+        dude->data.critter.hp = s->hp;
+        dude->data.critter.combat.results &= ~(DAM_DEAD | DAM_KNOCKED_OUT | DAM_KNOCKED_DOWN | DAM_LOSE_TURN);
+        mpRestoreStandingVisual(dude, p->downedOrigFid, true);
+        p->downedOrigFid = 0;
+        interfaceRenderHitPoints(true);
+        debugFilePrint("MP: player status self revived hp=%d fid=0x%X", s->hp, dude->fid);
+        win_timed_msg("You get back up!", COLOR_WHITE);
+    }
+}
+
+// Client: the host ended the game (every player is downed). Return to the
+// main menu through the normal quit path.
+void MpApplyGameOver(const NetGameOverPayload* payload)
+{
+    if (!gMpIsClient || payload == nullptr) {
+        return;
+    }
+    debugFilePrint("MP: game over received — returning to main menu");
+    win_timed_msg("Everyone is downed — game over", COLOR_RED);
+    _game_user_wants_to_quit = GAME_QUIT_REQUEST_MAIN_MENU;
+}
+
+// ---------------------------------------------------------------------------
+// broadcast (host -> clients)
+// ---------------------------------------------------------------------------
+
+// Heartbeat: the per-player delta means an idle host broadcasts NOTHING.
 void MpBroadcastPlayerStates()
 {
     if (!gMpIsHost || gMpSession.enetHost == nullptr) {
         return;
     }
-    // Heartbeat: the per-player delta means an idle host broadcasts NOTHING.
     // Any silence longer than the client's host-death watchdog (12s) kicks
     // the client even when the host is fine (e.g. sitting in a modal that
     // still pumps, or simply idle). Force-broadcast every 2s so the client

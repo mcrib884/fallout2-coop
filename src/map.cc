@@ -352,9 +352,17 @@ bool isoDisable()
         return false;
     }
 
-    _scr_disable_critters();
-    tickersRemove(_dude_fidget);
-    tickersRemove(_object_animate);
+    // Co-op: keep the world simulation alive while a modal (inventory, loot,
+    // barter, ...) disables the isometric view. The remote player's walk SADs
+    // keep advancing (without _object_animate they freeze for the whole modal
+    // and then replay in a burst when it closes), critters keep roaming and
+    // the local player keeps fidgeting. Vanilla single-player keeps the
+    // frozen-world-behind-modal behavior.
+    if (!(gMpActive && gMpIsHost)) {
+        _scr_disable_critters();
+        tickersRemove(_dude_fidget);
+        tickersRemove(_object_animate);
+    }
     _gmouse_disable(0);
     textObjectsDisable();
 

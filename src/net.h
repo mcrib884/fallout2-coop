@@ -58,6 +58,8 @@ enum NetPacketType {
     NET_PKT_COMBAT_END_DENIED = 30,
     NET_PKT_COMBAT_ENDED = 31,
     NET_PKT_COMBAT_MESSAGE = 32,
+    NET_PKT_PLAYER_STATUS = 33,   // host -> clients: player downed/revived
+    NET_PKT_GAME_OVER = 34,       // host -> clients: all players downed
 };
 
 enum NetUnreliablePacketType {
@@ -99,6 +101,24 @@ typedef struct NetCombatCmdPayload {
     int32_t tile;         // move destination
     int32_t elevation;
 } NetCombatCmdPayload;
+
+// Host -> clients: a player's downed state changed (co-op players are downed
+// instead of killed; they revive when combat ends). Reliable. The visual
+// (lying fid, hp, combat results) also flows through the player-state
+// broadcast; this packet is the authoritative marker + canonical HP so the
+// client can gate the vanilla death scene and render the body even if a
+// state packet is lost.
+typedef struct NetPlayerStatusPayload {
+    uint8_t netId;  // the player whose state changed
+    uint8_t downed; // 1 = downed, 0 = revived
+    int32_t hp;     // canonical HP after the change (0 when downed, 5% of max when revived)
+} NetPlayerStatusPayload;
+
+// Host -> clients: every connected player is downed — the game is over.
+// Both sides return to the main menu through the normal quit path.
+typedef struct NetGameOverPayload {
+    uint8_t reason; // reserved for future reasons
+} NetGameOverPayload;
 
 #pragma pack(push, 1)
 typedef struct NetPacketHeader {

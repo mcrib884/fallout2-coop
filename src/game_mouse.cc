@@ -1039,7 +1039,13 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
     }
 
     if ((mouseState & MOUSE_EVENT_RIGHT_BUTTON_DOWN) != 0) {
-        if ((mouseState & MOUSE_EVENT_RIGHT_BUTTON_REPEAT) == 0 && (gGameMouseHexCursor->flags & OBJECT_HIDDEN) == 0) {
+        // The vanilla hidden-hex gate prevents cycling while the cursor is
+        // covered by a modal — but a co-op client's hex cursor can be left
+        // hidden by the combat wait posture, which would strand the player
+        // in the previous cursor mode (e.g. crosshair) with no way back to
+        // move. The client is never in a modal here, so allow the cycle.
+        if ((mouseState & MOUSE_EVENT_RIGHT_BUTTON_REPEAT) == 0
+            && ((gMpActive && gMpIsClient) || (gGameMouseHexCursor->flags & OBJECT_HIDDEN) == 0)) {
             gameMouseCycleMode();
         }
         return;

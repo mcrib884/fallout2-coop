@@ -18,6 +18,14 @@ build/
 data/mp_models/
 data/SAVEGAME/
 
+# Co-op: local dev scripts (build + two-instance test launcher) — local only
+build.bat
+build.ps1
+build_launcher.bat
+build_launcher.sh
+launch_two_instances.bat
+launch_two_instances.ps1
+
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
 

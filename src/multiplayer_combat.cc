@@ -796,7 +796,12 @@ int MpCombatClientTurnLoop()
     interfaceRenderActionPoints(gMpCombat.turnAp, _combat_free_move);
     gameUiEnable();
     // The mirror keeps the wait cursor from combat begin; the player's own
-    // turn must show the normal move cursor or clicks feel dead.
+    // turn must show the normal move cursor or clicks feel dead. The vanilla
+    // dude-turn runs _gmouse_3d_refresh() here — without it the 3D cursor
+    // objects (hex highlight) stay hidden from the wait posture and the
+    // right-click mode cycle is disabled (vanilla gate), stranding the
+    // player in whatever cursor mode the previous turn left behind.
+    _gmouse_3d_refresh();
     gameMouseSetCursor(MOUSE_CURSOR_ARROW);
     gameMouseSetMode(GAME_MOUSE_MODE_MOVE);
     gCombatState |= COMBAT_STATE_PLAYER_TURN;

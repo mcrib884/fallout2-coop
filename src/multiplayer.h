@@ -46,6 +46,10 @@ typedef struct MultiplayerPlayer {
     bool isHandshaken;
     bool profileReady;
     uint32_t profileGeneration;
+    // host: highest profile generation already broadcast for this player
+    // (echoes of the owner's own uploads and detect-path broadcasts both
+    // advance it; a broadcast is only sent when the generation is newer).
+    uint32_t lastProfileBroadcastGeneration;
     bool hasInitialState;
     // delta-sync bookkeeping (host)
     int32_t lastTile, lastX, lastY, lastRotation, lastFid, lastFrame, lastElevation;
@@ -53,6 +57,12 @@ typedef struct MultiplayerPlayer {
     bool hasLastState;
     int32_t lastSafeTile, lastSafeElevation, lastSafeRotation;
     bool hasSafePosition;
+    // Downed state (co-op: players don't die — they get downed and revive
+    // when combat ends). downedOrigFid is the standing fid restored on
+    // revive. Valid on the host for every player and on the client for the
+    // local player only.
+    bool downed;
+    int32_t downedOrigFid;
 } MultiplayerPlayer;
 
 typedef struct MultiplayerSession {
@@ -159,6 +169,18 @@ void MpClearNetIdMappings();
 // vote hook (called from map.cc)
 int MpOnMapTransitionRequested(MapTransition* transition);
 int MpOnNetworkedPlayerTransitionRequested(Object* obj, MapTransition* transition);
+
+// downed state (co-op: players are downed instead of killed)
+bool MpIsCoopPlayerCritter(const Object* critter);
+bool MpPlayerIsDownedByNetId(uint8_t netId);
+// Convert a would-be player death into the downed state (called from
+// critterKill on both sides; the host decides the game-over check).
+void MpPlayerDown(Object* critter);
+// Host: revive every downed player with 5% of max HP (combat ended).
+void MpCombatEndReviveDowned();
+// apply (client)
+void MpApplyPlayerStatus(const NetPlayerStatusPayload* payload);
+void MpApplyGameOver(const NetGameOverPayload* payload);
 
 } // namespace fallout
 

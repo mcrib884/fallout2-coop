@@ -3141,6 +3141,22 @@ static void combatAttemptEnd()
             if (critter != gDude) {
                 int critterTeam = critter->data.critter.combat.team;
                 Object* critterWhoHitMe = critter->data.critter.combat.whoHitMe;
+                // Co-op: a player (or a dead critter, or a critter whose
+                // hitter is a player/dead) is never a "hostile creature"
+                // blocking the end request. Players are humans — the AI
+                // want-to-stop check is meaningless for them, and a teammate
+                // hit by friendly fire must not lock the combat forever.
+                if (gMpIsHost && gMpActive) {
+                    if (MpCombatGetCritterPlayerNetId(critter) != 0
+                        || (critter->data.critter.combat.results & DAM_DEAD) != 0) {
+                        continue;
+                    }
+                    if (critterWhoHitMe != nullptr
+                        && (MpCombatGetCritterPlayerNetId(critterWhoHitMe) != 0
+                            || (critterWhoHitMe->data.critter.combat.results & DAM_DEAD) != 0)) {
+                        continue;
+                    }
+                }
                 if (critterTeam != dudeTeam || (critterWhoHitMe != nullptr && critterWhoHitMe->data.critter.combat.team == critterTeam)) {
                     if (!_combatai_want_to_stop(critter)) {
                         messageListItem.num = 103;
@@ -3158,6 +3174,19 @@ static void combatAttemptEnd()
             if (critter != gDude) {
                 int critterTeam = critter->data.critter.combat.team;
                 Object* critterWhoHitMe = critter->data.critter.combat.whoHitMe;
+                // Co-op: same exclusions as the combatant scan above — a
+                // player or dead critter never "wants to join" as a hostile.
+                if (gMpIsHost && gMpActive) {
+                    if (MpCombatGetCritterPlayerNetId(critter) != 0
+                        || (critter->data.critter.combat.results & DAM_DEAD) != 0) {
+                        continue;
+                    }
+                    if (critterWhoHitMe != nullptr
+                        && (MpCombatGetCritterPlayerNetId(critterWhoHitMe) != 0
+                            || (critterWhoHitMe->data.critter.combat.results & DAM_DEAD) != 0)) {
+                        continue;
+                    }
+                }
                 if (critterTeam != dudeTeam || (critterWhoHitMe != nullptr && critterWhoHitMe->data.critter.combat.team == critterTeam)) {
                     if (_combatai_want_to_join(critter)) {
                         messageListItem.num = 103;
@@ -3444,7 +3473,12 @@ static int _combat_turn(Object* obj, bool reloadedDuringCombat)
     }
 
     if ((gDude->data.critter.combat.results & DAM_DEAD) != 0) {
-        return -1;
+        // Co-op: a downed host player ends their turn, but the fight goes
+        // on — the remaining players and NPCs can still win it and revive
+        // the downed player when combat ends. Vanilla ends the combat here.
+        if (!(gMpIsHost && gMpActive)) {
+            return -1;
+        }
     }
 
     if (obj != gDude || _combat_elev == gDude->elevation) {
@@ -3525,11 +3559,25 @@ static bool _combat_should_end()
     for (index = 0; index < _list_com; index++) {
         Object* critter = _combat_list[index];
         if (critter->data.critter.combat.team != team) {
+            // Co-op: a player is never a hostile creature for the end check.
+            if (gMpIsHost && gMpActive && MpCombatGetCritterPlayerNetId(critter) != 0) {
+                continue;
+            }
             break;
         }
 
         Object* critterWhoHitMe = critter->data.critter.combat.whoHitMe;
         if (critterWhoHitMe != nullptr && critterWhoHitMe->data.critter.combat.team == team) {
+            // Co-op: friendly fire between players (or a player hitting an
+            // NPC) must not make a teammate count as hostile for the end
+            // check — the vanilla rule exists for AI hostility, not for
+            // human players. A dead hitter never turns anyone hostile.
+            if (gMpIsHost && gMpActive
+                && (MpCombatGetCritterPlayerNetId(critter) != 0
+                    || MpCombatGetCritterPlayerNetId(critterWhoHitMe) != 0
+                    || (critterWhoHitMe->data.critter.combat.results & DAM_DEAD) != 0)) {
+                continue;
+            }
             break;
         }
     }
@@ -3574,6 +3622,10 @@ static bool mpCombatShouldEndNow()
         }
 
         if (critter->data.critter.combat.team != team) {
+            // Co-op: a player is never a hostile creature for the end check.
+            if (gMpIsHost && gMpActive && MpCombatGetCritterPlayerNetId(critter) != 0) {
+                continue;
+            }
             break;
         }
 
@@ -3581,6 +3633,13 @@ static bool mpCombatShouldEndNow()
         if (critterWhoHitMe != nullptr
             && (critterWhoHitMe->data.critter.combat.results & DAM_DEAD) == 0
             && critterWhoHitMe->data.critter.combat.team == team) {
+            // Co-op: see _combat_should_end — friendly fire between players
+            // (or a player hitting an NPC) never counts as hostility.
+            if (gMpIsHost && gMpActive
+                && (MpCombatGetCritterPlayerNetId(critter) != 0
+                    || MpCombatGetCritterPlayerNetId(critterWhoHitMe) != 0)) {
+                continue;
+            }
             break;
         }
     }
@@ -3665,6 +3724,17 @@ void _combat(CombatStartData* csd)
                     debugFilePrint("MPCOMBAT: sequence combatant pid=0x%X tile=%d netId=%u",
                         combatant->pid, combatant->tile, remoteNetId);
                     if (remoteNetId != 0) {
+                        // Co-op: a downed player cannot act — skip their turn
+                        // entirely. Vanilla skips DAM_DEAD critters inside
+                        // _combat_turn, but the remote path never reaches it;
+                        // without this skip the downed client would get a
+                        // phantom TURN_START and an instant empty turn.
+                        if (MpPlayerIsDownedByNetId(remoteNetId)) {
+                            debugFilePrint("MPCOMBAT: remote turn skipped netId=%u (downed)",
+                                remoteNetId);
+                            _gcsd = nullptr;
+                            continue;
+                        }
                         if (MpCombatHostRemoteTurn(combatant, remoteNetId) == -1) {
                             break;
                         }
@@ -3753,6 +3823,13 @@ void _combat(CombatStartData* csd)
                 scriptHooks_CombatTurnCombatEnd(_combat_turn_obj);
             }
             _combat_over();
+            // Co-op: the fight ended successfully — downed players get back
+            // up with 5% of their max HP. Skipped when the game is already
+            // over (quit request set: all players were downed).
+            if (gMpIsHost && gMpActive
+                && _game_user_wants_to_quit == GAME_QUIT_REQUEST_NONE) {
+                MpCombatEndReviveDowned();
+            }
             scriptsExecMapUpdateProc();
         }
 
@@ -5227,6 +5304,18 @@ static void _damage_object(Object* target, int damage, bool animated, int hitUni
     }
 
     if ((target->data.critter.combat.results & DAM_DEAD) != 0) {
+        // Co-op: a player critter is downed instead of killed. The vanilla
+        // death side effects below (destroy proc, item purge, script and
+        // party teardown, death hooks) would make the downed state
+        // unrecoverable. The downed conversion keeps the critter lying with
+        // DAM_DEAD set (vanilla treats it as dead) and revives it when
+        // combat ends. Note: this is the second death funnel — the first is
+        // critterKill (critter.cc), used by explosions and script kills.
+        if (gMpActive && MpIsCoopPlayerCritter(target)) {
+            MpPlayerDown(target);
+            return;
+        }
+
         scriptSetObjects(target->sid, target->data.critter.combat.whoHitMe, nullptr);
         scriptExecProc(target->sid, SCRIPT_PROC_DESTROY);
         itemDestroyAllHidden(target);

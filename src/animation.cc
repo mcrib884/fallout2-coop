@@ -443,7 +443,24 @@ static int _anim_free_slot(AnimationRequestOptions requestOptions)
                 v2++;
             }
         } else if (v1 == -1 && ((requestOptions & ANIMATION_REQUEST_PING) == ANIMATION_REQUEST_NONE || (animationSequence->flags & ANIM_SEQ_0x10) == ANIM_SEQ_NONE)) {
-            v1 = index;
+            // Co-op: a "complete" sequence may still be referenced by live
+            // (non-ANIM_COMPLETE) SADs — e.g. the host's modal preview
+            // animation and a remote player's walk can rotate through the
+            // same slot. Reusing such a slot poisons the live SAD: its
+            // sequence is now ANIM_COMPLETE, so animationRunSequence returns
+            // -1 forever and the SAD becomes a zombie (never advances, never
+            // compacts). Only hand out slots no live SAD references.
+            bool slotHasLiveSad = false;
+            for (int sadIndex = 0; sadIndex < gAnimationCurrentSad; sadIndex++) {
+                AnimationSad* sad = &(gAnimationSads[sadIndex]);
+                if (sad->step != ANIM_COMPLETE && sad->animationSequenceIndex == index) {
+                    slotHasLiveSad = true;
+                    break;
+                }
+            }
+            if (!slotHasLiveSad) {
+                v1 = index;
+            }
         }
     }
 
@@ -2850,6 +2867,17 @@ void _object_animate()
         sad->animationTimestamp = time;
 
         if (animationRunSequence(sad->animationSequenceIndex) == -1) {
+            // Co-op: a sequence that is already ANIM_COMPLETE can never
+            // produce another step — this SAD would spin as a zombie forever
+            // (never advancing, never compacting). That state only arises
+            // when a live SAD's sequence slot was reused by another actor
+            // (see _anim_free_slot). Complete the SAD so the bookkeeping
+            // drains; a legitimately waiting SAD's sequence is never
+            // ANIM_COMPLETE.
+            if (sad->animationSequenceIndex >= 0
+                && gAnimationSequences[sad->animationSequenceIndex].step == ANIM_COMPLETE) {
+                sad->step = ANIM_COMPLETE;
+            }
             continue;
         }
 
@@ -3081,6 +3109,12 @@ int _dude_move_to_tile(int tile, int elevation, int actionPoints, bool* isRun)
         return -1;
     }
 
+    // Co-op: a downed player cannot move — the body stays lying until
+    // combat ends and the player revives.
+    if (gMpActive && (gDude->data.critter.combat.results & DAM_DEAD) != 0) {
+        return -1;
+    }
+
     bool run = lastDestination == tile;
     lastDestination = tile;
     if (isRun != nullptr) {
@@ -3109,6 +3143,11 @@ int _dude_move_to_tile(int tile, int elevation, int actionPoints, bool* isRun)
 int _dude_run_to_tile(int tile, int elevation, int actionPoints)
 {
     if (!hexGridTileIsValid(tile) || !elevationIsValid(elevation)) {
+        return -1;
+    }
+
+    // Co-op: a downed player cannot move (see _dude_move_to_tile).
+    if (gMpActive && (gDude->data.critter.combat.results & DAM_DEAD) != 0) {
         return -1;
     }
 

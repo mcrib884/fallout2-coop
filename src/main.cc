@@ -623,7 +623,12 @@ static void mainLoop()
             _main_game_paused = 0;
         }
 
-        if ((gDude->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) != 0) {
+        // Co-op: players don't die — they get downed (revived when combat
+        // ends). The vanilla death scene must never fire for a downed
+        // player; the real game-over (all players downed) is decided by the
+        // host and routed through the normal quit path.
+        if (!gMpActive
+            && (gDude->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) != 0) {
             endgameSetupDeathEnding(ENDGAME_DEATH_ENDING_REASON_DEATH);
             _main_show_death_scene = 1;
             _game_user_wants_to_quit = GAME_QUIT_REQUEST_MAIN_MENU;

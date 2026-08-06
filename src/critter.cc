@@ -18,6 +18,7 @@
 #include "item.h"
 #include "map.h"
 #include "memory.h"
+#include "multiplayer.h"
 #include "multiplayer_profile.h"
 #include "message.h"
 #include "object.h"
@@ -846,6 +847,16 @@ static int _critterClearObjDrugs(Object* obj, void* data)
 void critterKill(Object* critter, AnimationType anim, bool refreshRect)
 {
     if (PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
+        return;
+    }
+
+    // Co-op: player critters don't die — they get downed. The vanilla death
+    // side effects (party removal, death hooks, script teardown, the death
+    // ending) must not run; MpPlayerDown applies the downed marker, the
+    // lying visual, the status broadcast and the all-players-down game-over
+    // check, and the player revives with 5% HP when combat ends.
+    if (gMpActive && MpIsCoopPlayerCritter(critter)) {
+        MpPlayerDown(critter);
         return;
     }
 

@@ -17,6 +17,7 @@
 #include "combat.h"
 #include "content_config.h"
 #include "critter.h"
+#include "debug.h"
 #include "draw.h"
 #include "game.h"
 #include "game_sound.h"
@@ -26,6 +27,8 @@
 #include "kb.h"
 #include "map_edge.h"
 #include "mouse.h"
+#include "multiplayer.h"
+#include "multiplayer_combat.h"
 #include "object.h"
 #include "party_member.h"
 #include "proto.h"
@@ -334,6 +337,21 @@ static bool gameMouseLongPressUsesLootActionForCritter(Object* object);
 
 static void customMouseModeFrmsInit();
 
+static bool gameMouseSendPlayerAction(uint8_t action, Object* target, uint8_t skill = 0xFF)
+{
+    if (!gMpActive || !gMpIsClient || target == nullptr) {
+        return false;
+    }
+
+    uint32_t targetNetId = MpGetObjNetId(target);
+    if (targetNetId == 0) {
+        return false;
+    }
+
+    MpSendPlayerAction(action, targetNetId, -1, target->elevation, skill);
+    return true;
+}
+
 static bool gameMouseLongPressUsesLootActionForCritter(Object* object)
 {
     constexpr int kExpandedActionMenuFrmHeight = 302;
@@ -517,11 +535,45 @@ int _gmouse_is_scrolling()
     return isScrolling;
 }
 
+// Co-op diagnostics for the "invisible cursor on the client after a turn"
+// bug. Dumps the full cursor state so the log shows exactly which flag or
+// fid leaves nothing on screen. Only active on a co-op client in combat.
+static void mpCursorDebugDump(const char* why)
+{
+    if (!gMpActive || !gMpIsClient || !MpCombatIsActive()) {
+        return;
+    }
+    debugFilePrint("MPCURSOR[%s]: cursor=%d mode=%d gmouseEnabled=%d uiDisabled=%d hexHidden=%d hexFid=0x%X hexTile=%d hexElev=%d bounceHidden=%d elev=%d",
+        why,
+        gGameMouseCursor,
+        gGameMouseMode,
+        _gmouse_enabled ? 1 : 0,
+        gameUiIsDisabled() ? 1 : 0,
+        (gGameMouseHexCursor->flags & OBJECT_HIDDEN) != 0 ? 1 : 0,
+        gGameMouseHexCursor->fid,
+        gGameMouseHexCursor->tile,
+        gGameMouseHexCursor->elevation,
+        (gGameMouseBouncingCursor->flags & OBJECT_HIDDEN) != 0 ? 1 : 0,
+        gElevation);
+}
+
 // 0x44B684 gmouse_bk_process
 void gameMouseRefresh()
 {
     if (!gGameMouseInitialized) {
         return;
+    }
+
+    // Co-op diagnostics: periodic cursor-state dump (1s) while a co-op client
+    // is in combat, so the invisible-cursor steady state is captured no matter
+    // how it got there.
+    if (gMpActive && gMpIsClient && MpCombatIsActive()) {
+        static unsigned int gMpCursorLastDumpTick = 0;
+        unsigned int now = getTicks();
+        if (gMpCursorLastDumpTick == 0 || getTicksBetween(now, gMpCursorLastDumpTick) >= 1000) {
+            gMpCursorLastDumpTick = now;
+            mpCursorDebugDump("tick");
+        }
     }
 
     int mouseX;
@@ -949,6 +1001,12 @@ bool gameMouseClickOnInterfaceBar()
 // 0x44BFA8 gmouse_handle_event
 void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
 {
+    // Co-op: while the local player initiated a map-change vote they are
+    // frozen on the exit grid and can't issue move commands.
+    if (gMpSession.initiatorFrozen) {
+        return;
+    }
+
     if (!gGameMouseInitialized) {
         return;
     }
@@ -996,7 +1054,37 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                 actionPoints = -1;
             }
 
-            if (gPressedPhysicalKeys[SDL_SCANCODE_LSHIFT] || gPressedPhysicalKeys[SDL_SCANCODE_RSHIFT]) {
+            bool shiftHeld = gPressedPhysicalKeys[SDL_SCANCODE_LSHIFT]
+                || gPressedPhysicalKeys[SDL_SCANCODE_RSHIFT];
+
+            if (gMpActive && gMpIsClient) {
+                // Co-op client: execute the exact same movement locally for
+                // immediate response, then send the semantic command so the
+                // host can apply it to the authoritative player object.
+                int tile = _check_move(&actionPoints);
+                if (tile != -1) {
+                    bool isRun = false;
+                    bool usesMoveMode = shiftHeld
+                        ? settings.preferences.running
+                        : !settings.preferences.running;
+                    int movementRc = usesMoveMode
+                        ? _dude_move_to_tile(tile, gDude->elevation, actionPoints, &isRun)
+                        : _dude_run_to_tile(tile, gDude->elevation, actionPoints);
+                    if (!usesMoveMode) {
+                        isRun = true;
+                    }
+                    if (movementRc == 0) {
+                        // The repeated-destination rule lives in the shared
+                        // movement helper, so prediction and the host receive
+                        // the same walk/run decision.
+                        MpSendPlayerAction(isRun ? NET_PLAYER_ACTION_RUN : NET_PLAYER_ACTION_WALK,
+                            0, tile, gDude->elevation);
+                    }
+                }
+                return;
+            }
+
+            if (shiftHeld) {
                 if (settings.preferences.running) {
                     _dude_move(actionPoints);
                     return;
@@ -1015,6 +1103,48 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
         if (gGameMouseMode == GAME_MOUSE_MODE_ARROW) {
             Object* targetObj = gameMouseGetObjectUnderCursor(-1, true, gElevation);
             if (targetObj != nullptr) {
+                if (gMpActive && gMpIsClient) {
+                    switch (FID_TYPE(targetObj->fid)) {
+                    case OBJ_TYPE_ITEM:
+                        gameMouseSendPlayerAction(NET_PLAYER_ACTION_PICK_UP, targetObj);
+                        break;
+                    case OBJ_TYPE_CRITTER:
+                        if (targetObj == gDude) {
+                            gameMouseSendPlayerAction(NET_PLAYER_ACTION_ROTATE, targetObj);
+                        } else if (_obj_action_can_talk_to(targetObj)) {
+                            if (isInCombat()) {
+                                if (gameMouseSendPlayerAction(NET_PLAYER_ACTION_INSPECT, targetObj)) {
+                                    if (objectExamine(gDude, targetObj) == -1) {
+                                        objectLookAt(gDude, targetObj);
+                                    }
+                                }
+                            } else {
+                                gameMouseSendPlayerAction(NET_PLAYER_ACTION_TALK, targetObj);
+                            }
+                        } else {
+                            gameMouseSendPlayerAction(NET_PLAYER_ACTION_LOOT, targetObj);
+                        }
+                        break;
+                    case OBJ_TYPE_SCENERY:
+                        if (_obj_action_can_use(targetObj)) {
+                            gameMouseSendPlayerAction(NET_PLAYER_ACTION_TOUCH, targetObj);
+                        } else if (gameMouseSendPlayerAction(NET_PLAYER_ACTION_INSPECT, targetObj)) {
+                            if (objectExamine(gDude, targetObj) == -1) {
+                                objectLookAt(gDude, targetObj);
+                            }
+                        }
+                        break;
+                    case OBJ_TYPE_WALL:
+                        if (gameMouseSendPlayerAction(NET_PLAYER_ACTION_INSPECT, targetObj)) {
+                            if (objectExamine(gDude, targetObj) == -1) {
+                                objectLookAt(gDude, targetObj);
+                            }
+                        }
+                        break;
+                    }
+                    return;
+                }
+
                 int objectType = FID_TYPE(targetObj->fid);
                 switch (objectType) {
                 case OBJ_TYPE_WALL:
@@ -1128,6 +1258,15 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
             || gGameMouseMode == GAME_MOUSE_MODE_USE_SCIENCE
             || gGameMouseMode == GAME_MOUSE_MODE_USE_REPAIR) {
             Object* object = gameMouseGetObjectUnderCursor(-1, true, gElevation);
+            if (gMpActive && gMpIsClient) {
+                if (object != nullptr) {
+                    gameMouseSendPlayerAction(NET_PLAYER_ACTION_USE_SKILL, object,
+                        (uint8_t)gGameMouseModeSkills[gGameMouseMode - FIRST_GAME_MOUSE_MODE_SKILL]);
+                }
+                gameMouseSetCursor(MOUSE_CURSOR_NONE);
+                gameMouseSetMode(GAME_MOUSE_MODE_MOVE);
+                return;
+            }
             if (object == nullptr || actionUseSkill(gDude, object, gGameMouseModeSkills[gGameMouseMode - FIRST_GAME_MOUSE_MODE_SKILL]) != -1) {
                 gameMouseSetCursor(MOUSE_CURSOR_NONE);
                 gameMouseSetMode(GAME_MOUSE_MODE_MOVE);
@@ -1253,7 +1392,83 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                         tileWindowRefreshRect(&cursorRect, gElevation);
                     }
 
-                    switch (actionMenuItems[actionIndex]) {
+                    if (gMpActive && gMpIsClient) {
+                        switch (actionMenuItems[actionIndex]) {
+                        case GAME_MOUSE_ACTION_MENU_ITEM_INVENTORY:
+                            inventoryOpenUseItemOn(targetObj);
+                            break;
+                        case GAME_MOUSE_ACTION_MENU_ITEM_LOOK:
+                            if (gameMouseSendPlayerAction(NET_PLAYER_ACTION_INSPECT, targetObj)) {
+                                if (objectExamine(gDude, targetObj) == -1) {
+                                    objectLookAt(gDude, targetObj);
+                                }
+                            }
+                            break;
+                        case GAME_MOUSE_ACTION_MENU_ITEM_ROTATE:
+                            gameMouseSendPlayerAction(NET_PLAYER_ACTION_ROTATE, targetObj);
+                            break;
+                        case GAME_MOUSE_ACTION_MENU_ITEM_TALK:
+                            gameMouseSendPlayerAction(NET_PLAYER_ACTION_TALK, targetObj);
+                            break;
+                        case GAME_MOUSE_ACTION_MENU_ITEM_USE:
+                            switch (FID_TYPE(targetObj->fid)) {
+                            case OBJ_TYPE_SCENERY:
+                                gameMouseSendPlayerAction(NET_PLAYER_ACTION_TOUCH, targetObj);
+                                break;
+                            case OBJ_TYPE_CRITTER:
+                                if (gameMouseLongPressUsesLootActionForCritter(targetObj)) {
+                                    gameMouseSendPlayerAction(NET_PLAYER_ACTION_USE_SKILL, targetObj, SKILL_STEAL);
+                                } else {
+                                    gameMouseSendPlayerAction(NET_PLAYER_ACTION_LOOT, targetObj);
+                                }
+                                break;
+                            default:
+                                gameMouseSendPlayerAction(NET_PLAYER_ACTION_PICK_UP, targetObj);
+                                break;
+                            }
+                            break;
+                        case GAME_MOUSE_ACTION_MENU_ITEM_USE_SKILL: {
+                            int rc = skilldexOpen();
+                            Skill skill = SKILL_INVALID;
+                            switch (rc) {
+                            case SKILLDEX_RC_SNEAK:
+                                skill = SKILL_SNEAK;
+                                break;
+                            case SKILLDEX_RC_LOCKPICK:
+                                skill = SKILL_LOCKPICK;
+                                break;
+                            case SKILLDEX_RC_STEAL:
+                                skill = SKILL_STEAL;
+                                break;
+                            case SKILLDEX_RC_TRAPS:
+                                skill = SKILL_TRAPS;
+                                break;
+                            case SKILLDEX_RC_FIRST_AID:
+                                skill = SKILL_FIRST_AID;
+                                break;
+                            case SKILLDEX_RC_DOCTOR:
+                                skill = SKILL_DOCTOR;
+                                break;
+                            case SKILLDEX_RC_SCIENCE:
+                                skill = SKILL_SCIENCE;
+                                break;
+                            case SKILLDEX_RC_REPAIR:
+                                skill = SKILL_REPAIR;
+                                break;
+                            default:
+                                break;
+                            }
+                            if (skill != SKILL_INVALID) {
+                                gameMouseSendPlayerAction(NET_PLAYER_ACTION_USE_SKILL, targetObj, (uint8_t)skill);
+                            }
+                            break;
+                        }
+                        case GAME_MOUSE_ACTION_MENU_ITEM_PUSH:
+                            gameMouseSendPlayerAction(NET_PLAYER_ACTION_PUSH, targetObj);
+                            break;
+                        }
+                    } else {
+                        switch (actionMenuItems[actionIndex]) {
                     case GAME_MOUSE_ACTION_MENU_ITEM_INVENTORY:
                         inventoryOpenUseItemOn(targetObj);
                         break;
@@ -1331,6 +1546,7 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                         actionPush(gDude, targetObj);
                         break;
                     }
+                    }
                 }
             }
         }
@@ -1344,6 +1560,8 @@ int gameMouseSetCursor(int cursor)
         return -1;
     }
 
+    int mpCursorPrevForLog = gGameMouseCursor;
+
     if (cursor != MOUSE_CURSOR_ARROW && cursor == gGameMouseCursor && (gGameMouseCursor < 25 || gGameMouseCursor >= 27)) {
         return -1;
     }
@@ -1352,6 +1570,7 @@ int gameMouseSetCursor(int cursor)
     int fid = buildFid(OBJ_TYPE_INTERFACE, gGameMouseCursorFrmIds[cursor], 0, 0, 0);
     Art* mouseCursorFrm = artLock(fid, &mouseCursorFrmHandle);
     if (mouseCursorFrm == nullptr) {
+        mpCursorDebugDump("setCursorArtFail");
         return -1;
     }
 
@@ -1403,6 +1622,10 @@ int gameMouseSetCursor(int cursor)
 
     gGameMouseCursor = cursor;
     gGameMouseCursorFrmHandle = mouseCursorFrmHandle;
+
+    if (cursor != mpCursorPrevForLog) {
+        mpCursorDebugDump("setCursor");
+    }
 
     return 0;
 }
@@ -1484,6 +1707,8 @@ void gameMouseSetMode(int mode)
     gGameMouseMode = mode;
     _gmouse_3d_hover_test = false;
     _gmouse_3d_last_move_time = getTicks();
+
+    mpCursorDebugDump("setMode");
 
     tileWindowRefreshRect(&rect, gElevation);
 
@@ -1606,6 +1831,8 @@ void gameMouseObjectsShow()
         return;
     }
 
+    mpCursorDebugDump("objectsShow");
+
     int refreshFlags = 0;
 
     Rect rect1;
@@ -1669,6 +1896,8 @@ void gameMouseObjectsHide()
     if (!gGameMouseInitialized) {
         return;
     }
+
+    mpCursorDebugDump("objectsHide");
 
     int refreshFlags = 0;
 
@@ -2433,21 +2662,37 @@ int gameMouseHandleScrolling(int x, int y, int cursor)
         return -1;
     }
 
+    // Only edge-scroll while the pointer is actually inside the window. The
+    // GNW mouse position is clipped to the screen rect, so a cursor parked
+    // outside the window reports the clamped edge position and would keep
+    // scrolling the camera indefinitely. SDL clears MOUSE_FOCUS the moment
+    // the pointer leaves the window.
+    if (gSdlWindow != nullptr
+        && (SDL_GetWindowFlags(gSdlWindow) & SDL_WINDOW_MOUSE_FOCUS) == 0) {
+        return -1;
+    }
+
     int flags = 0;
 
-    if (x <= _scr_size.left) {
+    // Edge-scroll band width in pixels. Vanilla only fires when the cursor is
+    // EXACTLY on the screen edge (a 1px sliver — nearly impossible to hit
+    // reliably, and the cursor is often clipped a pixel inside). Widen it so
+    // a comfortable band around the border scrolls the camera.
+    const int scrollMargin = 12;
+
+    if (x <= _scr_size.left + scrollMargin) {
         flags |= SCROLLABLE_W;
     }
 
-    if (x >= _scr_size.right) {
+    if (x >= _scr_size.right - scrollMargin) {
         flags |= SCROLLABLE_E;
     }
 
-    if (y <= _scr_size.top) {
+    if (y <= _scr_size.top + scrollMargin) {
         flags |= SCROLLABLE_N;
     }
 
-    if (y >= _scr_size.bottom) {
+    if (y >= _scr_size.bottom - scrollMargin) {
         flags |= SCROLLABLE_S;
     }
 

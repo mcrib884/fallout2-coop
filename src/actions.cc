@@ -20,6 +20,8 @@
 #include "item.h"
 #include "map.h"
 #include "memory.h"
+#include "multiplayer.h"
+#include "multiplayer_combat.h"
 #include "object.h"
 #include "party_member.h"
 #include "perk.h"
@@ -1310,6 +1312,12 @@ int _action_skill_use(Skill skill)
     if (skill == SKILL_SNEAK) {
         reg_anim_clear(gDude);
         dudeToggleState(DUDE_STATE_SNEAKING);
+        // Co-op client: report the toggle to the host so the avatar's sneak
+        // state mirrors the local one — the host resolves Silent Death and
+        // sneak-aware checks against the avatar.
+        if (gMpIsClient && gMpActive) {
+            MpSendPlayerAction(NET_PLAYER_ACTION_USE_SKILL, MpGetObjNetId(gDude), 0, 0, SKILL_SNEAK);
+        }
         return 0;
     }
 
@@ -1426,7 +1434,16 @@ int actionUseSkill(Object* user, Object* target, Skill skill)
 
         return -1;
     case SKILL_SNEAK:
-        dudeToggleState(DUDE_STATE_SNEAKING);
+        // Co-op: a remote player's sneak toggle must flip THEIR avatar's
+        // proto flag — the vanilla path would toggle the host dude's state.
+        if (user != gDude && gMpIsHost && gMpActive && MpCombatIsPlayerCritter(user)) {
+            Proto* proto;
+            if (protoGetProto(user->pid, &proto) == 0) {
+                proto->critter.data.flags ^= (1 << DUDE_STATE_SNEAKING);
+            }
+        } else {
+            dudeToggleState(DUDE_STATE_SNEAKING);
+        }
         return 0;
     default:
         debugPrint("\nskill_use: invalid skill used.");
@@ -1850,7 +1867,7 @@ int _compute_explosion_damage(int min, int max, Object* defender, int* knockback
 // 0x413330
 int actionTalk(Object* obj, Object* critter)
 {
-    if (obj != gDude) {
+    if (obj == nullptr || critter == nullptr) {
         return -1;
     }
 
@@ -1860,7 +1877,7 @@ int actionTalk(Object* obj, Object* critter)
 
     AnimationType anim = animationTypeFromFid(gDude->fid);
     if (anim == ANIM_WALK || anim == ANIM_RUNNING) {
-        reg_anim_clear(gDude);
+        reg_anim_clear(obj);
     }
 
     if (isInCombat()) {

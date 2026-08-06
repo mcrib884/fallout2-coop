@@ -86,7 +86,7 @@ struct UISettings {
     // Speed of various UI transition animations. 1.0 represents vanilla speeds.
     double anim_speed = 1.0;
 
-    int skip_opening_movies = 0;
+    int skip_opening_movies = 1;
     bool display_karma_changes = false;
     bool display_bonus_damage = false;
     bool numbers_in_dialogue = false;

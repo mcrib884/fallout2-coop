@@ -18,6 +18,7 @@
 #include "item.h"
 #include "map.h"
 #include "memory.h"
+#include "multiplayer_profile.h"
 #include "message.h"
 #include "object.h"
 #include "party_member.h"
@@ -238,6 +239,11 @@ void critterProtoDataCopy(CritterProtoData* dest, CritterProtoData* src)
 // 0x42D0A8 critter_name
 char* critterGetName(Object* obj)
 {
+    const char* profileName = MpProfileGetName(obj);
+    if (profileName != nullptr) {
+        return const_cast<char*>(profileName);
+    }
+
     if (obj == gDude) {
         return gDudeName;
     }
@@ -728,6 +734,24 @@ int killsGetByType(KillType killType)
     }
 
     return 0;
+}
+
+void killsGetAll(int* values, int count)
+{
+    if (values == nullptr || count <= 0) {
+        return;
+    }
+    int copyCount = count < KILL_TYPE_DEFAULT_COUNT ? count : KILL_TYPE_DEFAULT_COUNT;
+    memcpy(values, gKillsByType, sizeof(int) * copyCount);
+}
+
+void killsSetAll(const int* values, int count)
+{
+    if (values == nullptr || count <= 0) {
+        return;
+    }
+    int copyCount = count < KILL_TYPE_DEFAULT_COUNT ? count : KILL_TYPE_DEFAULT_COUNT;
+    memcpy(gKillsByType, values, sizeof(int) * copyCount);
 }
 
 // 0x42D8C0 critter_kill_count_load
@@ -1279,6 +1303,16 @@ bool dudeIsSneaking()
     }
 
     return false;
+}
+
+int critterGetSneakWorking()
+{
+    return _sneak_working;
+}
+
+void critterSetSneakWorking(int value)
+{
+    _sneak_working = value != 0;
 }
 
 // 0x42E424 critter_wake_up

@@ -6,6 +6,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <string>
+#include <time.h>
+
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 #include "memory.h"
 #include "platform_compat.h"
@@ -31,6 +36,12 @@ static bool debugBufferDisabled = false;
 // 0x51DEF8 fd
 static FILE* _fd = nullptr;
 
+static std::string debugCrashLogPath = "coop_debug.log";
+static bool debugCrashLogInitialized = false;
+static uint32_t gDebugLogStartTick = 0;
+static uint32_t gDebugLogLastTick = 0;
+static uint32_t gDebugLogLine = 0;
+
 // 0x51DEFC curx
 static int _curx = 0;
 
@@ -39,6 +50,44 @@ static int _cury = 0;
 
 // 0x51DF04 debug_func
 static DebugPrintProc* gDebugPrintProc = nullptr;
+
+#if defined(_WIN32)
+static LONG WINAPI debugUnhandledExceptionFilter(EXCEPTION_POINTERS* exceptionInfo)
+{
+    FILE* stream = compat_fopen(debugCrashLogPath.c_str(), "at");
+    if (stream != nullptr) {
+        fprintf(stream, "\n=== FALLOUT2COOP FATAL EXCEPTION ===\n");
+        if (exceptionInfo != nullptr && exceptionInfo->ExceptionRecord != nullptr) {
+            fprintf(stream, "code=0x%08lX address=%p flags=0x%08lX\n",
+                exceptionInfo->ExceptionRecord->ExceptionCode,
+                exceptionInfo->ExceptionRecord->ExceptionAddress,
+                exceptionInfo->ExceptionRecord->ExceptionFlags);
+        } else {
+            fprintf(stream, "exception details unavailable\n");
+        }
+
+        if (exceptionInfo != nullptr && exceptionInfo->ContextRecord != nullptr) {
+            fprintf(stream, "module_base=%p context_rip=%p context_rsp=%p context_rbp=%p context_eflags=0x%08llX\n",
+                (void*)GetModuleHandleW(nullptr),
+                (void*)exceptionInfo->ContextRecord->Rip,
+                (void*)exceptionInfo->ContextRecord->Rsp,
+                (void*)exceptionInfo->ContextRecord->Rbp,
+                (unsigned long long)exceptionInfo->ContextRecord->EFlags);
+        }
+
+        void* frames[32];
+        USHORT frameCount = CaptureStackBackTrace(0, ARRAYSIZE(frames), frames, nullptr);
+        fprintf(stream, "stack_frames=%u\n", frameCount);
+        for (USHORT index = 0; index < frameCount; index++) {
+            fprintf(stream, "  #%u %p\n", index, frames[index]);
+        }
+        fflush(stream);
+        fclose(stream);
+    }
+
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif
 
 void debugModeInit(const char* debugMode)
 {
@@ -189,6 +238,77 @@ int debugPrint(const char* format, ...)
 #endif
 
     return rc;
+}
+
+void debugInstallCrashHandler(const char* logPath)
+{
+    if (logPath != nullptr && logPath[0] != '\0') {
+        debugCrashLogPath = logPath;
+    }
+
+    if (!debugCrashLogInitialized) {
+        FILE* stream = compat_fopen(debugCrashLogPath.c_str(), "wt");
+        if (stream != nullptr) {
+            fclose(stream);
+        }
+        debugCrashLogInitialized = true;
+    }
+
+    debugFilePrint("=== fallout2coop session started ===");
+#if defined(_WIN32)
+    debugFilePrint("module_base=%p", (void*)GetModuleHandleW(nullptr));
+#endif
+
+#if defined(_WIN32)
+    SetUnhandledExceptionFilter(debugUnhandledExceptionFilter);
+#endif
+}
+
+void debugFilePrint(const char* format, ...)
+{
+    if (format == nullptr) {
+        return;
+    }
+
+    FILE* stream = compat_fopen(debugCrashLogPath.c_str(), "at");
+    if (stream == nullptr) {
+        return;
+    }
+
+    uint32_t now = SDL_GetTicks();
+    if (gDebugLogStartTick == 0) {
+        gDebugLogStartTick = now;
+        gDebugLogLastTick = now;
+    }
+    uint32_t elapsed = now - gDebugLogStartTick;
+    uint32_t delta = now - gDebugLogLastTick;
+    gDebugLogLastTick = now;
+    gDebugLogLine++;
+
+    time_t rawTime;
+    time(&rawTime);
+    struct tm* timeInfo = localtime(&rawTime);
+    char wallClock[32];
+    wallClock[0] = '\0';
+    if (timeInfo != nullptr) {
+        strftime(wallClock, sizeof(wallClock), "%H:%M:%S", timeInfo);
+    }
+
+    fprintf(stream, "[%s +%02u:%02u.%03u dt=%04u #%u] ",
+        wallClock,
+        (unsigned)(elapsed / 60000),
+        (unsigned)((elapsed / 1000) % 60),
+        (unsigned)(elapsed % 1000),
+        (unsigned)delta,
+        (unsigned)gDebugLogLine);
+
+    va_list args;
+    va_start(args, format);
+    vfprintf(stream, format, args);
+    va_end(args);
+    fputc('\n', stream);
+    fflush(stream);
+    fclose(stream);
 }
 
 static void debugFlushBuffer()

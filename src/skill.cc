@@ -16,6 +16,7 @@
 #include "interface.h"
 #include "item.h"
 #include "message.h"
+#include "multiplayer_profile.h"
 #include "object.h"
 #include "palette.h"
 #include "party_member.h"
@@ -263,16 +264,18 @@ int skillGetValue(Object* critter, Skill skill)
 
     int value = skillDescription->defaultValue + skillDescription->statModifier * statValueSum + baseValue * skillDescription->baseValueMult;
 
-    if (critter == gDude) {
-        if (skillIsTagged(skill)) {
+    if (critter == gDude || MpProfileIsNetworkPlayer(critter)) {
+        if (MpProfileIsTagged(critter, skill)) {
             value += baseValue * skillDescription->baseValueMult;
 
-            if (!perkGetRank(critter, PERK_TAG) || skill != gTaggedSkills[3]) {
+            if (!perkGetRank(critter, PERK_TAG)
+                || !(MpProfileFindRuntimeByObject(critter) != nullptr
+                    && MpProfileFindRuntimeByObject(critter)->profile.taggedSkills[3] == skill)) {
                 value += 20;
             }
         }
 
-        value += traitGetSkillModifier(skill);
+        value += traitGetSkillModifierFor(critter, skill);
         value += perkGetSkillModifier(critter, skill);
         value += skillGetGameDifficultyModifier(skill);
     }
@@ -299,7 +302,7 @@ int skillGetDefaultValue(Skill skill)
 // 0x4AA6BC
 int skillAdd(Object* obj, Skill skill)
 {
-    if (obj != gDude) {
+    if (obj != gDude && !MpProfileIsNetworkPlayer(obj)) {
         return -5;
     }
 
@@ -307,7 +310,7 @@ int skillAdd(Object* obj, Skill skill)
         return -5;
     }
 
-    int unspentSp = pcGetStat(PC_STAT_UNSPENT_SKILL_POINTS);
+    int unspentSp = MpProfileGetPcStat(obj, PC_STAT_UNSPENT_SKILL_POINTS);
     if (unspentSp <= 0) {
         return -4;
     }
@@ -329,7 +332,7 @@ int skillAdd(Object* obj, Skill skill)
         return -4;
     }
 
-    int rc = pcSetStat(PC_STAT_UNSPENT_SKILL_POINTS, unspentSp - requiredSp);
+    int rc = MpProfileSetPcStat(obj, PC_STAT_UNSPENT_SKILL_POINTS, unspentSp - requiredSp);
     if (rc == 0) {
         proto->critter.data.skills[skill] += 1;
     }
@@ -340,7 +343,7 @@ int skillAdd(Object* obj, Skill skill)
 // 0x4AA7F8
 int skillAddForce(Object* obj, Skill skill)
 {
-    if (obj != gDude) {
+    if (obj != gDude && !MpProfileIsNetworkPlayer(obj)) {
         return -5;
     }
 
@@ -388,7 +391,7 @@ int skillsGetCost(int skillValue)
 // 0x4AA8C4
 int skillSub(Object* critter, Skill skill)
 {
-    if (critter != gDude) {
+    if (critter != gDude && !MpProfileIsNetworkPlayer(critter)) {
         return -5;
     }
 
@@ -396,7 +399,7 @@ int skillSub(Object* critter, Skill skill)
         return -5;
     }
 
-    int unspentSp = pcGetStat(PC_STAT_UNSPENT_SKILL_POINTS);
+    int unspentSp = MpProfileGetPcStat(critter, PC_STAT_UNSPENT_SKILL_POINTS);
     int skillValue = skillGetValue(critter, skill) - 1;
 
     Proto* proto;
@@ -412,18 +415,18 @@ int skillSub(Object* critter, Skill skill)
     int requiredSp = skillsGetCost(skillValue);
 
     int newUnspentSp = unspentSp + requiredSp;
-    int rc = pcSetStat(PC_STAT_UNSPENT_SKILL_POINTS, newUnspentSp);
+    int rc = MpProfileSetPcStat(critter, PC_STAT_UNSPENT_SKILL_POINTS, newUnspentSp);
     if (rc != 0) {
         return rc;
     }
 
     proto->critter.data.skills[skill] -= 1;
 
-    if (skillIsTagged(skill)) {
+    if (MpProfileIsTagged(critter, skill)) {
         int oldSkillCost = skillsGetCost(skillValue);
         int newSkillCost = skillsGetCost(skillGetValue(critter, skill));
         if (oldSkillCost != newSkillCost) {
-            rc = pcSetStat(PC_STAT_UNSPENT_SKILL_POINTS, newUnspentSp - 1);
+            rc = MpProfileSetPcStat(critter, PC_STAT_UNSPENT_SKILL_POINTS, newUnspentSp - 1);
             if (rc != 0) {
                 return rc;
             }
@@ -444,7 +447,7 @@ int skillSubForce(Object* obj, Skill skill)
 {
     Proto* proto;
 
-    if (obj != gDude) {
+    if (obj != gDude && !MpProfileIsNetworkPlayer(obj)) {
         return -5;
     }
 

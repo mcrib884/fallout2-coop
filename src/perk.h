@@ -24,6 +24,8 @@ int perkGetFrmId(Perk perk);
 void perkAddEffect(Object* critter, Perk perk);
 void perkRemoveEffect(Object* critter, Perk perk);
 int perkGetSkillModifier(Object* critter, Skill skill);
+void perksGetRanks(int* ranks, int count);
+void perksSetRanks(const int* ranks, int count);
 
 // Returns true if critter has at least one rank in specified perk.
 //

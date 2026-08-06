@@ -1352,10 +1352,6 @@ void programWindowSetTitle(const char* title)
 #ifdef _WIN32
     if (_GNW95_title_mutex == INVALID_HANDLE_VALUE) {
         _GNW95_title_mutex = CreateMutexA(nullptr, TRUE, title);
-        if (GetLastError() != ERROR_SUCCESS) {
-            _GNW95_already_running = true;
-            return;
-        }
     }
 #endif
 

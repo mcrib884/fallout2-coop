@@ -2169,6 +2169,48 @@ int protoGetProto(int pid, Proto** protoPtr)
     return _proto_load_pid(pid, protoPtr);
 }
 
+int protoRemove(int pid)
+{
+    if (pid < 0 || PID_TYPE(pid) < OBJ_TYPE_ITEM || PID_TYPE(pid) > OBJ_TYPE_MISC) {
+        debugFilePrint("PROTO: remove failed pid=0x%X", pid);
+        return -1;
+    }
+
+    ProtoList* protoList = &_protoLists[PID_TYPE(pid)];
+    ProtoListExtent* previousExtent = nullptr;
+    ProtoListExtent* extent = protoList->head;
+    while (extent != nullptr) {
+        for (int index = 0; index < extent->length; index++) {
+            if (extent->proto[index] == nullptr || extent->proto[index]->pid != pid) {
+                continue;
+            }
+
+            internal_free(extent->proto[index]);
+            for (int shift = index; shift + 1 < extent->length; shift++) {
+                extent->proto[shift] = extent->proto[shift + 1];
+            }
+            extent->length--;
+            if (extent->length == 0) {
+                if (previousExtent != nullptr) {
+                    previousExtent->next = extent->next;
+                } else {
+                    protoList->head = extent->next;
+                }
+                if (protoList->tail == extent) {
+                    protoList->tail = previousExtent;
+                }
+                internal_free(extent);
+                protoList->length--;
+            }
+            return 0;
+        }
+        previousExtent = extent;
+        extent = extent->next;
+    }
+
+    return -1;
+}
+
 // 0x4A21DC proto_new_id
 static int _proto_new_id(int type)
 {

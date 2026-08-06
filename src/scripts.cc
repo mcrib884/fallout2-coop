@@ -27,6 +27,7 @@
 #include "input.h"
 #include "memory.h"
 #include "message.h"
+#include "multiplayer.h"
 #include "object.h"
 #include "party_member.h"
 #include "platform_compat.h"
@@ -426,6 +427,10 @@ int gameTimeScheduleUpdateEvent()
 // 0x4A3620 gtime_q_process
 int gameTimeEventProcess(Object* obj, void* data)
 {
+    if (gMpIsClient) {
+        return 0;
+    }
+
     int movie_index;
     int stopProcess;
 
@@ -958,7 +963,7 @@ static void _doBkProcesses()
     }
 
     int currentTime = _get_bk_time();
-    if (gScriptsEnabled) {
+    if (gScriptsEnabled && !gMpIsClient) {
         gLastBackgroundProcessTime = currentTime;
 
         // NOTE: There is a loop at 0x4A3C64, consisting of one iteration, going
@@ -970,7 +975,7 @@ static void _doBkProcesses()
 
     scriptWindowUpdateAll();
 
-    if (gScriptsEnabled && gCritterProcessingEnabled) {
+    if (gScriptsEnabled && !gMpIsClient && gCritterProcessingEnabled) {
         // SFALL: Fix to prevent the execution of critter_p_proc and game events
         // when playing movies.
         if (!_gdialogActive() && !gameMovieIsPlaying()) {
@@ -983,6 +988,9 @@ static void _doBkProcesses()
 // 0x4A3CA0
 static void _script_chk_critters()
 {
+    // Co-op: clients don't run critter scripts — host owns the world.
+    if (gMpIsClient) return;
+
     if (!_gdialogActive() && !isInCombat()) {
         ScriptList* scriptList;
         ScriptListExtent* scriptListExtent;
@@ -1026,6 +1034,9 @@ static void _script_chk_critters()
 // 0x4A3D84
 static void _script_chk_timed_events()
 {
+    // Co-op: clients don't run timed event scripts.
+    if (gMpIsClient) return;
+
     int currentTime = _get_bk_time();
 
     bool shouldProcessQueue = false;
@@ -1242,6 +1253,11 @@ static int scriptsHandleElevatorRequest(bool closeDoorsBeforeMapTransition)
 // 0x4A3FB4
 int scriptsHandleRequests()
 {
+    if (gMpIsClient) {
+        scriptsClearPendingRequests();
+        return 0;
+    }
+
     if (gScriptsRequests == 0) {
         return 0;
     }
@@ -1252,6 +1268,10 @@ int scriptsHandleRequests()
             gScriptsRequests &= ~(SCRIPT_REQUEST_0x0400 | SCRIPT_REQUEST_COMBAT);
             memcpy(&gScriptsCSD, &gScriptsRequestedCSD, sizeof(gScriptsCSD));
 
+            if (gMpActive) {
+                debugFilePrint("MPCOMBAT: host script combat request flag=0x%X",
+                    (gScriptsRequests & SCRIPT_REQUEST_0x40) != 0 ? 1 : 0);
+            }
             if ((gScriptsRequests & SCRIPT_REQUEST_0x40) != 0) {
                 gScriptsRequests &= ~SCRIPT_REQUEST_0x40;
                 _combat(nullptr);
@@ -1311,6 +1331,11 @@ int scriptsHandleRequests()
 // 0x4A43A0
 int _scripts_check_state_in_combat()
 {
+    if (gMpIsClient) {
+        scriptsClearPendingRequests();
+        return 0;
+    }
+
     if ((gScriptsRequests & SCRIPT_REQUEST_ELEVATOR) != 0) {
         // do not close elevator doors before map transition
         scriptsHandleElevatorRequest(false);
@@ -1489,6 +1514,10 @@ void _script_make_path(char* path)
 int scriptExecProc(int sid, int proc)
 {
     assert(proc >= 0 && proc < SCRIPT_PROC_COUNT);
+
+    if (gMpIsClient) {
+        return 0;
+    }
 
     if (!gScriptsEnabled) {
         return -1;
@@ -2791,6 +2820,10 @@ void _scr_spatials_disable()
 // 0x4A6610
 bool scriptsExecSpatialProc(Object* object, int tile, int elevation)
 {
+    if (gMpIsClient) {
+        return false;
+    }
+
     if (object == gGameMouseBouncingCursor) {
         return false;
     }
@@ -2848,6 +2881,10 @@ bool scriptsExecSpatialProc(Object* object, int tile, int elevation)
 // 0x4A677C
 int scriptsExecStartProc()
 {
+    if (gMpIsClient) {
+        return 0;
+    }
+
     // note: this could do weird things if scripts/object are deleted while running these procs
     for (int scriptListIndex = 0; scriptListIndex < SCRIPT_TYPE_COUNT; scriptListIndex++) {
         ScriptList* scriptList = &(gScriptLists[scriptListIndex]);
@@ -2867,12 +2904,18 @@ int scriptsExecStartProc()
 // 0x4A67DC
 void scriptsExecMapEnterProc()
 {
+    // Co-op: clients don't run map enter procs.
+    if (gMpIsClient) return;
+
     scriptsExecMapUpdateScripts(SCRIPT_PROC_MAP_ENTER);
 }
 
 // 0x4A67E4
 void scriptsExecMapUpdateProc()
 {
+    // Co-op: clients don't run map update procs.
+    if (gMpIsClient) return;
+
     scriptsExecMapUpdateScripts(SCRIPT_PROC_MAP_UPDATE);
 }
 
@@ -2880,6 +2923,9 @@ void scriptsExecMapUpdateProc()
 // 0x4A67EC
 void scriptsExecMapUpdateScripts(int proc)
 {
+    // Co-op: clients don't run map update scripts — host owns them.
+    if (gMpIsClient) return;
+
     // SFALL: Run global scripts.
     sfall_gl_scr_exec_map_update_scripts(proc);
 
@@ -2946,6 +2992,9 @@ void scriptsExecMapUpdateScripts(int proc)
 // 0x4A69A0
 void scriptsExecMapExitProc()
 {
+    // Co-op: clients don't run map exit procs.
+    if (gMpIsClient) return;
+
     scriptsExecMapUpdateScripts(SCRIPT_PROC_MAP_EXIT);
 }
 

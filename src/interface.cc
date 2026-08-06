@@ -28,6 +28,8 @@
 #include "kb.h"
 #include "memory.h"
 #include "mouse.h"
+#include "multiplayer.h"
+#include "multiplayer_combat.h"
 #include "object.h"
 #include "platform_compat.h"
 #include "proto.h"
@@ -1375,7 +1377,15 @@ void _intface_use_item()
             gameMouseSetCursor(MOUSE_CURSOR_CROSSHAIR);
             gameMouseSetMode(GAME_MOUSE_MODE_CROSSHAIR);
             if (!isInCombat()) {
-                _combat(nullptr);
+                if (gMpIsClient && gMpActive) {
+                    // Co-op: request combat from the host instead of starting
+                    // a local sequence the client must not own. No target:
+                    // the host falls back to its own ordering.
+                    MpCombatSendStartRequest(nullptr);
+                } else {
+                    debugFilePrint("MPCOMBAT: host weapon combat entry");
+                    _combat(nullptr);
+                }
             }
         }
     } else if (_proto_action_can_use_on(ptr->item->pid)) {

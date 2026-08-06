@@ -25,6 +25,8 @@
 #include "mainmenu.h"
 #include "map.h"
 #include "mouse.h"
+#include "multiplayer.h"
+#include "multiplayer_menu.h"
 #include "object.h"
 #include "palette.h"
 #include "platform_compat.h"
@@ -103,6 +105,7 @@ int falloutMain(int argc, char** argv)
 
     if (mainMenuWindowInit() == 0) {
         bool done = false;
+        int characterSelectorRc = 0;
         while (!done) {
             keyboardReset();
             _gsound_background_play_level_music(gameSoundGetMusicOverride("main_menu_music", "07desert"), GSOUND_LIMIT_BEFORE);
@@ -126,9 +129,11 @@ int falloutMain(int argc, char** argv)
                 gameMoviePlay(MOVIE_CREDITS, 0);
                 break;
             case MAIN_MENU_NEW_GAME:
+mp_run_new_game:
                 mainMenuWindowHide(true);
                 mainMenuWindowFree();
-                if (characterSelectorOpen() == 2) {
+                characterSelectorRc = characterSelectorOpen();
+                if (characterSelectorRc == 2) {
                     gameMoviePlay(MOVIE_ELDER, GAME_MOVIE_STOP_MUSIC);
                     randomSeedPrerandom(-1);
 
@@ -140,8 +145,18 @@ int falloutMain(int argc, char** argv)
                     configGetString(&gContentConfig, CONTENT_CONFIG_START_SECTION, "map", &mapName, nullptr);
 
                     char* mapNameCopy = compat_strdup(mapName != nullptr ? mapName : _mainMap);
-                    _main_load_new(mapNameCopy);
+                    int loadNewRc = _main_load_new(mapNameCopy);
                     free(mapNameCopy);
+
+                    if (loadNewRc != 0) {
+                        gMpPendingHostStartAfterLoad = 0;
+                        gMpPendingClientStartAfterLoad = 0;
+                        gMpPendingClientAddress[0] = '\0';
+                        main_unload_new();
+                        main_reset_system();
+                        mainMenuWindowInit();
+                        break;
+                    }
 
                     // SFALL: AfterNewGameStartHook.
                     sfall_gl_scr_exec_start_proc();
@@ -149,6 +164,40 @@ int falloutMain(int argc, char** argv)
                     sfallOnAfterNewGame();
                     sfallOnAfterGameStarted();
                     gGameLoaded = true;
+
+                    // Co-op: if the player reached this block through the
+                    // Multiplayer → Host flow, start the host now that the
+                    // starting map has been loaded and gMapHeader.index set.
+                    int pendingHostStart = gMpPendingHostStartAfterLoad;
+                    gMpPendingHostStartAfterLoad = 0;
+                    int pendingClientStart = gMpPendingClientStartAfterLoad;
+                    char pendingClientAddress[sizeof(gMpPendingClientAddress)];
+                    strncpy(pendingClientAddress, gMpPendingClientAddress,
+                        sizeof(pendingClientAddress) - 1);
+                    pendingClientAddress[sizeof(pendingClientAddress) - 1] = '\0';
+                    gMpPendingClientStartAfterLoad = 0;
+                    gMpPendingClientAddress[0] = '\0';
+                    debugFilePrint("MAIN: new-game load complete pendingHostStart=%d map=%d",
+                        pendingHostStart, gMapHeader.index);
+                    if (pendingHostStart == 1) {
+                        // Fresh character: persist it as the session's base
+                        // save before hosting (co-op framework: always host
+                        // from a save).
+                        int coopSaveRc = lsgQuickSaveGameCoop();
+                        debugFilePrint("MAIN: new-game coop save rc=%d", coopSaveRc);
+                        if (MpHostStart(gMapHeader.index) != 0) {
+                            win_timed_msg("Could not start co-op hosting", COLOR_RED);
+                        }
+                    }
+                    if (pendingClientStart == 1) {
+                        // Fresh character: persist it as the session's base
+                        // save before joining.
+                        int coopSaveRc = lsgQuickSaveGameCoop();
+                        debugFilePrint("MAIN: new-game coop save rc=%d", coopSaveRc);
+                        if (MpClientConnect(pendingClientAddress, NET_DEFAULT_PORT) != 0) {
+                            win_timed_msg("Could not join co-op session", COLOR_RED);
+                        }
+                    }
 
                     mainLoop();
                     paletteFadeTo(gPaletteWhite);
@@ -163,12 +212,17 @@ int falloutMain(int argc, char** argv)
                         showDeath();
                         _main_show_death_scene = 0;
                     }
+                } else {
+                    gMpPendingHostStartAfterLoad = 0;
+                    gMpPendingClientStartAfterLoad = 0;
+                    gMpPendingClientAddress[0] = '\0';
                 }
 
                 mainMenuWindowInit();
 
                 break;
             case MAIN_MENU_LOAD_GAME:
+mp_run_load_game:
                 if (1) {
                     int win = windowCreate(0, 0, screenGetWidth(), screenGetHeight(), COLOR_BLACK, WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
                     mainMenuWindowHide(true);
@@ -183,11 +237,42 @@ int falloutMain(int argc, char** argv)
                     int loadGameRc = lsgLoadGame(LOAD_SAVE_MODE_FROM_MAIN_MENU);
                     if (loadGameRc == -1) {
                         debugPrint("\n ** Error running LoadGame()! **\n");
+                        gMpPendingHostStartAfterLoad = 0;
+                        gMpPendingClientStartAfterLoad = 0;
+                        gMpPendingClientAddress[0] = '\0';
                     } else if (loadGameRc != 0) {
                         windowDestroy(win);
                         win = -1;
+                        // Co-op: if the player reached this block through
+                        // the Multiplayer → Host flow, start the host now
+                        // that the saved game has been loaded and
+                        // gMapHeader.index set.
+                        int pendingHostStart = gMpPendingHostStartAfterLoad;
+                        gMpPendingHostStartAfterLoad = 0;
+                        int pendingClientStart = gMpPendingClientStartAfterLoad;
+                        char pendingClientAddress[sizeof(gMpPendingClientAddress)];
+                        strncpy(pendingClientAddress, gMpPendingClientAddress,
+                            sizeof(pendingClientAddress) - 1);
+                        pendingClientAddress[sizeof(pendingClientAddress) - 1] = '\0';
+                        gMpPendingClientStartAfterLoad = 0;
+                        gMpPendingClientAddress[0] = '\0';
+                        debugFilePrint("MAIN: save load complete pendingHostStart=%d map=%d",
+                            pendingHostStart, gMapHeader.index);
+                        if (pendingHostStart == 2) {
+                            if (MpHostStart(gMapHeader.index) != 0) {
+                                win_timed_msg("Could not start co-op hosting", COLOR_RED);
+                            }
+                        }
+                        if (pendingClientStart == 2
+                            && MpClientConnect(pendingClientAddress, NET_DEFAULT_PORT) != 0) {
+                            win_timed_msg("Could not join co-op session", COLOR_RED);
+                        }
                         mainLoop();
                         paletteFadeTo(gPaletteWhite);
+                    } else {
+                        gMpPendingHostStartAfterLoad = 0;
+                        gMpPendingClientStartAfterLoad = 0;
+                        gMpPendingClientAddress[0] = '\0';
                     }
                     if (win != -1) {
                         windowDestroy(win);
@@ -217,6 +302,55 @@ int falloutMain(int argc, char** argv)
                 mainMenuWindowHide(true);
                 doPreferences(true);
                 break;
+            case MAIN_MENU_MULTIPLAYER: {
+                int mpRc = MpMenuShow();
+                if (mpRc == 0) {
+                    // Cancelled — keep the main menu as is.
+                    break;
+                }
+                if (gMpPendingHostStartAfterLoad == 1) {
+                    // Co-op host + New Game path — forward to the existing
+                    // NEW_GAME block. main menu hide/free happens there.
+                    goto mp_run_new_game;
+                }
+                if (gMpPendingHostStartAfterLoad == 2) {
+                    // Co-op host + Load Save path — forward to the existing
+                    // LOAD_GAME block. main menu hide/free happens there.
+                    goto mp_run_load_game;
+                }
+                if (gMpPendingClientStartAfterLoad == 1) {
+                    goto mp_run_new_game;
+                }
+                if (gMpPendingClientStartAfterLoad == 2) {
+                    goto mp_run_load_game;
+                }
+                // Legacy join fallback: retain the minimum scaffolding path
+                // for callers that already connected a client directly.
+                mainMenuWindowHide(true);
+                mainMenuWindowFree();
+                main_loadgame_new();
+                // Hiding the main menu fades the palette to black. The join
+                // path does not use the normal load-game loading window,
+                // which is where the regular path restores the game palette.
+                // Restore it before the network-driven map load starts.
+                colorPaletteLoad("color.pal");
+                paletteFadeTo(_cmap);
+                mainLoop();
+                paletteFadeTo(gPaletteWhite);
+
+                // NOTE: Uninline.
+                main_unload_new();
+
+                // NOTE: Uninline.
+                main_reset_system();
+
+                if (_main_show_death_scene != 0) {
+                    showDeath();
+                    _main_show_death_scene = 0;
+                }
+                mainMenuWindowInit();
+                break;
+            }
             case MAIN_MENU_CREDITS:
                 mainMenuWindowHide(true);
                 creditsOpen("credits.txt", -1, false);
@@ -264,6 +398,10 @@ static void mainParseCommandLineArguments(int argc, char** argv)
 {
     const char* devLoadGamePrefix = "--dev-load-game=";
     size_t devLoadGamePrefixLength = strlen(devLoadGamePrefix);
+    const char* coopHostArg = "--coop-host";
+    size_t coopHostArgLength = strlen(coopHostArg);
+    const char* coopJoinPrefix = "--coop-join";
+    size_t coopJoinPrefixLength = strlen(coopJoinPrefix);
 
     for (int arg = 1; arg < argc; arg += 1) {
         if (strncmp(argv[arg], devLoadGamePrefix, devLoadGamePrefixLength) == 0) {
@@ -273,6 +411,26 @@ static void mainParseCommandLineArguments(int argc, char** argv)
             } else {
                 debugPrint("MAIN: invalid --dev-load-game value '%s'\n", argv[arg] + devLoadGamePrefixLength);
             }
+        } else if (strncmp(argv[arg], coopHostArg, coopHostArgLength) == 0
+            && argv[arg][coopHostArgLength] == '\0') {
+            // Auto-start the host right after the main-menu save load.
+            gMpPendingHostStartAfterLoad = 2;
+            debugPrint("MAIN: --coop-host pending host start after load\n");
+        } else if (strncmp(argv[arg], coopJoinPrefix, coopJoinPrefixLength) == 0) {
+            // --coop-join or --coop-join=127.0.0.1 — auto-join after the
+            // main-menu save load.
+            gMpPendingClientStartAfterLoad = 2;
+            const char* address = argv[arg] + coopJoinPrefixLength;
+            if (*address == '=') {
+                address += 1;
+            }
+            if (*address == '\0') {
+                address = "127.0.0.1";
+            }
+            strncpy(gMpPendingClientAddress, address, sizeof(gMpPendingClientAddress) - 1);
+            gMpPendingClientAddress[sizeof(gMpPendingClientAddress) - 1] = '\0';
+            debugPrint("MAIN: --coop-join pending client start after load address='%s'\n",
+                gMpPendingClientAddress);
         }
     }
 }
@@ -330,7 +488,11 @@ static int _main_load_new(char* mapFileName)
     mapInit();
     gameMouseSetCursor(MOUSE_CURSOR_NONE);
     mouseShowCursor();
-    mapLoadByName(mapFileName);
+    if (mapLoadByName(mapFileName) != 0) {
+        debugPrint("MAIN: failed to load new game map '%s'\n", mapFileName);
+        windowDestroy(win);
+        return -1;
+    }
 
     // SFALL: Fix the starting position of the player's marker on the world map
     // when starting a new game with a custom starting map.
@@ -383,6 +545,8 @@ static void main_unload_new()
 // 0x480E48
 static void mainLoop()
 {
+    debugFilePrint("MAIN: mainLoop enter mpActive=%d host=%d client=%d loaded=%d",
+        gMpActive, gMpIsHost, gMpIsClient, gGameLoaded);
     bool cursorWasHidden = cursorIsHidden();
     if (cursorWasHidden) {
         mouseShowCursor();
@@ -392,20 +556,69 @@ static void mainLoop()
 
     scriptsEnable();
 
+    bool logFirstLoop = true;
+    // Co-op freeze diagnostics: track which main-loop section ran last and
+    // log any frame that took longer than 3s. A spontaneous 11.6s host stall
+    // was observed right after a client join; this names the section.
+    static int gMainLastSection = 0;
+    static uint32_t gMainLastFrameTick = 0;
     while (_game_user_wants_to_quit == GAME_QUIT_REQUEST_NONE) {
+        if (logFirstLoop) {
+            debugFilePrint("MAIN: first loop begin");
+        }
         sharedFpsLimiter.mark();
 
+        uint32_t nowTick = getTicks();
+        if (gMainLastFrameTick != 0) {
+            uint32_t since = getTicksSince(gMainLastFrameTick);
+            if (since > 3000) {
+                debugFilePrint("MP: frame stall dt=%u lastSection=%d",
+                    since, gMainLastSection);
+            }
+        }
+        gMainLastFrameTick = nowTick;
+        gMainLastSection = 0;
+
         int keyCode = inputGetInput();
+        if (logFirstLoop) {
+            debugFilePrint("MAIN: first loop after input key=%d", keyCode);
+        }
 
-        // SFALL: MainLoopHook.
-        sfall_gl_scr_process_main();
+        // SFALL global scripts are part of the host-authoritative world.
+        gMainLastSection = 1;
+        if (!gMpIsClient) {
+            sfall_gl_scr_process_main();
+        }
+        if (logFirstLoop) {
+            debugFilePrint("MAIN: first loop after global scripts");
+        }
 
+        gMainLastSection = 2;
         gameHandleKey(keyCode, false);
+        if (logFirstLoop) {
+            debugFilePrint("MAIN: first loop after game key");
+        }
 
+        gMainLastSection = 3;
         scriptsHandleRequests();
+        if (logFirstLoop) {
+            debugFilePrint("MAIN: first loop after script requests");
+        }
 
+        gMainLastSection = 4;
         mapHandleTransition();
+        if (logFirstLoop) {
+            debugFilePrint("MAIN: first loop after map transition");
+        }
 
+        // Co-op: pump the network and broadcast deltas once per frame.
+        gMainLastSection = 5;
+        MpTick();
+        if (logFirstLoop) {
+            debugFilePrint("MAIN: first loop after MpTick");
+        }
+
+        gMainLastSection = 6;
         if (_main_game_paused != 0) {
             _main_game_paused = 0;
         }
@@ -417,6 +630,10 @@ static void mainLoop()
         }
 
         renderPresent();
+        if (logFirstLoop) {
+            debugFilePrint("MAIN: first loop after render");
+            logFirstLoop = false;
+        }
         sharedFpsLimiter.throttle();
     }
 

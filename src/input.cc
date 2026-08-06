@@ -13,6 +13,8 @@
 #include "kb.h"
 #include "memory.h"
 #include "mouse.h"
+#include "multiplayer.h"
+#include "multiplayer_combat.h"
 #include "sfall_kb_helpers.h"
 #include "sfall_script_hooks.h"
 #include "svga.h"
@@ -98,6 +100,7 @@ static bool gRunLoopDisabled;
 
 // 0x6AC784 bk_list
 static TickerListNode* gTickerListHead;
+static bool gHostTickerTraceDone;
 
 // 0x6AC788 bk_process_time
 static unsigned int gTickerLastTimestamp;
@@ -190,6 +193,21 @@ void inputExit()
 int inputGetInput()
 {
     int v3;
+
+    // Co-op: every modal UI (inventory, dialog, barter, pipboy, ...) runs
+    // its loop through inputGetInput, which blocks the main loop (and with
+    // it MpTick) for as long as the modal is open. Without a pump here, the
+    // session starves while either side sits in a modal: the host goes
+    // completely silent (its broadcasts are delta-synced — the client's
+    // host-death watchdog kicks it), and a silent client gets dropped by
+    // the host's ENet peer timeout. Pump ENet and the state broadcasts from
+    // here so both sides stay alive; this never starts combat or shows vote
+    // UI from inside a modal. (Client-side session-changing packets —
+    // profile applies, map changes, combat starts — are deferred to MpTick
+    // by the receive dispatcher, so no mid-modal inventory rebuilds.)
+    if (gMpActive) {
+        MpCombatPump();
+    }
 
     _GNW95_process_message();
 
@@ -317,11 +335,19 @@ void tickersExecute()
 
     gTickerLastTimestamp = SDL_GetTicks();
 
+    bool traceHostTickers = gMpActive && gMpIsHost && !gHostTickerTraceDone;
+    if (traceHostTickers) {
+        debugFilePrint("INPUT: host ticker pass begin");
+    }
+
     TickerListNode* curr = gTickerListHead;
     TickerListNode** currPtr = &(gTickerListHead);
 
     while (curr != nullptr) {
         TickerListNode* next = curr->next;
+        if (traceHostTickers) {
+            debugFilePrint("INPUT: host ticker proc=%p flags=%d", (void*)curr->proc, curr->flags);
+        }
         if (curr->flags & 1) {
             *currPtr = next;
 
@@ -331,6 +357,11 @@ void tickersExecute()
             currPtr = &(curr->next);
         }
         curr = next;
+    }
+
+    if (traceHostTickers) {
+        debugFilePrint("INPUT: host ticker pass end");
+        gHostTickerTraceDone = true;
     }
 }
 
@@ -1032,6 +1063,8 @@ void _GNW95_process_message()
                     }
                 }
                 _GNW95_process_key(&keyboardData);
+            } else if (gMpActive && e.type == SDL_KEYDOWN) {
+                debugFilePrint("MP: input key dropped (keyboard disabled) scan=%d", keyboardData.key);
             }
             break;
         }
@@ -1052,7 +1085,13 @@ void _GNW95_process_message()
                 audioEngineResume();
                 break;
             case SDL_WINDOWEVENT_FOCUS_LOST:
-                gProgramIsActive = false;
+                // Co-op: do NOT set gProgramIsActive = false here. inputGetInput
+                // busy-waits in _GNW95_lost_focus() while that flag is false,
+                // freezing the entire main loop (and with it the network pump)
+                // for as long as the window is unfocused — a host that loses
+                // focus mid-join stalls, the client starves and times out, and
+                // the session dies. The game must keep running unfocused.
+                _GNW95_clear_time_stamps();
                 mouseDeviceInitMode();
                 audioEnginePause();
                 break;

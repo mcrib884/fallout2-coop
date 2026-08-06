@@ -12,15 +12,21 @@
 #include "input.h"
 #include "kb.h"
 #include "loadsave.h"
+#include "map.h"
 #include "memory.h"
 #include "message.h"
 #include "mouse.h"
+#include "multiplayer.h"
+#include "multiplayer_menu.h"
 #include "preferences.h"
+#include "scripts.h"
 #include "settings.h"
+#include "sfall_global_scripts.h"
 #include "svga.h"
 #include "text_font.h"
 #include "tile.h"
 #include "window_manager.h"
+#include "window_manager_private.h"
 
 namespace fallout {
 
@@ -30,6 +36,7 @@ namespace fallout {
 #define OPTIONS_MENU_BUTTON_EXIT 503
 #define OPTIONS_MENU_BUTTON_DONE 504
 #define OPTIONS_MENU_BUTTON_HELP 505
+#define OPTIONS_MENU_BUTTON_MULTIPLAYER 506
 
 typedef enum PauseWindowFrm {
     PAUSE_WINDOW_FRM_BACKGROUND,
@@ -106,6 +113,7 @@ static const OptionsMenuButtonSpec optionsMenuButtonSpecs[] = {
     { OPTIONS_MENU_BUTTON_HELP, 0, true },
     { OPTIONS_MENU_BUTTON_EXIT, 3, false },
     { OPTIONS_MENU_BUTTON_DONE, 4, false },
+    { OPTIONS_MENU_BUTTON_MULTIPLAYER, 1, true },
 };
 
 static constexpr int optionsWindowButtonCount = (sizeof(optionsMenuButtonSpecs) / sizeof(optionsMenuButtonSpecs[0])) * 2;
@@ -116,6 +124,7 @@ static unsigned char* _opbtns[optionsWindowButtonCount];
 // 0x48FC50 do_optionsFunc
 int showOptions()
 {
+    debugFilePrint("OPTIONS: show begin loaded=%d", gGameLoaded ? 1 : 0);
     ScopedGameMode gm(GameMode::kOptions);
 
     if (optionsWindowInit() == -1) {
@@ -146,6 +155,14 @@ int showOptions()
             case KEY_UPPERCASE_S:
             case KEY_LOWERCASE_S:
             case OPTIONS_MENU_BUTTON_SAVE:
+                // A co-op save would serialize the session's synthetic player
+                // protos and ghost avatars; loading it later (or mid-session)
+                // restores unresolvable objects. Not allowed while a session
+                // is active.
+                if (gMpActive) {
+                    win_timed_msg("Saving is unavailable during a co-op session", COLOR_RED);
+                    break;
+                }
                 if (lsgSaveGame(LOAD_SAVE_MODE_NORMAL) == 1) {
                     rc = 1;
                 }
@@ -153,6 +170,12 @@ int showOptions()
             case KEY_UPPERCASE_L:
             case KEY_LOWERCASE_L:
             case OPTIONS_MENU_BUTTON_LOAD:
+                // Loading mid-session replaces the local map/dude out from
+                // under the network state — the session cannot recover.
+                if (gMpActive) {
+                    win_timed_msg("Loading is unavailable during a co-op session", COLOR_RED);
+                    break;
+                }
                 if (lsgLoadGame(LOAD_SAVE_MODE_NORMAL) == 1) {
                     rc = 1;
                 }
@@ -176,6 +199,11 @@ int showOptions()
                     windowRefresh(optionsWindow);
                 }
                 break;
+            case OPTIONS_MENU_BUTTON_MULTIPLAYER:
+                soundPlayFile("ib1p1xx1");
+                MpMenuShow();
+                windowRefresh(optionsWindow);
+                break;
             case KEY_PLUS:
             case KEY_EQUAL:
                 brightnessIncrease();
@@ -198,6 +226,19 @@ int showOptions()
             }
         }
 
+        // Co-op: the ESC menu must not pause the shared world. Animations
+        // already advance inside inputGetInput; keep the network, script
+        // requests and map transitions flowing so the session stays
+        // synchronized while the menu is open.
+        if (gMpActive) {
+            if (!gMpIsClient) {
+                sfall_gl_scr_process_main();
+            }
+            scriptsHandleRequests();
+            mapHandleTransition();
+            MpTick();
+        }
+
         renderPresent();
         sharedFpsLimiter.throttle();
     }
@@ -212,8 +253,10 @@ static int optionsWindowInit()
 {
     int optionsWindowX = 0;
     int optionsWindowY = 0;
+    int optionsWindowHeight = 0;
     int buttonY = 0;
     int buttonBufferIndex = 0;
+    int visibleButtonCount = 0;
     char path[COMPAT_MAX_PATH];
 
     optionsWindowOldFont = fontGetCurrent();
@@ -231,10 +274,10 @@ static int optionsWindowInit()
     }
 
     optionsMenuHelpEnabled = settings.ui.in_game_menu_help;
-    if (optionsMenuHelpEnabled) {
-        if (!messageListLoad(&ceOptionsMessageList, "game\\ce.msg")) {
-            optionsMenuHelpEnabled = false;
-        }
+    // Always attempt to load ce.msg — the MULTIPLAYER button uses a ce.msg
+    // id 1 entry as its label, regardless of whether Help is shown.
+    if (!messageListLoad(&ceOptionsMessageList, "game\\ce.msg")) {
+        optionsMenuHelpEnabled = false;
     }
 
     for (int index = 0; index < OPTIONS_WINDOW_FRM_COUNT; index++) {
@@ -263,15 +306,29 @@ static int optionsWindowInit()
         }
 
         int buttonFrmIndex = (index % 2 == 0) ? OPTIONS_WINDOW_FRM_BUTTON_OFF : OPTIONS_WINDOW_FRM_BUTTON_ON;
-        memcpy(_opbtns[index], _optionsFrmImages[buttonFrmIndex].getData(), _optionsFrmImages[OPTIONS_WINDOW_FRM_BUTTON_ON].getWidth() * _optionsFrmImages[OPTIONS_WINDOW_FRM_BUTTON_ON].getHeight());
+        int frameSize = _optionsFrmImages[buttonFrmIndex].getWidth() * _optionsFrmImages[buttonFrmIndex].getHeight();
+        memcpy(_opbtns[index], _optionsFrmImages[buttonFrmIndex].getData(), frameSize);
+    }
+
+    for (const OptionsMenuButtonSpec& buttonSpec : optionsMenuButtonSpecs) {
+        if (buttonSpec.eventCode != OPTIONS_MENU_BUTTON_HELP || optionsMenuHelpEnabled) {
+            visibleButtonCount++;
+        }
+    }
+
+    optionsWindowHeight = _optionsFrmImages[OPTIONS_WINDOW_FRM_BACKGROUND].getHeight();
+    int buttonHeight = _optionsFrmImages[OPTIONS_WINDOW_FRM_BUTTON_ON].getHeight();
+    int requiredWindowHeight = 17 + visibleButtonCount * buttonHeight + (visibleButtonCount - 1) * 3;
+    if (requiredWindowHeight > optionsWindowHeight) {
+        optionsWindowHeight = requiredWindowHeight;
     }
 
     optionsWindowX = (screenGetWidth() - _optionsFrmImages[OPTIONS_WINDOW_FRM_BACKGROUND].getWidth()) / 2;
-    optionsWindowY = (screenGetHeight() - _optionsFrmImages[OPTIONS_WINDOW_FRM_BACKGROUND].getHeight()) / 2 - 60;
+    optionsWindowY = (screenGetHeight() - optionsWindowHeight) / 2 - 60;
     optionsWindow = windowCreate(optionsWindowX,
         optionsWindowY,
         _optionsFrmImages[0].getWidth(),
-        _optionsFrmImages[0].getHeight(),
+        optionsWindowHeight,
         256,
         WINDOW_MODAL | WINDOW_DONT_MOVE_TOP);
 
@@ -280,6 +337,14 @@ static int optionsWindowInit()
     }
 
     optionsWindowIsoWasEnabled = isoDisable();
+
+    // Co-op: the shared world must keep simulating while the options (ESC)
+    // menu is open. isoDisable() removes the animation/critter tickers and
+    // disables critter processing, freezing the world behind the menu, so
+    // re-enable iso right away for the whole session.
+    if (gMpActive && optionsWindowIsoWasEnabled) {
+        isoEnable();
+    }
 
     optionsWindowGameMouseObjectsWasVisible = gameMouseObjectsIsVisible();
     if (optionsWindowGameMouseObjectsWasVisible) {
@@ -306,7 +371,19 @@ static int optionsWindowInit()
         }
 
         const char* msg = "ERROR";
-        if (buttonSpec.isCeMessage) {
+        if (buttonSpec.eventCode == OPTIONS_MENU_BUTTON_MULTIPLAYER) {
+            // Co-op: prefer ce.msg id 1 if available, but fall back to a
+            // literal "Multiplayer" so the label always renders (ce.msg id 1
+            // is provided by the project's ce.dat but should not be a hard
+            // dependency).
+            MessageListItem mpItem;
+            mpItem.num = buttonSpec.labelMessageId;
+            if (messageListGetItem(&ceOptionsMessageList, &mpItem)) {
+                msg = mpItem.text;
+            } else {
+                msg = "Multiplayer";
+            }
+        } else if (buttonSpec.isCeMessage) {
             msg = getmsg(&ceOptionsMessageList, &preferencesMessageListItem, buttonSpec.labelMessageId);
         } else {
             msg = getmsg(&preferencesMessageList, &preferencesMessageListItem, buttonSpec.labelMessageId);
@@ -333,7 +410,7 @@ static int optionsWindowInit()
             _opbtns[buttonBufferIndex],
             _opbtns[buttonBufferIndex + 1],
             nullptr,
-            BUTTON_FLAG_TRANSPARENT);
+            BUTTON_FLAG_TRANSPARENT | BUTTON_FLAG_GRAPHIC);
         if (btn != -1) {
             buttonSetCallbacks(btn, _gsound_lrg_butt_press, _gsound_lrg_butt_release);
         }
@@ -409,7 +486,13 @@ int showPause(bool preserveWorldState)
 {
     bool gameMouseWasVisible;
     if (!preserveWorldState) {
-        optionsWindowIsoWasEnabled = isoDisable();
+    // Co-op: the shared world must keep rendering while the ESC menu is open
+    // (the menu must not pause anything). isoDisable() would freeze the world
+    // view behind the menu, so the iso stays enabled for the whole session.
+    optionsWindowIsoWasEnabled = isoDisable();
+    if (gMpActive && optionsWindowIsoWasEnabled) {
+        isoEnable();
+    }
         colorCycleDisable();
 
         gameMouseWasVisible = gameMouseObjectsIsVisible();

@@ -21,6 +21,7 @@
 #include "item.h"
 #include "map.h"
 #include "message.h"
+#include "multiplayer.h"
 #include "object.h"
 #include "palette.h"
 #include "perk.h"
@@ -699,6 +700,19 @@ int objectDrop(Object* invenObj, Object* itemObj)
 {
     if (itemObj == nullptr) {
         return -1;
+    }
+
+    // Co-op client: the client's own drops are host-authoritative. Report the
+    // drop (item pid + the dude's tile) and remove the item locally; the host
+    // drops the matching item from the avatar's inventory onto the ground, and
+    // the ground object streams back through the object sync. Placing the
+    // item on the local map would desync — the host has no ground copy of it.
+    if (gMpIsClient && gMpActive && invenObj == gDude) {
+        MpSendPlayerAction(NET_PLAYER_ACTION_DROP, itemObj->pid,
+            gDude->tile, gDude->elevation);
+        _obj_remove_from_inven(invenObj, itemObj);
+        objectDestroy(itemObj);
+        return 0;
     }
 
     bool scriptOverrides = false;

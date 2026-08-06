@@ -36,6 +36,7 @@
 #include "memory.h"
 #include "message.h"
 #include "mouse.h"
+#include "multiplayer.h"
 #include "object.h"
 #include "palette.h"
 #include "party_member.h"
@@ -160,6 +161,8 @@ static int _QuickSnapShot();
 static int lsgWindowInit(int windowType);
 static int lsgWindowFree(int windowType);
 static int lsgPerformSaveGame();
+static int lsgQuickSaveGameInternal(int slotOverride);
+static int lsgLoadGameInSlot(int slot);
 static int lsgLoadGameInSlot(int slot);
 static int lsgSaveHeaderInSlot(int slot);
 static int lsgLoadHeaderInSlot(int slot);
@@ -430,6 +433,7 @@ void _ResetLoadSave()
 // 0x47B88C
 int lsgSaveGame(int mode)
 {
+    debugFilePrint("LOADSAVE: save game begin mode=%d co-op=%d", mode, gMpActive ? 1 : 0);
     ScopedGameMode gm(GameMode::kSaveGame);
 
     MessageListItem messageListItem;
@@ -1009,6 +1013,91 @@ int lsgSaveGame(int mode)
     return rc;
 }
 
+// The co-op host's pre-session backup save lives one slot past the UI's
+// range (pages 0-9 = slots 01..100), so it can never overwrite or appear
+// among the player's own save slots.
+constexpr int LOAD_SAVE_COOP_SLOT = saveLoadTotalSlots;
+
+int lsgGetCoopSaveSlot()
+{
+    return LOAD_SAVE_COOP_SLOT;
+}
+
+// The save/load header writes slot metadata; the UI range is covered by
+// _LSData, the hidden co-op slot by this dedicated struct.
+static LoadSaveSlotData _LSDataCoopSlot;
+
+int lsgQuickSaveGame()
+{
+    return lsgQuickSaveGameInternal(-1);
+}
+
+int lsgQuickSaveGameCoop()
+{
+    return lsgQuickSaveGameInternal(LOAD_SAVE_COOP_SLOT);
+}
+
+int lsgLoadGameCoop()
+{
+    ScopedGameMode gm(GameMode::kLoadGame);
+    debugFilePrint("LOADSAVE: coop load begin slot=%d", LOAD_SAVE_COOP_SLOT + 1);
+    _slot_cursor = LOAD_SAVE_COOP_SLOT;
+    int rc = lsgLoadGameInSlot(LOAD_SAVE_COOP_SLOT);
+    debugFilePrint("LOADSAVE: coop load done rc=%d", rc);
+    return rc;
+}
+
+static int lsgQuickSaveGameInternal(int slotOverride)
+{
+    ScopedGameMode gm(GameMode::kSaveGame);
+
+    debugFilePrint("LSG: silent quick save begin override=%d", slotOverride);
+    _ls_error_code = 0;
+    _patches = settings.system.master_patches_path.c_str();
+
+    if (slotOverride >= 0) {
+        _slot_cursor = slotOverride;
+    } else if (autoQuickSaveSlots && ++_slot_cursor >= quickSaveSlots) {
+        _slot_cursor = 0;
+    }
+
+    if (!messageListInit(&gLoadSaveMessageList)) {
+        debugFilePrint("LSG: silent quick save messageListInit failed");
+        return -1;
+    }
+    debugFilePrint("LSG: silent quick save msglist init ok");
+
+    char path[COMPAT_MAX_PATH];
+    snprintf(path, sizeof(path), "%s%s", asc_5186C8, LSGAME_MSG_NAME);
+    if (!messageListLoad(&gLoadSaveMessageList, path)) {
+        debugFilePrint("LSG: silent quick save messageListLoad failed path=%s", path);
+        messageListFree(&gLoadSaveMessageList);
+        return -1;
+    }
+    debugFilePrint("LSG: silent quick save msglist load ok");
+
+    // The save header embeds a preview snapshot; without it _snapshotBuf
+    // holds stale/garbage memory and the header's snapshot write crashes.
+    // Mirror the normal save's flow: snapshot first, save, then free.
+    _snapshotBuf = nullptr;
+    _QuickSnapShot();
+
+    int rc = lsgPerformSaveGame();
+    debugFilePrint("LSG: silent quick save finished slot=%d rc=%d", _slot_cursor + 1, rc);
+    messageListFree(&gLoadSaveMessageList);
+    if (_snapshotBuf != nullptr) {
+        internal_free(_snapshot);
+        _snapshotBuf = nullptr;
+    }
+    gameMouseSetCursor(MOUSE_CURSOR_ARROW);
+    if (rc == -1) {
+        return -1;
+    }
+
+    _quick_done = true;
+    return 1;
+}
+
 // 0x47C5B4
 static int _QuickSnapShot()
 {
@@ -1053,6 +1142,7 @@ static int _QuickSnapShot()
 // 0x47C640
 int lsgLoadGame(int mode)
 {
+    debugFilePrint("LOADSAVE: load game begin mode=%d co-op=%d", mode, gMpActive ? 1 : 0);
     ScopedGameMode gm(GameMode::kLoadGame);
 
     MessageListItem messageListItem;
@@ -1094,7 +1184,7 @@ int lsgLoadGame(int mode)
         }
 
         char path[COMPAT_MAX_PATH];
-        snprintf(path, sizeof(path), "%s\\%s", asc_5186C8, "LSGAME.MSG");
+        snprintf(path, sizeof(path), "%s%s", asc_5186C8, "LSGAME.MSG");
         if (!messageListLoad(&gLoadSaveMessageList, path)) {
             return -1;
         }
@@ -1878,6 +1968,7 @@ static int lsgPerformSaveGame()
     if (_SaveBackup() == -1) {
         debugPrint("\nLOADSAVE: Warning, can't backup save file!\n");
     }
+    debugFilePrint("LSG: perform save backup done");
 
     snprintf(_gmpath, sizeof(_gmpath), "%s\\%s%.2d\\", "SAVEGAME", "SLOT", _slot_cursor + 1);
     strcat(_gmpath, "SAVE.DAT");
@@ -1894,6 +1985,7 @@ static int lsgPerformSaveGame()
         backgroundSoundResume();
         return -1;
     }
+    debugFilePrint("LSG: perform save file open ok");
 
     long pos = fileTell(_flptr);
     if (lsgSaveHeaderInSlot(_slot_cursor) == -1) {
@@ -1907,6 +1999,7 @@ static int lsgPerformSaveGame()
         backgroundSoundResume();
         return -1;
     }
+    debugFilePrint("LSG: save header written slot=%d", _slot_cursor + 1);
 
     for (int index = 0; index < LOAD_SAVE_HANDLER_COUNT; index++) {
         long pos = fileTell(_flptr);
@@ -1923,9 +2016,13 @@ static int lsgPerformSaveGame()
         }
 
         debugPrint("LOADSAVE: Save function #%d data size written: %d bytes.\n", index, fileTell(_flptr) - pos);
+        if (index % 5 == 0 || index >= LOAD_SAVE_HANDLER_COUNT - 1) {
+            debugFilePrint("LSG: save handler #%d of %d done", index, LOAD_SAVE_HANDLER_COUNT);
+        }
     }
 
     debugPrint("LOADSAVE: Total save data written: %ld bytes.\n", fileTell(_flptr));
+    debugFilePrint("LSG: all save handlers done");
 
     fileClose(_flptr);
 
@@ -1937,6 +2034,7 @@ static int lsgPerformSaveGame()
     if (_flptr != nullptr) {
         bool saved = sfallSaveGameData(_flptr);
         fileClose(_flptr);
+        debugFilePrint("LSG: sfallgv save done saved=%d", saved ? 1 : 0);
         if (!saved) {
             return -1;
         }
@@ -1970,7 +2068,7 @@ bool _isLoadingGame()
 // 0x47DC68
 static int lsgLoadGameInSlot(int slot)
 {
-    if (slot < 0 || slot >= saveLoadTotalSlots) {
+    if (slot < 0 || (slot >= saveLoadTotalSlots && slot != LOAD_SAVE_COOP_SLOT)) {
         return -1;
     }
     assert(slot == _slot_cursor);
@@ -1991,6 +2089,7 @@ static int lsgLoadGameInSlot(int slot)
 
     _flptr = fileOpen(_gmpath, "rb");
     if (_flptr == nullptr) {
+        debugFilePrint("LSG: load file open FAILED path='%s' slot=%d", _gmpath, slot + 1);
         debugPrint("\nLOADSAVE: ** Error opening load game file for reading! **\n");
         _loadingGame = false;
         return -1;
@@ -1998,14 +2097,18 @@ static int lsgLoadGameInSlot(int slot)
 
     long pos = fileTell(_flptr);
     if (lsgLoadHeaderInSlot(slot) == -1) {
+        debugFilePrint("LSG: load header FAILED slot=%d", slot + 1);
         debugPrint("\nLOADSAVE: ** Error reading save  game header! **\n");
         fileClose(_flptr);
         gameReset();
         _loadingGame = false;
         return -1;
     }
+    debugFilePrint("LSG: load header ok slot=%d", slot + 1);
 
-    LoadSaveSlotData* ptr = &(_LSData[slot]);
+    LoadSaveSlotData* ptr = (slot >= 0 && slot < saveLoadTotalSlots)
+        ? &(_LSData[slot])
+        : &_LSDataCoopSlot;
     debugPrint("\nLOADSAVE: Load name: %s\n", ptr->description);
 
     debugPrint("LOADSAVE: Load file header size read: %d bytes.\n", fileTell(_flptr) - pos);
@@ -2014,6 +2117,7 @@ static int lsgLoadGameInSlot(int slot)
         long pos = fileTell(_flptr);
         LoadGameHandler* handler = _master_load_list[index];
         if (handler(_flptr) == -1) {
+            debugFilePrint("LSG: load handler #%d FAILED slot=%d", index, slot + 1);
             debugPrint("\nLOADSAVE: ** Error reading load function #%d data! **\n", index);
             int v12 = fileTell(_flptr);
             debugPrint("LOADSAVE: Load function #%d data size read: %d bytes.\n", index, fileTell(_flptr) - pos);
@@ -2038,9 +2142,11 @@ static int lsgLoadGameInSlot(int slot)
         bool loaded = sfallLoadGameData(_flptr);
         fileClose(_flptr);
         if (!loaded) {
+            debugFilePrint("LSG: load sfallgv FAILED slot=%d", slot + 1);
             return -1;
         }
     }
+    debugFilePrint("LSG: load game data ok slot=%d", slot + 1);
 
     snprintf(_str, sizeof(_str), "%s\\", "MAPS");
     MapDirErase(_str, "BAK");
@@ -2069,8 +2175,11 @@ static int lsgLoadGameInSlot(int slot)
 static int lsgSaveHeaderInSlot(int slot)
 {
     _ls_error_code = 4;
+    debugFilePrint("LSG: save header begin slot=%d", slot + 1);
 
-    LoadSaveSlotData* ptr = &(_LSData[slot]);
+    LoadSaveSlotData* ptr = (slot >= 0 && slot < saveLoadTotalSlots)
+        ? &(_LSData[slot])
+        : &_LSDataCoopSlot;
     strncpy(ptr->signature, LOAD_SAVE_SIGNATURE, 24);
 
     if (fileWrite(ptr->signature, 1, 24, _flptr) == -1) {
@@ -2094,15 +2203,18 @@ static int lsgSaveHeaderInSlot(int slot)
     }
 
     char* characterName = critterGetName(gDude);
+    debugFilePrint("LSG: save header name='%s' len=%d", characterName != nullptr ? characterName : "(null)", characterName != nullptr ? (int)strlen(characterName) : -1);
     strncpy(ptr->characterName, characterName, 32);
 
     if (fileWrite(ptr->characterName, 32, 1, _flptr) != 1) {
         return -1;
     }
+    debugFilePrint("LSG: save header charname ok");
 
     if (fileWrite(ptr->description, 30, 1, _flptr) != 1) {
         return -1;
     }
+    debugFilePrint("LSG: save header description ok");
 
     time_t now = time(nullptr);
     struct tm* local = localtime(&now);
@@ -2157,14 +2269,26 @@ static int lsgSaveHeaderInSlot(int slot)
 
     // NOTE: Uppercased from "sav".
     char* v1 = _strmfe(_str, mapName, "SAV");
+    debugFilePrint("LSG: save header mapName='%s' file='%s'", mapName, v1 != nullptr ? v1 : "(null)");
     strncpy(ptr->fileName, v1, 16);
     if (fileWrite(ptr->fileName, 16, 1, _flptr) != 1) {
         return -1;
     }
+    debugFilePrint("LSG: save header fileName ok");
 
-    if (fileWrite(_snapshotBuf, LS_PREVIEW_SIZE, 1, _flptr) != 1) {
-        return -1;
+    if (_snapshotBuf != nullptr) {
+        if (fileWrite(_snapshotBuf, LS_PREVIEW_SIZE, 1, _flptr) != 1) {
+            return -1;
+        }
+    } else {
+        // Snapshot unavailable (silent save before any render): write a
+        // zeroed preview so the slot stays loadable.
+        static const unsigned char zeroPreview[LS_PREVIEW_SIZE] = {};
+        if (fileWrite(zeroPreview, LS_PREVIEW_SIZE, 1, _flptr) != 1) {
+            return -1;
+        }
     }
+    debugFilePrint("LSG: save header snapshot ok snap=%p", (void*)_snapshotBuf);
 
     memset(mapName, 0, 128);
     if (fileWrite(mapName, 1, 128, _flptr) != 128) {
@@ -2181,7 +2305,9 @@ static int lsgLoadHeaderInSlot(int slot)
 {
     _ls_error_code = 3;
 
-    LoadSaveSlotData* ptr = &(_LSData[slot]);
+    LoadSaveSlotData* ptr = (slot >= 0 && slot < saveLoadTotalSlots)
+        ? &(_LSData[slot])
+        : &_LSDataCoopSlot;
 
     if (fileRead(ptr->signature, 1, 24, _flptr) != 24) {
         return -1;
@@ -2881,31 +3007,31 @@ static int _SlotMap2Game(File* stream)
 
     int fileNameListLength;
     if (fileReadInt32(stream, &fileNameListLength) == -1) {
-        debugPrint("LOADSAVE: returning 1\n");
+        debugFilePrint("LOADSAVE: returning 1");
         return -1;
     }
 
     if (fileNameListLength == 0) {
-        debugPrint("LOADSAVE: returning 2\n");
+        debugFilePrint("LOADSAVE: returning 2");
         return -1;
     }
 
     snprintf(_str0, sizeof(_str0), "%s\\", PROTO_DIR_NAME "\\" CRITTERS_DIR_NAME);
 
     if (MapDirErase(_str0, PROTO_FILE_EXT) == -1) {
-        debugPrint("LOADSAVE: returning 3\n");
+        debugFilePrint("LOADSAVE: returning 3");
         return -1;
     }
 
     snprintf(_str0, sizeof(_str0), "%s\\", PROTO_DIR_NAME "\\" ITEMS_DIR_NAME);
     if (MapDirErase(_str0, PROTO_FILE_EXT) == -1) {
-        debugPrint("LOADSAVE: returning 4\n");
+        debugFilePrint("LOADSAVE: returning 4");
         return -1;
     }
 
     snprintf(_str0, sizeof(_str0), "%s\\", "MAPS");
     if (MapDirErase(_str0, "SAV") == -1) {
-        debugPrint("LOADSAVE: returning 5\n");
+        debugFilePrint("LOADSAVE: returning 5");
         return -1;
     }
 
@@ -2924,7 +3050,7 @@ static int _SlotMap2Game(File* stream)
                 snprintf(_str1, sizeof(_str1), "%s\\%s\\%s%.2d\\%s\\%s", _patches, "SAVEGAME", "SLOT", _slot_cursor + 1, basePath, protoPath);
 
                 if (_gzdecompress_file(_str1, _str0) == -1) {
-                    debugPrint("LOADSAVE: returning 6\n");
+                    debugFilePrint("LOADSAVE: returning 6");
                     return -1;
                 }
             }
@@ -2941,7 +3067,7 @@ static int _SlotMap2Game(File* stream)
         snprintf(_str1, sizeof(_str1), "%s\\%s\\%s", _patches, "MAPS", fileName);
 
         if (_gzdecompress_file(_str0, _str1) == -1) {
-            debugPrint("LOADSAVE: returning 7\n");
+            debugFilePrint("LOADSAVE: returning 7");
             return -1;
         }
     }
@@ -2950,7 +3076,7 @@ static int _SlotMap2Game(File* stream)
     snprintf(_str0, sizeof(_str0), "%s\\%s\\%s%.2d\\%s", _patches, "SAVEGAME", "SLOT", _slot_cursor + 1, automapFileName);
     snprintf(_str1, sizeof(_str1), "%s\\%s\\%s", _patches, "MAPS", "AUTOMAP.DB");
     if (fileCopyDecompressed(_str0, _str1) == -1) {
-        debugPrint("LOADSAVE: returning 8\n");
+        debugFilePrint("LOADSAVE: returning 8");
         return -1;
     }
 
@@ -2958,12 +3084,17 @@ static int _SlotMap2Game(File* stream)
 
     int v12;
     if (fileReadInt32(stream, &v12) == -1) {
-        debugPrint("LOADSAVE: returning 9\n");
+        debugFilePrint("LOADSAVE: returning 9");
         return -1;
     }
 
-    if (mapLoadSaved(_LSData[_slot_cursor].fileName) == -1) {
-        debugPrint("LOADSAVE: returning 13\n");
+    // The coop slot lives one past the UI range and has no _LSData entry;
+    // read its header metadata from the dedicated coop struct.
+    LoadSaveSlotData* slotData = (_slot_cursor >= 0 && _slot_cursor < saveLoadTotalSlots)
+        ? &(_LSData[_slot_cursor])
+        : &_LSDataCoopSlot;
+    if (mapLoadSaved(slotData->fileName) == -1) {
+        debugFilePrint("LOADSAVE: returning 13");
         return -1;
     }
 

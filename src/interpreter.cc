@@ -13,6 +13,7 @@
 #include "input.h"
 #include "interpreter_lib.h"
 #include "memory_manager.h"
+#include "multiplayer.h"
 #include "platform_compat.h"
 #include "sfall_global_scripts.h"
 #include "svga.h"
@@ -3036,6 +3037,10 @@ Program* runScript(char* name)
 // 0x46E1EC
 void _updatePrograms()
 {
+    if (gMpIsClient) {
+        return;
+    }
+
     // CE: Implementation is different. Sfall inserts global scripts into
     // program list upon creation, so engine does not diffirentiate between
     // global and normal scripts. Global scripts in CE are not part of program

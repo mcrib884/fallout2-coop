@@ -11,6 +11,8 @@
 #include "color.h"
 #include "combat.h"
 #include "combat_ai.h"
+#include "multiplayer.h"
+#include "multiplayer_combat.h"
 #include "content_config.h"
 #include "critter.h"
 #include "debug.h"
@@ -48,6 +50,7 @@
 #include "tile.h"
 #include "trait.h"
 #include "worldmap.h"
+#include "input.h"
 
 namespace fallout {
 
@@ -1122,7 +1125,49 @@ static void opGetTarget(Program* program)
 // 0x4556CC op_dude_obj
 static void opGetDude(Program* program)
 {
-    programStackPushPointer(program, gDude);
+    Object* dude = gDude;
+
+    // Co-op: the vanilla enemy detection is the critter scripts' proximity
+    // check against dude_obj. Those scripts only ever see gDude, so a remote
+    // player walking near an enemy would never trigger anything on the host.
+    // For non-player critter scripts, answer with the NEAREST player critter:
+    // the vanilla logic then runs unchanged (its own distances), the enemy
+    // requests combat the vanilla way, and it enters as the vanilla script
+    // attacker — a real combatant, not a bystander.
+    if (gMpIsHost && gMpActive) {
+        int sid = scriptGetSid(program);
+        Script* script = nullptr;
+        if (scriptGetScript(sid, &script) != -1 && script->target != nullptr
+            && FID_TYPE(script->target->fid) == OBJ_TYPE_CRITTER
+            && !MpCombatIsPlayerCritter(script->target)) {
+            Object* nearest = MpCombatGetNearestPlayerTo(script->target);
+            if (nearest != nullptr) {
+                dude = nearest;
+            }
+            // Throttled diagnostics: shows the vanilla proximity-check
+            // timeline (which player the enemy sees, at what distance).
+            static uint32_t gMpDudeObjLastLogTick = 0;
+            uint32_t now = getTicks();
+            if (now - gMpDudeObjLastLogTick > 1000) {
+                gMpDudeObjLastLogTick = now;
+                uint32_t netId = 0;
+                if (nearest != nullptr) {
+                    netId = MpCombatGetCritterPlayerNetId(nearest);
+                    if (netId == 0 && nearest == gDude) {
+                        netId = 1; // host player is players[0].netId in practice
+                    }
+                }
+                debugFilePrint("MPCOMBAT: dude_obj enemy pid=0x%X tile=%d sees netId=%u tile=%d dist=%d",
+                    script->target->pid, script->target->tile, netId,
+                    nearest != nullptr ? nearest->tile : -1,
+                    nearest != nullptr
+                        ? tileDistanceBetween(nearest->tile, script->target->tile)
+                        : -1);
+            }
+        }
+    }
+
+    programStackPushPointer(program, dude);
 }
 
 // NOTE: The implementation is the same as in [opGetTarget].

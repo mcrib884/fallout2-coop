@@ -13,6 +13,8 @@ void _debug_register_screen();
 void _debug_register_env();
 void _debug_register_func(DebugPrintProc* proc);
 int debugPrint(const char* format, ...);
+void debugInstallCrashHandler(const char* logPath);
+void debugFilePrint(const char* format, ...);
 void _debug_exit(void);
 
 } // namespace fallout

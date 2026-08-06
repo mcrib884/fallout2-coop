@@ -180,6 +180,8 @@ int _make_straight_path_func(Object* object, int from, int to, StraightPathNode*
 void _object_animate();
 int _check_move(int* actionPointsPtr);
 int _dude_move(int actionPoints);
+int _dude_move_to_tile(int tile, int elevation, int actionPoints, bool* isRun);
+int _dude_run_to_tile(int tile, int elevation, int actionPoints);
 int _dude_run(int actionPoints);
 void _dude_fidget();
 void _dude_stand(Object* obj, int rotation, int fid);

@@ -12,6 +12,12 @@
 .DS_Store
 .local-tools/
 
+# Co-op: deployment/build/runtime artifacts — never tracked
+out/
+build/
+data/mp_models/
+data/SAVEGAME/
+
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
 
@@ -412,3 +418,5 @@ AGENTS.md
 CLAUDE.md
 GEMINI.md
 opencode.json
+# Deployment output: everything under the dist folder is generated/copied, not source.
+fallout2coopdist/

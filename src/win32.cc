@@ -58,9 +58,9 @@ int main(int argc, char* argv[])
 
 #if _WIN32
     GNW95_mutex = CreateMutexA(0, TRUE, "GNW95MUTEX");
-    if (GetLastError() != ERROR_SUCCESS) {
-        return 0;
-    }
+#ifdef SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS
+    SDL_SetHint(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, "0");
+#endif
 #ifdef SDL_HINT_WINDOWS_DPI_AWARENESS
     SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
 #endif

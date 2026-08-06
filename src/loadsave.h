@@ -17,6 +17,16 @@ typedef enum LoadSaveMode {
 void _InitLoadSave();
 void _ResetLoadSave();
 int lsgSaveGame(int mode);
+int lsgQuickSaveGame();
+// Co-op session framework: every session (host or join) is backed by a save
+// in a reserved hidden slot — one past the UI's page range, so player saves
+// are never touched and the slot never appears in the save/load pages.
+// In-game flows save the current game here first; main-menu flows pick an
+// existing save or create a new character, save it here, and use that.
+// Future mid-session multiplayer saves will use the same helpers.
+int lsgGetCoopSaveSlot();
+int lsgQuickSaveGameCoop();
+int lsgLoadGameCoop();
 int lsgLoadGame(int mode);
 void lsgDevSetLoadGameSlot(int slot);
 int lsgGetTotalSlotCount();

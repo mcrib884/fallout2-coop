@@ -551,6 +551,20 @@ void tileWindowRefresh()
     }
 }
 
+void tileWindowRefreshFull()
+{
+    if (!gTileEnabled) {
+        return;
+    }
+
+    // A partial refresh can leave pixels from the previous local map behind
+    // when the tile array was replaced by a host snapshot. Clear the entire
+    // backing buffer before rendering the current map again.
+    bufferFill(gTileWindowBuffer, gTileWindowWidth, gTileWindowHeight,
+        gTileWindowPitch, 0);
+    gTileWindowRefreshElevationProc(&gTileWindowRect, gElevation);
+}
+
 // 0x4B12F8 tile_set_center
 int tileSetCenter(int tile, int flags)
 {

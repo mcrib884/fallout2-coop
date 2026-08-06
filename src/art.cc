@@ -150,6 +150,8 @@ static int* _anon_alias;
 // artCritterFidShouldRunData
 // 0x56CAF0 artCritterFidShouldRunData
 static int* gArtCritterFidShoudRunData;
+static int gArtCritterBaseLength = 0;
+static std::unordered_map<int, std::string> gSessionCritterModelRoots;
 
 static std::unordered_map<std::string, std::shared_ptr<NamedCacheEntry>> gNamedArtCache;
 constexpr int kNamedCacheMaxBytes = 32 * 1024 * 1024; // 32MB soft limit
@@ -187,6 +189,8 @@ int artInit()
             return -1;
         }
     }
+
+    gArtCritterBaseLength = gArtListDescriptions[OBJ_TYPE_CRITTER].fileNamesLength;
 
     _anon_alias = (int*)internal_malloc(sizeof(*_anon_alias) * gArtListDescriptions[OBJ_TYPE_CRITTER].fileNamesLength);
     if (_anon_alias == nullptr) {
@@ -342,6 +346,7 @@ int artInit()
 // 0x418EB8
 void artReset()
 {
+    artClearSessionModels();
 }
 
 // 0x418EBC
@@ -361,6 +366,7 @@ void artExit()
     }
 
     internal_free(gHeadDescriptions);
+    gSessionCritterModelRoots.clear();
 }
 
 // 0x418F1C
@@ -573,6 +579,82 @@ int artCopyFileName(int objectType, int id, char* dest)
 }
 
 // 0x419314
+int artRegisterSessionCritterModel(const char* name, const char* rootPath, int alias, int shouldRun)
+{
+    if (name == nullptr || name[0] == '\0'
+        || strlen(name) > 12 || gArtListDescriptions[OBJ_TYPE_CRITTER].fileNames == nullptr) {
+        debugFilePrint("ART: register session model failed name='%s'", name != nullptr ? name : "(null)");
+        return -1;
+    }
+
+    int index = artListIndex(OBJ_TYPE_CRITTER, name);
+    if (index < 0) {
+        int oldLength = gArtListDescriptions[OBJ_TYPE_CRITTER].fileNamesLength;
+        char* names = (char*)internal_realloc(
+            gArtListDescriptions[OBJ_TYPE_CRITTER].fileNames,
+            (size_t)(oldLength + 1) * 13);
+        if (names == nullptr) {
+            debugFilePrint("ART: register session model realloc names failed name='%s'", name);
+            return -1;
+        }
+        gArtListDescriptions[OBJ_TYPE_CRITTER].fileNames = names;
+        char* entry = names + oldLength * 13;
+        memset(entry, 0, 13);
+        strncpy(entry, name, 12);
+        index = oldLength;
+        gArtListDescriptions[OBJ_TYPE_CRITTER].fileNamesLength = oldLength + 1;
+
+        int* aliases = (int*)internal_realloc(_anon_alias,
+            (size_t)(oldLength + 1) * sizeof(*_anon_alias));
+        if (aliases == nullptr) {
+            debugFilePrint("ART: register session model realloc alias failed name='%s'", name);
+            return -1;
+        }
+        _anon_alias = aliases;
+        int* shouldRunData = (int*)internal_realloc(gArtCritterFidShoudRunData,
+            (size_t)(oldLength + 1) * sizeof(*gArtCritterFidShoudRunData));
+        if (shouldRunData == nullptr) {
+            debugFilePrint("ART: register session model realloc shouldRun failed name='%s'", name);
+            return -1;
+        }
+        gArtCritterFidShoudRunData = shouldRunData;
+    }
+
+    _anon_alias[index] = alias;
+    gArtCritterFidShoudRunData[index] = shouldRun;
+    if (rootPath != nullptr && rootPath[0] != '\0') {
+        gSessionCritterModelRoots[index] = rootPath;
+    }
+    debugFilePrint("ART: register session model done name='%s' index=%d root='%s'",
+        name, index, rootPath != nullptr ? rootPath : "(none)");
+    return index;
+}
+
+void artClearSessionModels()
+{
+    debugFilePrint("ART: clear session models count=%zu", gSessionCritterModelRoots.size());
+    gSessionCritterModelRoots.clear();
+    if (gArtListDescriptions[OBJ_TYPE_CRITTER].fileNames == nullptr
+        || gArtCritterBaseLength <= 0
+        || gArtListDescriptions[OBJ_TYPE_CRITTER].fileNamesLength <= gArtCritterBaseLength) {
+        return;
+    }
+
+    int baseLength = gArtCritterBaseLength;
+    char* names = (char*)internal_realloc(
+        gArtListDescriptions[OBJ_TYPE_CRITTER].fileNames, (size_t)baseLength * 13);
+    if (names != nullptr) {
+        gArtListDescriptions[OBJ_TYPE_CRITTER].fileNames = names;
+        gArtListDescriptions[OBJ_TYPE_CRITTER].fileNamesLength = baseLength;
+    }
+    int* aliases = (int*)internal_realloc(_anon_alias, (size_t)baseLength * sizeof(*_anon_alias));
+    if (aliases != nullptr) _anon_alias = aliases;
+    int* shouldRunData = (int*)internal_realloc(gArtCritterFidShoudRunData,
+        (size_t)baseLength * sizeof(*gArtCritterFidShoudRunData));
+    if (shouldRunData != nullptr) gArtCritterFidShoudRunData = shouldRunData;
+    artCacheFlush();
+}
+
 int _art_get_code(AnimationType animation, WeaponAnimation weaponType, char* weaponCodePtr, char* animationCodePtr)
 {
     if (!weaponAnimationIsValid(weaponType)) {
@@ -689,6 +771,14 @@ char* artBuildFilePath(int fid)
 
     int fileNameOffset = frmId * 13;
 
+    const char* artRoot = _cd_path_base;
+    auto sessionRoot = objectType == OBJ_TYPE_CRITTER
+        ? gSessionCritterModelRoots.find(frmId)
+        : gSessionCritterModelRoots.end();
+    if (sessionRoot != gSessionCritterModelRoots.end()) {
+        artRoot = sessionRoot->second.c_str();
+    }
+
     if (objectType == OBJ_TYPE_CRITTER) {
         char critterWeaponCode;
         char critterAnimationCode;
@@ -696,9 +786,9 @@ char* artBuildFilePath(int fid)
             return nullptr;
         }
         if (rotation != 0) {
-            snprintf(_art_name, sizeof(_art_name), "%s%s%s\\%s%c%c.fr%c", _cd_path_base, "art\\", gArtListDescriptions[OBJ_TYPE_CRITTER].name, gArtListDescriptions[OBJ_TYPE_CRITTER].fileNames + fileNameOffset, critterWeaponCode, critterAnimationCode, rotation + 47);
+            snprintf(_art_name, sizeof(_art_name), "%s%s%s\\%s%c%c.fr%c", artRoot, "art\\", gArtListDescriptions[OBJ_TYPE_CRITTER].name, gArtListDescriptions[OBJ_TYPE_CRITTER].fileNames + fileNameOffset, critterWeaponCode, critterAnimationCode, rotation + 47);
         } else {
-            snprintf(_art_name, sizeof(_art_name), "%s%s%s\\%s%c%c.frm", _cd_path_base, "art\\", gArtListDescriptions[OBJ_TYPE_CRITTER].name, gArtListDescriptions[OBJ_TYPE_CRITTER].fileNames + fileNameOffset, critterWeaponCode, critterAnimationCode);
+            snprintf(_art_name, sizeof(_art_name), "%s%s%s\\%s%c%c.frm", artRoot, "art\\", gArtListDescriptions[OBJ_TYPE_CRITTER].name, gArtListDescriptions[OBJ_TYPE_CRITTER].fileNames + fileNameOffset, critterWeaponCode, critterAnimationCode);
         }
     } else if (objectType == OBJ_TYPE_HEAD) {
         char headSuffix = _head2[animType];
@@ -709,6 +799,17 @@ char* artBuildFilePath(int fid)
         }
     } else {
         snprintf(_art_name, sizeof(_art_name), "%s%s%s\\%s", _cd_path_base, "art\\", gArtListDescriptions[objectType].name, gArtListDescriptions[objectType].fileNames + fileNameOffset);
+    }
+
+    if (sessionRoot != gSessionCritterModelRoots.end()) {
+        // Diagnostic: log only failed lookups so steady-state rendering stays
+        // quiet but missing session-model art is visible in the coop log.
+        int artFileSize = -1;
+        if (dbGetFileSize(_art_name, &artFileSize) != 0) {
+            debugFilePrint("ART: session path MISS fid=0x%X type=%d anim=%d weapon=%d rot=%d name='%s' path='%s'",
+                fid, objectType, animType, weaponCode, rotation,
+                gArtListDescriptions[OBJ_TYPE_CRITTER].fileNames + fileNameOffset, _art_name);
+        }
     }
 
     return _art_name;

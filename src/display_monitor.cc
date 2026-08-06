@@ -15,6 +15,8 @@
 #include "input.h"
 #include "interface.h"
 #include "memory.h"
+#include "multiplayer.h"
+#include "multiplayer_combat.h"
 #include "settings.h"
 #include "svga.h"
 #include "text_font.h"
@@ -236,6 +238,20 @@ void displayMonitorAddMessage(const char* str)
         return;
     }
 
+    // Co-op: combat is simulated on the host only. The host mirrors every
+    // combat-narrative line to its clients (NPC turns, host-player actions,
+    // the authoritative outcome of remote players' intents, the end-of-fight
+    // experience message). The acting client suppresses the messages its own
+    // attack prediction generates while the authoritative version is in
+    // flight — see MpCombatBeginLocalAttackPrediction.
+    if (gMpActive && MpCombatIsActive()) {
+        if (gMpIsHost) {
+            MpCombatBroadcastMonitorMessage(str);
+        } else if (MpCombatMonitorSuppressed()) {
+            return;
+        }
+    }
+
     // SFALL
     consoleFileAddMessage(str);
 
@@ -442,7 +458,7 @@ static void consoleFileInit()
 {
     const std::string& consolePath = settings.debug.console_output_path;
     if (!consolePath.empty()) {
-        gConsoleFileStream.open(consolePath);
+        gConsoleFileStream.open(consolePath, std::ios::app);
     }
 }
 

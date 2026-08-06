@@ -20,6 +20,8 @@
 #include "light.h"
 #include "map.h"
 #include "memory.h"
+#include "multiplayer.h"
+#include "multiplayer_vote.h"
 #include "party_member.h"
 #include "proto.h"
 #include "proto_instance.h"
@@ -897,6 +899,17 @@ void _obj_render_post_roof(Rect* rect, int elevation)
     ObjectListNode* objectListNode = gObjectListHead;
     while (objectListNode != nullptr) {
         Object* object = objectListNode->obj;
+        // Co-op ghost fix: the head list holds every non-tile object,
+        // including inventory items (tile == -1, owner set). Drawing them
+        // here renders them at their stored sx/sy — the screen position from
+        // their LAST ground render — so a picked-up item leaves a frozen
+        // sprite on the map: fixed in screen space, following the camera
+        // weirdly, and uninteractable (no tile node to click). Items with an
+        // owner have no world position; nothing about them belongs on the map.
+        if (object->tile == -1 && object->owner != nullptr) {
+            objectListNode = objectListNode->next;
+            continue;
+        }
         if ((object->flags & OBJECT_HIDDEN) == 0) {
             _obj_render_object(object, &updatedRect, 0x10000);
         }
@@ -1148,6 +1161,30 @@ int _obj_disconnect(Object* obj, Rect* rect)
     return 0;
 }
 
+int objectReorder(Object* obj)
+{
+    if (obj == nullptr) {
+        return -1;
+    }
+
+    ObjectListNode* node;
+    ObjectListNode* previousNode;
+    if (objectGetListNode(obj, &node, &previousNode) != 0) {
+        return -1;
+    }
+
+    if (previousNode != nullptr) {
+        previousNode->next = node->next;
+    } else if (obj->tile == -1) {
+        gObjectListHead = gObjectListHead->next;
+    } else {
+        gObjectListHeadByTile[obj->tile] = gObjectListHeadByTile[obj->tile]->next;
+    }
+
+    _obj_insert(node);
+    return 0;
+}
+
 // 0x489FF8 obj_offset
 int _obj_offset(Object* obj, int x, int y, Rect* rect)
 {
@@ -1368,11 +1405,58 @@ int _obj_move(Object* a1, int a2, int a3, int elevation, Rect* a5)
     return 0;
 }
 
+// Returns true when the tile carries a visible exit-grid object at the given
+// elevation. Used to tell apart walking WITHIN a multi-tile map-change zone
+// (grid to grid) from walking INTO it (non-grid to grid).
+static bool objTileHasExitGrid(int tile, int elevation)
+{
+    if (!hexGridTileIsValid(tile)) {
+        return false;
+    }
+    ObjectListNode* it = gObjectListHeadByTile[tile];
+    while (it != nullptr) {
+        Object* o = it->obj;
+        if (o->elevation > elevation) {
+            break;
+        }
+        if (o->elevation == elevation
+            && FID_TYPE(o->fid) == OBJ_TYPE_MISC
+            && isExitGridPid(o->pid)
+            && (o->flags & OBJECT_HIDDEN) == 0) {
+            return true;
+        }
+        it = it->next;
+    }
+    return false;
+}
+
 // 0x48A568 obj_move_to_tile
 int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
-{
-    if (obj == nullptr) {
+{    if (obj == nullptr) {
         return -1;
+    }
+
+    // Co-op vote: capture the authoritative player's last safe position before
+    // any move. This must cover remote player critters too, because a client
+    // can be the one that steps onto an exit grid.
+    if (gMpIsHost && gMpActive && FID_TYPE(obj->fid) == OBJ_TYPE_CRITTER) {
+        for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+            MultiplayerPlayer* player = &gMpSession.players[index];
+            if (player->isConnected && player->obj == obj) {
+                player->lastSafeTile = obj->tile;
+                player->lastSafeElevation = obj->elevation;
+                player->lastSafeRotation = obj->rotation;
+                player->hasSafePosition = true;
+                break;
+            }
+        }
+    }
+    // Keep the legacy session fields in sync for the local host and for the
+    // client-side fallback path.
+    if (obj == gDude && gMpActive) {
+        gVoteSession.lastSafeTile = obj->tile;
+        gVoteSession.lastSafeElevation = obj->elevation;
+        gVoteSession.lastSafeRotation = obj->rotation;
     }
 
     if (!hexGridTileIsValid(tile)) {
@@ -1400,6 +1484,7 @@ int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
     }
 
     int oldElevation = obj->elevation;
+    int fromTile = node->obj->tile;
     if (prevNode != nullptr) {
         prevNode->next = node->next;
     } else {
@@ -1426,7 +1511,18 @@ int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
         rectUnion(rect, &v23, rect);
     }
 
-    if (obj == gDude) {
+    Object* movingObject = obj;
+    // A player moving FROM one exit-grid tile TO another (a map-change zone
+    // that spans several tiles) is just traversing the zone — entering or
+    // leaving it. Only stepping onto a grid tile from a NON-grid tile is a
+    // deliberate zone entry and deserves the vote/transition; otherwise the
+    // zone becomes a one-way trap (every escape step re-triggers a vote).
+    bool fromTileIsGrid = hexGridTileIsValid(fromTile)
+        && objTileHasExitGrid(fromTile, oldElevation);
+    bool checkExitGrid = !gMpSuppressExitGridCheck && !fromTileIsGrid && !isInCombat()
+        && (movingObject == gDude
+            || (gMpIsHost && gMpActive && MpIsNetworkedCritter(movingObject)));
+    if (checkExitGrid) {
         ObjectListNode* objectListNode = gObjectListHeadByTile[tile];
         while (objectListNode != nullptr) {
             Object* obj = objectListNode->obj;
@@ -1452,7 +1548,13 @@ int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
                         transition.tile = data->misc.tile;
                         transition.elevation = data->misc.elevation;
                         transition.rotation = data->misc.rotation;
-                        mapSetTransition(&transition);
+                        if (movingObject == gDude) {
+                            mapSetTransition(&transition);
+                        } else if (gMpIsHost && gMpActive) {
+                            debugFilePrint("MP: exit grid entered netObj=%u tile=%d map=%d",
+                                MpGetObjNetId(movingObject), tile, transition.map);
+                            MpOnNetworkedPlayerTransitionRequested(movingObject, &transition);
+                        }
 
                         wmMapMarkMapEntranceState(transition.map, transition.elevation, 1);
                     }
@@ -1531,6 +1633,43 @@ int _obj_reset_roof()
         tile_fill_roof(_obj_last_roof_x, _obj_last_roof_y, gDude->elevation, 1);
     }
     return 0;
+}
+
+// Runs the roof-fill state machine (_obj_move_to's roof block) for a tile the
+// local player was moved to without walking there. Multiplayer sync teleports
+// the local dude through objectSetLocation(), which never triggers the roof
+// hide; without this, roofs (walls) stay visible above the dude on the client.
+void objUpdateRoofsForTile(int tile, int elevation)
+{
+    if (!hexGridTileIsValid(tile) || !elevationIsValid(elevation)) {
+        return;
+    }
+
+    int roofX = tile % 200 / 2;
+    int roofY = tile / 200 / 2;
+    if (roofX != _obj_last_roof_x || roofY != _obj_last_roof_y || elevation != _obj_last_elev) {
+        int currentSquare = _square[elevation]->field_0[roofX + 100 * roofY];
+        int currentSquareFid = buildFid(OBJ_TYPE_TILE, (currentSquare >> 16) & 0xFFF, 0, 0, 0);
+        int previousSquare = _obj_last_roof_x != -1 && _obj_last_roof_y != -1
+            ? _square[elevation]->field_0[_obj_last_roof_x + 100 * _obj_last_roof_y]
+            : 0;
+        bool isEmpty = buildFid(OBJ_TYPE_TILE, 1, 0, 0, 0) == currentSquareFid;
+
+        if (isEmpty != _obj_last_is_empty || (((currentSquare >> 16) & 0xF000) >> 12) != (((previousSquare >> 16) & 0xF000) >> 12)) {
+            if (!_obj_last_is_empty) {
+                tile_fill_roof(_obj_last_roof_x, _obj_last_roof_y, elevation, true);
+            }
+
+            if (!isEmpty) {
+                tile_fill_roof(roofX, roofY, elevation, false);
+            }
+        }
+
+        _obj_last_roof_x = roofX;
+        _obj_last_roof_y = roofY;
+        _obj_last_elev = elevation;
+        _obj_last_is_empty = isEmpty;
+    }
 }
 
 // Sets object fid.
@@ -2140,7 +2279,9 @@ void _obj_remove_all()
     ObjectListNode* prev;
     ObjectListNode* next;
 
+    debugFilePrint("OBJ: remove all begin");
     _scr_remove_all();
+    debugFilePrint("OBJ: remove all scripts done");
 
     for (int tile = 0; tile < HEX_GRID_SIZE; tile++) {
         node = gObjectListHeadByTile[tile];
@@ -2154,6 +2295,7 @@ void _obj_remove_all()
             node = next;
         }
     }
+    debugFilePrint("OBJ: remove all tile walk done");
 
     node = gObjectListHead;
     prev = nullptr;
@@ -2165,6 +2307,7 @@ void _obj_remove_all()
         }
         node = next;
     }
+    debugFilePrint("OBJ: remove all head walk done");
 
     _obj_last_roof_y = -1;
     _obj_last_elev = -1;
@@ -3834,6 +3977,14 @@ static int objectGetListNode(Object* object, ObjectListNode** nodePtr, ObjectLis
     }
 
     int tile = object->tile;
+    if (tile < -1 || tile >= HEX_GRID_SIZE) {
+        // Corrupted object: log the culprit instead of indexing the tile list
+        // out of bounds. The caller gets -1 and must treat the object as not
+        // in any list.
+        debugFilePrint("OBJ: objectGetListNode BAD TILE obj=%p pid=0x%X fid=0x%X tile=%d elev=%d flags=0x%X id=%d",
+            (void*)object, object->pid, object->fid, tile, object->elevation, object->flags, object->id);
+        return -1;
+    }
     if (tile != -1) {
         *nodePtr = gObjectListHeadByTile[tile];
     } else {
@@ -3897,6 +4048,17 @@ static void _obj_insert(ObjectListNode* objectListNode)
                 }
 
                 if ((obj->flags & OBJECT_FLAT) == (objectListNode->obj->flags & OBJECT_FLAT)) {
+                    if (FID_TYPE(obj->fid) == OBJ_TYPE_CRITTER
+                        && FID_TYPE(objectListNode->obj->fid) == OBJ_TYPE_CRITTER
+                        && MpIsNetworkedCritter(obj)
+                        && MpIsNetworkedCritter(objectListNode->obj)) {
+                        uint32_t currentNetId = MpGetObjNetId(obj);
+                        uint32_t newNetId = MpGetObjNetId(objectListNode->obj);
+                        if (currentNetId != 0 && newNetId != 0 && currentNetId > newNetId) {
+                            break;
+                        }
+                    }
+
                     bool v11 = false;
                     CacheEntry* a2;
                     Art* v12 = artLock(obj->fid, &a2);
@@ -3940,6 +4102,8 @@ static int _obj_remove(ObjectListNode* a1, ObjectListNode* a2)
         return -1;
     }
 
+    debugFilePrint("OBJ: remove pid=0x%X fid=0x%X tile=%d elev=%d flags=0x%X",
+        a1->obj->pid, a1->obj->fid, a1->obj->tile, a1->obj->elevation, a1->obj->flags);
     _obj_inven_free(&(a1->obj->data.inventory));
 
     if (a1->obj->sid != -1) {

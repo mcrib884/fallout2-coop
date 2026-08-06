@@ -6,6 +6,7 @@
 #include "game.h"
 #include "memory.h"
 #include "message.h"
+#include "multiplayer_profile.h"
 #include "object.h"
 #include "party_member.h"
 #include "platform_compat.h"
@@ -191,6 +192,24 @@ static int hereAndNowBonusExperience = 0;
 // 0x6642D4 perk_message_file
 static MessageList gPerksMessageList;
 
+void perksGetRanks(int* ranks, int count)
+{
+    if (ranks == nullptr || count <= 0 || gPartyMemberPerkRanks == nullptr) {
+        return;
+    }
+    int copyCount = count < PERK_COUNT ? count : PERK_COUNT;
+    memcpy(ranks, gPartyMemberPerkRanks[0].ranks, sizeof(int) * copyCount);
+}
+
+void perksSetRanks(const int* ranks, int count)
+{
+    if (ranks == nullptr || count <= 0 || gPartyMemberPerkRanks == nullptr) {
+        return;
+    }
+    int copyCount = count < PERK_COUNT ? count : PERK_COUNT;
+    memcpy(gPartyMemberPerkRanks[0].ranks, ranks, sizeof(int) * copyCount);
+}
+
 // 0x4965A0 perk_init
 int perksInit()
 {
@@ -283,6 +302,10 @@ int perksSave(File* stream)
 // 0x49678C perkGetLevelData
 static PerkRankData* perkGetRankData(Object* critter)
 {
+    MpPlayerRuntime* runtime = MpProfileFindRuntimeByObject(critter);
+    if (runtime != nullptr) {
+        return reinterpret_cast<PerkRankData*>(runtime->profile.perkRanks);
+    }
     if (critter == gDude) {
         return gPartyMemberPerkRanks;
     }
@@ -316,8 +339,13 @@ static bool perkCanAdd(Object* critter, Perk perk)
         return false;
     }
 
-    if (critter == gDude) {
-        if (pcGetStat(PC_STAT_LEVEL) < perkDescription->minLevel) {
+    if (critter == gDude || MpProfileIsNetworkPlayer(critter)) {
+        int level = critter == gDude
+            ? pcGetStat(PC_STAT_LEVEL)
+            : (MpProfileFindRuntimeByObject(critter) != nullptr
+                ? MpProfileFindRuntimeByObject(critter)->profile.pcStats[PC_STAT_LEVEL]
+                : 0);
+        if (level < perkDescription->minLevel) {
             return false;
         }
 

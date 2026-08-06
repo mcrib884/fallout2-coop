@@ -56,6 +56,7 @@ typedef enum MainMenuButton {
     MAIN_MENU_BUTTON_OPTIONS,
     MAIN_MENU_BUTTON_CREDITS,
     MAIN_MENU_BUTTON_EXIT,
+    MAIN_MENU_BUTTON_MULTIPLAYER,
     MAIN_MENU_BUTTON_COUNT,
 } MainMenuButton;
 
@@ -98,6 +99,7 @@ static const MainMenuButtonSpec mainMenuButtonSpecs[MAIN_MENU_BUTTON_COUNT] = {
     { KEY_LOWERCASE_O, MAIN_MENU_OPTIONS, 12 },
     { KEY_LOWERCASE_C, MAIN_MENU_CREDITS, 13 },
     { KEY_LOWERCASE_E, MAIN_MENU_EXIT, 14 },
+    { KEY_LOWERCASE_M, MAIN_MENU_MULTIPLAYER, 15 },
 };
 
 // 0x614840 buttons
@@ -455,7 +457,17 @@ static void mainMenuDrawButtonLabels(const MainMenuLayout& layout, const MainMen
 
     for (int index = 0; index < MAIN_MENU_BUTTON_COUNT; index++) {
         msg.num = mainMenuButtonSpecs[index].labelMessage;
-        if (!messageListGetItem(&gMiscMessageList, &msg)) {
+        // Co-op: misc.msg id 15 ("Multiplayer") is not part of the original
+        // game assets shipped with this repo, so the lookup may legitimately
+        // fail. Fall back to a literal English label so the menu entry is
+        // still readable without redistributing a patched misc.msg.
+        const char* fallbackText = nullptr;
+        if (mainMenuButtonSpecs[index].labelMessage == 15) {
+            fallbackText = "Multiplayer";
+        }
+        if (fallbackText != nullptr) {
+            msg.text = const_cast<char*>(fallbackText);
+        } else if (!messageListGetItem(&gMiscMessageList, &msg)) {
             continue;
         }
 

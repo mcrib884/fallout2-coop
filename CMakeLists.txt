@@ -179,6 +179,18 @@ set(FALLOUT_ENGINE_SOURCES
     "src/movie_lib.h"
     "src/movie.cc"
     "src/movie.h"
+"src/multiplayer.cc"
+"src/multiplayer.h"
+"src/multiplayer_combat.cc"
+"src/multiplayer_combat.h"
+"src/multiplayer_profile.cc"
+    "src/multiplayer_profile.h"
+    "src/multiplayer_menu.cc"
+    "src/multiplayer_menu.h"
+    "src/multiplayer_vote.cc"
+    "src/multiplayer_vote.h"
+    "src/net.cc"
+    "src/net.h"
     "src/nevs.cc"
     "src/nevs.h"
     "src/obj_types.h"
@@ -514,12 +526,20 @@ add_subdirectory("third_party/fpattern")
 target_link_libraries(${EXECUTABLE_NAME} fpattern::fpattern)
 target_link_libraries(${EXECUTABLE_NAME} fpattern_windows::fpattern_windows)
 
+add_subdirectory("third_party/enet")
+target_link_libraries(${EXECUTABLE_NAME} enet)
+
 target_link_libraries(${EXECUTABLE_NAME} ${ZLIB_LIBRARIES})
 target_include_directories(${EXECUTABLE_NAME} PRIVATE ${ZLIB_INCLUDE_DIRS})
 
 target_link_libraries(${EXECUTABLE_NAME} ${SDL2_LIBRARIES})
 target_link_libraries(${EXECUTABLE_NAME} ${SDL2_MAIN_LIBRARIES})
 target_include_directories(${EXECUTABLE_NAME} PRIVATE ${SDL2_INCLUDE_DIRS})
+
+option(FALLOUT_LAUNCHER "Build the Fallout 2 co-op launcher" ON)
+if(FALLOUT_LAUNCHER AND (NOT ANDROID) AND (NOT IOS) AND (NOT CMAKE_SYSTEM_NAME MATCHES "Emscripten"))
+    add_subdirectory("tools/launcher")
+endif()
 
 if((NOT ANDROID) AND (NOT IOS) AND (NOT CMAKE_SYSTEM_NAME MATCHES "Emscripten"))
     add_executable(ce-dat-tool
@@ -690,6 +710,7 @@ if((NOT ANDROID) AND (NOT IOS) AND (NOT CMAKE_SYSTEM_NAME MATCHES "Emscripten"))
     target_include_directories(mapper-ce PRIVATE ${SDL2_INCLUDE_DIRS})
 
     target_link_libraries(mapper-ce
+        enet
         fpattern::fpattern
         fpattern_windows::fpattern_windows
         ${ZLIB_LIBRARIES}

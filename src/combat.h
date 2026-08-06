@@ -34,6 +34,9 @@ void _combat_over_from_load();
 void _combat_give_exps(int exp_points);
 void _combat_turn_run();
 void _combat(CombatStartData* csd);
+// Co-op wrappers around file-static combat machinery.
+void combatAttemptEndCoop();
+void combatShowEndDeniedMessage();
 void attackInit(Attack* attack, Object* attacker, Object* defender, HitMode hitMode, HitLocation hitLocation);
 int _combat_attack(Object* attacker, Object* defender, HitMode hitMode, HitLocation hitLocation);
 int _combat_bullet_start(const Object* attacker, const Object* target);

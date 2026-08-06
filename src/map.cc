@@ -29,6 +29,8 @@
 #include "loadsave.h"
 #include "map_edge.h"
 #include "memory.h"
+#include "multiplayer.h"
+#include "multiplayer_vote.h"
 #include "object.h"
 #include "party_member.h"
 #include "proto.h"
@@ -803,7 +805,7 @@ int mapLoadByName(char* fileName)
 
     rc = -1;
 
-    if (!settings.system.executableIsMapper()) {
+    if (!settings.system.executableIsMapper() && !gMpActive) {
         char* extension = strstr(fileName, ".MAP");
         if (extension != nullptr) {
             strcpy(extension, ".SAV");
@@ -864,6 +866,7 @@ static int mapLoad(File* stream)
     int mapLoadSoundId = 0;
     if (!settings.system.executableIsMapper()) {
         _map_save_in_game(true);
+        debugFilePrint("MAP: load after in-game save");
         if (backgoundSoundIsPlaying()) {
             // Use the sfall sound path so the map-loading ambience does not depend
             // on the native background music loader.
@@ -915,6 +918,7 @@ static int mapLoad(File* stream)
     if (gMapHeader.version != 19 && gMapHeader.version != 20) {
         goto err;
     }
+    debugFilePrint("MAP: load header ok name='%s' idx=%d", gMapHeader.name, gMapHeader.index);
 
     if (gEnteringElevation == -1) {
         // NOTE: Uninline.
@@ -922,6 +926,7 @@ static int mapLoad(File* stream)
     }
 
     _obj_remove_all();
+    debugFilePrint("MAP: load objects removed");
 
     if (gMapHeader.globalVariablesCount < 0) {
         gMapHeader.globalVariablesCount = 0;
@@ -942,6 +947,7 @@ static int mapLoad(File* stream)
     if (mapGlobalVariablesLoad(stream) != 0) {
         goto err;
     }
+    debugFilePrint("MAP: load global vars ok count=%d", gMapHeader.globalVariablesCount);
 
     error = "Error allocating local vars";
     // NOTE: Uninline.
@@ -954,20 +960,24 @@ static int mapLoad(File* stream)
     if (mapLocalVariablesLoad(stream) != 0) {
         goto err;
     }
+    debugFilePrint("MAP: load local vars ok count=%d", gMapHeader.localVariablesCount);
 
     if (_square_load(stream, gMapHeader.flags) != 0) {
         goto err;
     }
+    debugFilePrint("MAP: load squares ok");
 
     error = "Error reading scripts";
     if (scriptLoadAll(stream) != 0) {
         goto err;
     }
+    debugFilePrint("MAP: load scripts ok");
 
     error = "Error reading objects";
     if (objectLoadAll(stream) != 0) {
         goto err;
     }
+    debugFilePrint("MAP: load objects ok");
 
     if (!_isLoadingGame()) {
         // Fix whoHitMe union.  When loading a saved game, combatLoad is responsible for this fix
@@ -992,6 +1002,7 @@ static int mapLoad(File* stream)
     objectSetLocation(gDude, gEnteringTile, gElevation, nullptr);
     objectSetRotation(gDude, gEnteringRotation, nullptr);
     gMapHeader.index = wmMapMatchNameToIdx(gMapHeader.name);
+    debugFilePrint("MAP: load dude placed tile=%d elev=%d idx=%d", gDude->tile, gElevation, gMapHeader.index);
 
     if ((gMapHeader.flags & 1) == 0) {
         char path[COMPAT_MAX_PATH];
@@ -1041,6 +1052,8 @@ static int mapLoad(File* stream)
         _scr_spatials_disable();
         scriptExecProc(gMapSid, SCRIPT_PROC_MAP_ENTER);
         _scr_spatials_enable();
+        debugFilePrint("MAP: load map script enter done sid=%d", gMapSid);
+        debugFilePrint("MAPDBG ambient after map script enter=%d", lightGetAmbientIntensity());
 
         error = "Error Setting up random encounter";
         if (wmSetupRandomEncounter() == -1) {
@@ -1056,11 +1069,13 @@ err:
         char message[100]; // TODO: Size is probably wrong.
         snprintf(message, sizeof(message), "%s while loading map.", error);
         debugPrint(message);
+        debugFilePrint("MAP: load FAILED at '%s'", error);
         mapNewMap();
         rc = -1;
     } else {
         _obj_preload_art_cache(gMapHeader.flags);
     }
+    debugFilePrint("MAP: load done rc=%d", rc);
 
     sfallOnBeforeMapLoad();
 
@@ -1080,6 +1095,8 @@ err:
     scriptsExecMapEnterProc();
     scriptsExecMapUpdateProc();
     tileEnable();
+    debugFilePrint("MAP: load map enter/update procs done");
+    debugFilePrint("MAPDBG ambient after enter/update procs=%d", lightGetAmbientIntensity());
 
     if (gMapTransition.map > 0) {
         if (gMapTransition.rotation >= 0) {
@@ -1311,6 +1328,14 @@ int mapSetTransition(MapTransition* transition)
         return -1;
     }
 
+    // Co-op: every transition goes through the multiplayer intercept. The
+    // hook returns 1 to block (vote just started, or one already in flight)
+    // and 0 to pass through (no co-op session, host vote just resolved with
+    // state == PASSED, or single player). See MpOnMapTransitionRequested.
+    if (MpOnMapTransitionRequested(transition)) {
+        return 0;
+    }
+
     memcpy(&gMapTransition, transition, sizeof(gMapTransition));
 
     if (gMapTransition.map == 0) {
@@ -1353,11 +1378,28 @@ int mapHandleTransition()
         }
     } else {
         if (!isInCombat()) {
+            bool mapLoaded = false;
             if (gMapTransition.map != gMapHeader.index || gElevation == gMapTransition.elevation) {
                 // SFALL: Remove text floaters after moving to another map.
                 textObjectsReset();
 
-                mapLoadById(gMapTransition.map);
+                if (gMpIsHost) {
+                    MpPrepareForMapChange();
+                }
+                int mapLoadResult = mapLoadById(gMapTransition.map);
+                if (mapLoadResult != 0) {
+                    if (gMpIsHost) {
+                        // The load failed; players were already detached by
+                        // MpPrepareForMapChange and are re-created on the old
+                        // map here. Clients must know the change is off so they
+                        // don't wait for a MAP_CHANGED that will never come.
+                        MpFinishHostMapChange();
+                        MpBroadcastMapChangeAbort();
+                    }
+                    memset(&gMapTransition, 0, sizeof(gMapTransition));
+                    return -1;
+                }
+                mapLoaded = true;
             }
 
             if (gMapTransition.tile != -1 && gMapTransition.tile != 0
@@ -1379,6 +1421,15 @@ int mapHandleTransition()
             wmMatchAreaContainingMapIdx(gMapHeader.index, &city);
             if (wmTeleportToArea(city) == -1) {
                 debugPrint("\nError: couldn't make jump on worldmap for map jump!");
+            }
+
+            // Co-op host: notify clients of the map change and ship a fresh
+            // full sync. NetId assignment must run on the newly-loaded map's
+            // object table.
+            if (gMpIsHost && mapLoaded) {
+                MpFinishHostMapChange();
+                MpBroadcastMapChanged(gMapHeader.index);
+                MpBroadcastMapFullSync(nullptr);
             }
         }
     }
@@ -1520,9 +1571,22 @@ static int _map_save_file(File* stream)
 // 0x483C98
 int _map_save_in_game(bool isLeavingMap)
 {
+    // In co-op the session's state is rebuilt by the host's full sync, and the
+    // player critters carry synthetic protos that the vanilla teardown path
+    // would free out from under the session (stale MAPS\*.SAV files, dangling
+    // synthetic pids, proto double-frees in MpProfileDestroyRuntime). Run the
+    // world-prep steps (queue, party, exit script, roof) but skip the .SAV
+    // write and the object/proto teardown — mapLoad performs the teardown
+    // itself, and both machines must always load the fresh .MAP so host and
+    // client can never diverge.
+    bool coOpActive = gMpActive;
+
     if (gMapHeader.name[0] == '\0') {
         return 0;
     }
+
+    debugFilePrint("MAP: save in game begin coOp=%d leaving=%d name='%s'",
+        coOpActive ? 1 : 0, isLeavingMap ? 1 : 0, gMapHeader.name);
 
     animationStop();
     _partyMemberSaveProtos();
@@ -1540,6 +1604,11 @@ int _map_save_in_game(bool isLeavingMap)
 
         gameTimeScheduleUpdateEvent();
         _obj_reset_roof();
+    }
+
+    if (coOpActive) {
+        debugFilePrint("MAP: save in game skipped in co-op");
+        return 0;
     }
 
     gMapHeader.flags |= 0x01;

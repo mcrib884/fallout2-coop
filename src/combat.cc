@@ -26,6 +26,9 @@
 #include "loadsave.h"
 #include "map.h"
 #include "memory.h"
+#include "multiplayer.h"
+#include "multiplayer_combat.h"
+#include "multiplayer_profile.h"
 #include "message.h"
 #include "object.h"
 #include "party_member.h"
@@ -2893,6 +2896,15 @@ void _combat_give_exps(int exp_points)
     int xpGained;
     pcAddExperience(exp_points, &xpGained);
 
+    // Co-op: every remote player earns the same combat XP. The avatar's proto
+    // experience is bumped; the per-tick profile change detection sees the
+    // delta and rebroadcasts the profile, and each client applies the XP
+    // through its own pcAddExperience level-up path (Swift Learner applies
+    // with the player's own perk, then flows back up on the next sheet sync).
+    if (gMpActive && gMpIsHost) {
+        MpProfileGrantCombatXp(exp_points);
+    }
+
     v7.num = 621; // %s you earn %d exp. points.
     if (!messageListGetItem(&gProtoMessageList, &v7)) {
         return;
@@ -3033,6 +3045,22 @@ static void _combat_sequence_init(Object* attacker, Object* defender)
         }
     }
 
+    // Co-op: every remote player's critter is a combatant, not a bystander.
+    // Vanilla only ever promotes attacker/defender/dude; without this, a
+    // remote player's dude stays in the non-combatant block and never gets a
+    // turn through the round loop (it only surfaces via wants-to-join).
+    if (gMpIsHost && gMpActive) {
+        for (int index = next; index < _list_total; index++) {
+            Object* obj = _combat_list[index];
+            if (MpCombatGetCritterPlayerNetId(obj) != 0) {
+                Object* temp = _combat_list[next];
+                _combat_list[index] = temp;
+                _combat_list[next] = obj;
+                next += 1;
+            }
+        }
+    }
+
     _list_com = next;
     _list_noncom -= next;
 
@@ -3147,6 +3175,24 @@ static void combatAttemptEnd()
     _caiTeamCombatExit();
 }
 
+// Co-op wrapper: the host runs the vanilla enemy check on behalf of any
+// player's end-combat request (combatAttemptEnd is file-static).
+void combatAttemptEndCoop()
+{
+    combatAttemptEnd();
+}
+
+// Co-op helper: show the '...wants to fight...' message (103) when the host
+// denies an end-combat request (the message list is file-static).
+void combatShowEndDeniedMessage()
+{
+    MessageListItem messageListItem;
+    messageListItem.num = 103;
+    if (messageListGetItem(&gCombatMessageList, &messageListItem)) {
+        displayMonitorAddMessage(messageListItem.text);
+    }
+}
+
 // 0x4227DC
 void _combat_turn_run()
 {
@@ -3154,6 +3200,17 @@ void _combat_turn_run()
         sharedFpsLimiter.mark();
 
         _process_bk();
+
+        // Co-op: NPC turns and the post-turn animation drain run through
+        // this loop, which never yields to the vanilla input path. Without
+        // pumping here the host sits on the COMBAT_STARTED broadcast, the
+        // remote players' intents, and every state delta for the whole turn
+        // — the client enters combat seconds late and snaps back to a stale
+        // position. MpCombatPump services ENet, drains the intent queue and
+        // broadcasts fresh states; it never runs scripts or map transitions.
+        if (gMpActive && gMpIsHost) {
+            MpCombatPump();
+        }
 
         renderPresent();
         sharedFpsLimiter.throttle();
@@ -3167,6 +3224,12 @@ static int _combat_input()
 
     while ((gCombatState & COMBAT_STATE_PLAYER_TURN) != 0) {
         sharedFpsLimiter.mark();
+
+        // Co-op: the host's own blocking turn must also pump the network so
+        // remote players' intents and end-requests arrive while he acts.
+        if (gMpActive && gMpIsHost) {
+            MpCombatPump();
+        }
 
         if ((gCombatState & COMBAT_STATE_EXIT_REQUESTED) != 0) {
             break;
@@ -3256,6 +3319,19 @@ static int _combat_turn(Object* obj, bool reloadedDuringCombat)
 {
     _combat_turn_obj = obj;
 
+    // Co-op: a remote player's critter must never run the vanilla NPC AI on
+    // the host. The round-loop intercept should have caught it before this
+    // point; this guard is the safety net so the host never simulates a
+    // remote player's turn (they act through their own machine).
+    if (gMpIsHost && gMpActive) {
+        uint8_t remoteNetId = MpCombatGetCritterPlayerNetId(obj);
+        if (remoteNetId != 0) {
+            debugFilePrint("MPCOMBAT: turn guard hit remote netId=%u pid=0x%X tile=%d (intercept missed)",
+                remoteNetId, obj->pid, obj->tile);
+            return 0;
+        }
+    }
+
     attackInit(&_main_ctd, obj, nullptr, HIT_MODE_PUNCH, HIT_LOCATION_TORSO);
 
     if ((obj->data.critter.combat.results & (DAM_KNOCKED_OUT | DAM_DEAD | DAM_LOSE_TURN)) != 0) {
@@ -3296,6 +3372,14 @@ static int _combat_turn(Object* obj, bool reloadedDuringCombat)
                 gameUiEnable();
                 _gmouse_3d_refresh();
 
+                // Co-op: the wait cursor set at combat begin is never cleared
+                // by the vanilla dude-turn path — without this the player's
+                // own turn shows the WAIT cursor and clicks feel dead.
+                if (gMpIsHost && gMpActive) {
+                    gameMouseSetCursor(MOUSE_CURSOR_ARROW);
+                    gameMouseSetMode(GAME_MOUSE_MODE_MOVE);
+                }
+
                 if (_gcsd != nullptr) {
                     _combat_attack_this(_gcsd->defender);
                 }
@@ -3329,6 +3413,11 @@ static int _combat_turn(Object* obj, bool reloadedDuringCombat)
                 if (objectEnableOutline(obj, &rect) == 0) {
                     tileWindowRefreshRect(&rect, obj->elevation);
                 }
+
+                // Co-op: the acting-critter red outline is a host-side vanilla
+                // effect. Mirror the NPC's turn so the client's combat mirror
+                // can draw the same outline.
+                MpCombatOnNpcTurnStarted(obj);
 
                 _combat_ai(obj, _gcsd != nullptr ? _gcsd->defender : nullptr);
             }
@@ -3452,10 +3541,70 @@ static bool _combat_should_end()
     return false;
 }
 
+// Co-op: end-of-turn variant of _combat_should_end(). The vanilla check runs
+// once per ROUND, after _combat_sequence purges the dead. Mid-round, killed
+// critters still sit in the combat list and would fail the team scan, so the
+// vanilla check cannot fire until a full round plays out — which in co-op
+// means the other player's turn too. This variant treats DAM_DEAD critters
+// (and their whoHitMe links) as gone, so combat ends at the first turn
+// boundary after the last hostile dies instead of waiting for the round.
+static bool mpCombatShouldEndNow()
+{
+    if (_list_com <= 1) {
+        return true;
+    }
+
+    int index;
+    for (index = 0; index < _list_com; index++) {
+        if (_combat_list[index] == gDude) {
+            break;
+        }
+    }
+
+    if (index == _list_com) {
+        return true;
+    }
+
+    int team = gDude->data.critter.combat.team;
+
+    for (index = 0; index < _list_com; index++) {
+        Object* critter = _combat_list[index];
+        if ((critter->data.critter.combat.results & DAM_DEAD) != 0) {
+            continue;
+        }
+
+        if (critter->data.critter.combat.team != team) {
+            break;
+        }
+
+        Object* critterWhoHitMe = critter->data.critter.combat.whoHitMe;
+        if (critterWhoHitMe != nullptr
+            && (critterWhoHitMe->data.critter.combat.results & DAM_DEAD) == 0
+            && critterWhoHitMe->data.critter.combat.team == team) {
+            break;
+        }
+    }
+
+    if (index == _list_com) {
+        return true;
+    }
+
+    return false;
+}
+
 // 0x422D2C
 void _combat(CombatStartData* csd)
 {
     ScopedGameMode gm(GameMode::kCombat);
+
+    // Co-op: the client never owns a local combat sequence. Every vanilla
+    // entry point is gated, but keep a defensive net here so a stray call
+    // (script opcode, load edge case) can never start a second authority.
+    if (gMpIsClient && gMpActive) {
+        debugFilePrint("MPCOMBAT: _combat blocked on client; requesting host start");
+        MpCombatSendStartRequest(csd != nullptr ? csd->defender : nullptr);
+        return;
+    }
 
     if (csd == nullptr
         || (csd->attacker == nullptr || csd->attacker->elevation == gElevation)
@@ -3463,6 +3612,11 @@ void _combat(CombatStartData* csd)
         bool wasInCombat = isInCombat();
 
         _combat_begin(nullptr);
+
+        // Co-op: tell every client that combat started (host authority).
+        if (gMpIsHost && gMpActive) {
+            MpCombatOnStarted();
+        }
 
         int curIndex;
 
@@ -3503,11 +3657,64 @@ void _combat(CombatStartData* csd)
             _combat_set_move_all();
 
             for (; curIndex < _list_com; curIndex++) {
+                // Co-op: a remote player's turn belongs to the network. The
+                // host broadcasts TURN_START and waits for their TURN_END.
+                if (gMpIsHost && gMpActive) {
+                    Object* combatant = _combat_list[curIndex];
+                    uint8_t remoteNetId = MpCombatGetCritterPlayerNetId(combatant);
+                    debugFilePrint("MPCOMBAT: sequence combatant pid=0x%X tile=%d netId=%u",
+                        combatant->pid, combatant->tile, remoteNetId);
+                    if (remoteNetId != 0) {
+                        if (MpCombatHostRemoteTurn(combatant, remoteNetId) == -1) {
+                            break;
+                        }
+                        _gcsd = nullptr;
+                        // Co-op: the remote player may have killed the last
+                        // hostile on their turn. End combat right here instead
+                        // of playing the rest of the round out.
+                        if (mpCombatShouldEndNow()) {
+                            debugFilePrint("MPCOMBAT: combat end after remote turn");
+                            break;
+                        }
+                        continue;
+                    }
+                    // The host's own turn is vanilla, but the client cards
+                    // need to know whose turn it is.
+                    if (combatant == gDude) {
+                        uint8_t hostNetId = gMpSession.players[0].netId;
+                        int ap = gDude->data.critter.combat.ap;
+                        int maxAp = critterGetStat(gDude, STAT_MAXIMUM_ACTION_POINTS);
+                        NetCombatTurnStartPayload payload;
+                        payload.netId = hostNetId;
+                        payload.ap = (uint16_t)std::clamp(ap, 0, 65535);
+                        payload.maxAp = (uint16_t)std::clamp(maxAp, 0, 65535);
+                        payload.targetNetId = 0;
+                        NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE, NET_PKT_COMBAT_TURN_START, &payload, sizeof(payload));
+                        gMpCombat.whoseTurn = hostNetId;
+                    }
+                }
+
                 if (combatTurnHooked(_combat_list[curIndex], false) == -1) {
+                    if (gMpIsHost && gMpActive) {
+                        debugFilePrint("MPCOMBAT: turn finished pid=0x%X rc=-1", _combat_list[curIndex]->pid);
+                    }
                     break;
                 }
 
+                if (gMpIsHost && gMpActive) {
+                    debugFilePrint("MPCOMBAT: turn finished pid=0x%X rc=0", _combat_list[curIndex]->pid);
+                }
+
                 if (_combat_ending_guy != nullptr) {
+                    break;
+                }
+
+                // Co-op: the host's own turn (or an NPC turn) may have killed
+                // the last hostile — end combat at the turn boundary instead
+                // of playing the remaining turns of the round out.
+                if (gMpIsHost && gMpActive && mpCombatShouldEndNow()) {
+                    debugFilePrint("MPCOMBAT: combat end after turn pid=0x%X",
+                        _combat_list[curIndex]->pid);
                     break;
                 }
 
@@ -3549,6 +3756,11 @@ void _combat(CombatStartData* csd)
             scriptsExecMapUpdateProc();
         }
 
+        // Co-op: tell every client combat ended (host authority).
+        if (gMpIsHost && gMpActive) {
+            MpCombatOnEnded();
+        }
+
         _combat_end_due_to_load = 0;
 
         if (_game_user_wants_to_quit == GAME_QUIT_REQUEST_END_COMBAT) {
@@ -3581,7 +3793,10 @@ void attackInit(Attack* attack, Object* attacker, Object* defender, HitMode hitM
 // 0x422F3C
 int _combat_attack(Object* attacker, Object* defender, HitMode hitMode, HitLocation hitLocation)
 {
-    if (attacker != gDude && hitMode == HIT_MODE_PUNCH && randomBetween(1, 4) == 1) {
+    // Co-op: remote players are human-controlled, so the random punch/kick
+    // only applies to vanilla non-dude attackers (NPCs), never to players.
+    bool isCoopPlayer = gMpActive && gMpIsHost && MpCombatGetCritterPlayerNetId(attacker) != 0;
+    if (attacker != gDude && !isCoopPlayer && hitMode == HIT_MODE_PUNCH && randomBetween(1, 4) == 1) {
         int fid = buildFid(OBJ_TYPE_CRITTER, attacker->fid & 0xFFF, ANIM_KICK_LEG, weaponAnimationFromFid(attacker->fid), FID_ROTATION(attacker->fid));
         if (artExists(fid)) {
             hitMode = HIT_MODE_KICK;
@@ -3641,10 +3856,26 @@ int _combat_attack(Object* attacker, Object* defender, HitMode hitMode, HitLocat
     if (attacker == gDude) {
         interfaceRenderActionPoints(attacker->data.critter.combat.ap, _combat_free_move);
         critterSetWhoHitMe(attacker, defender);
+    } else if (gMpActive && gMpIsHost && MpCombatGetCritterPlayerNetId(attacker) != 0) {
+        // Co-op: remote players' attacks must also register hostility for the
+        // end-combat enemy check.
+        critterSetWhoHitMe(attacker, defender);
     }
 
     // SFALL
     explosionSettingsReset();
+
+    // Co-op: the acting client runs the same resolution locally for
+    // responsiveness and sends the intent; the host's outcome is truth and
+    // overwrites the client's copy via the state sync.
+    if (gMpActive && gMpIsClient && MpCombatIsActive() && attacker == gDude) {
+        // Suppress this attack's locally predicted combat messages (the
+        // client rolls its own dice, so they are frequently wrong); the
+        // host's authoritative broadcast version replaces them. The window
+        // closes in _combat_anim_finished once the animation batch settles.
+        MpCombatBeginLocalAttackPrediction();
+        MpCombatSendAttackIntent(defender, hitMode, hitLocation);
+    }
 
     _combat_call_display = 1;
     _combat_cleanup_enabled = 1;
@@ -3924,6 +4155,25 @@ static int attackComputeEnhancedKnockout(Attack* attack)
     return 0;
 }
 
+// Co-op: per-critter sneak check. Vanilla's dudeHasState() reads the proto
+// flags of gDude's pid; a remote player's avatar carries the same SNEAKING
+// bit in its own (runtime) proto, toggled by the host's USE_SKILL(SNEAK)
+// handler when the client reports its sneak toggle.
+static bool mpCritterIsSneaking(Object* critter)
+{
+    if (critter == nullptr) {
+        return false;
+    }
+    if (critter == gDude) {
+        return dudeHasState(DUDE_STATE_SNEAKING);
+    }
+    Proto* proto;
+    if (protoGetProto(critter->pid, &proto) == -1) {
+        return false;
+    }
+    return (proto->critter.data.flags & (1 << DUDE_STATE_SNEAKING)) != 0;
+}
+
 // 0x42378C
 static int attackCompute(Attack* attack)
 {
@@ -3963,7 +4213,11 @@ static int attackCompute(Attack* attack)
     }
 
     if (roll == ROLL_FAILURE) {
-        if (traitIsSelected(TRAIT_JINXED) || perkHasRank(gDude, PERK_JINXED)) {
+        // Jinxed is a global curse: the trait-holder's presence poisons every
+        // combatant's misses. Co-op: a remote player carrying it must curse
+        // the fight just like the vanilla dude would.
+        if (traitIsSelected(TRAIT_JINXED) || perkHasRank(gDude, PERK_JINXED)
+            || MpCombatAnyPlayerHasJinxed()) {
             if (randomBetween(0, 1) == 1) {
                 roll = ROLL_CRITICAL_FAILURE;
             }
@@ -3971,15 +4225,19 @@ static int attackCompute(Attack* attack)
     }
 
     if (roll == ROLL_SUCCESS) {
-        if ((attackType == ATTACK_TYPE_MELEE || attackType == ATTACK_TYPE_UNARMED) && attack->attacker == gDude) {
+        // Co-op: player perks (Slayer, Silent Death) must resolve for remote
+        // players too, not just the host's dude — their ranks and sneak
+        // state come from the avatar runtime / synced proto flags.
+        if ((attackType == ATTACK_TYPE_MELEE || attackType == ATTACK_TYPE_UNARMED)
+            && MpCombatIsPlayerCritter(attack->attacker)) {
             if (perkHasRank(attack->attacker, PERK_SLAYER)) {
                 roll = ROLL_CRITICAL_SUCCESS;
             }
 
-            if (perkHasRank(gDude, PERK_SILENT_DEATH)
-                && !_is_hit_from_front(gDude, attack->defender)
-                && dudeHasState(DUDE_STATE_SNEAKING)
-                && gDude != attack->defender->data.critter.combat.whoHitMe) {
+            if (perkHasRank(attack->attacker, PERK_SILENT_DEATH)
+                && !_is_hit_from_front(attack->attacker, attack->defender)
+                && mpCritterIsSneaking(attack->attacker)
+                && attack->attacker != attack->defender->data.critter.combat.whoHitMe) {
                 damageMultiplier = 4;
             }
 
@@ -3993,10 +4251,11 @@ static int attackCompute(Attack* attack)
         }
     }
 
-    if (attackType == ATTACK_TYPE_RANGED && roll == ROLL_SUCCESS && attack->attacker == gDude) {
-        if (perkGetRank(gDude, PERK_SNIPER) != 0) {
+    if (attackType == ATTACK_TYPE_RANGED && roll == ROLL_SUCCESS
+        && MpCombatIsPlayerCritter(attack->attacker)) {
+        if (perkGetRank(attack->attacker, PERK_SNIPER) != 0) {
             int d10 = randomBetween(1, 10);
-            int luck = critterGetStat(gDude, STAT_LUCK);
+            int luck = critterGetStat(attack->attacker, STAT_LUCK);
             if (d10 <= luck) {
                 roll = ROLL_CRITICAL_SUCCESS;
             }
@@ -4030,11 +4289,12 @@ static int attackCompute(Attack* attack)
         damageMultiplier = attackComputeCriticalHit(attack);
 
         // SFALL: Fix Silent Death bonus not being applied to critical hits.
-        if ((attackType == ATTACK_TYPE_MELEE || attackType == ATTACK_TYPE_UNARMED) && attack->attacker == gDude) {
-            if (perkHasRank(gDude, PERK_SILENT_DEATH)
-                && !_is_hit_from_front(gDude, attack->defender)
-                && dudeHasState(DUDE_STATE_SNEAKING)
-                && gDude != attack->defender->data.critter.combat.whoHitMe) {
+        if ((attackType == ATTACK_TYPE_MELEE || attackType == ATTACK_TYPE_UNARMED)
+            && MpCombatIsPlayerCritter(attack->attacker)) {
+            if (perkHasRank(attack->attacker, PERK_SILENT_DEATH)
+                && !_is_hit_from_front(attack->attacker, attack->defender)
+                && mpCritterIsSneaking(attack->attacker)
+                && attack->attacker != attack->defender->data.critter.combat.whoHitMe) {
                 damageMultiplier *= 2;
             }
         }
@@ -4465,9 +4725,10 @@ static int attackDetermineToHit(Object* attacker, int tile, Object* defender, Hi
 
             int perception = critterGetStat(attacker, STAT_PERCEPTION);
 
-            // SFALL: Fix Sharpshooter.
-            if (attacker == gDude) {
-                perception += 2 * perkGetRank(gDude, PERK_SHARPSHOOTER);
+            // SFALL: Fix Sharpshooter. Co-op: applies to every player, not
+            // just the host's dude.
+            if (MpCombatIsPlayerCritter(attacker)) {
+                perception += 2 * perkGetRank(attacker, PERK_SHARPSHOOTER);
             }
 
             int distanceMod = 0;
@@ -4480,7 +4741,7 @@ static int attackDetermineToHit(Object* attacker, int tile, Object* defender, Hi
             }
 
             if (distanceMod >= minEffectiveDist) {
-                int perceptionBonus = attacker == gDude
+                int perceptionBonus = MpCombatIsPlayerCritter(attacker)
                     ? perceptionBonusMult * (perception - 2)
                     : perceptionBonusMult * perception;
 
@@ -4526,7 +4787,7 @@ static int attackDetermineToHit(Object* attacker, int tile, Object* defender, Hi
 
         int minStrength = weaponGetMinStrengthRequired(weapon);
         int minStrengthMod = minStrength - critterGetStat(attacker, STAT_STRENGTH);
-        if (attacker == gDude && perkGetRank(gDude, PERK_WEAPON_HANDLING) != 0) {
+        if (MpCombatIsPlayerCritter(attacker) && perkGetRank(attacker, PERK_WEAPON_HANDLING) != 0) {
             minStrengthMod -= 3;
         }
 
@@ -4656,14 +4917,14 @@ static void attackComputeDamage(Attack* attack, int numRounds, int baseDamageMul
             damageThreshold = 20 * damageThreshold / 100;
         }
 
-        if (attack->attacker == gDude && traitIsSelected(TRAIT_FINESSE)) {
+        if (MpCombatIsPlayerCritter(attack->attacker) && traitIsSelectedFor(attack->attacker, TRAIT_FINESSE)) {
             damageResistance += 30;
         }
     }
 
     int damageBonus;
-    if (attack->attacker == gDude && weaponGetAttackTypeForHitMode(attack->weapon, attack->hitMode) == ATTACK_TYPE_RANGED) {
-        damageBonus = 2 * perkGetRank(gDude, PERK_BONUS_RANGED_DAMAGE);
+    if (MpCombatIsPlayerCritter(attack->attacker) && weaponGetAttackTypeForHitMode(attack->weapon, attack->hitMode) == ATTACK_TYPE_RANGED) {
+        damageBonus = 2 * perkGetRank(attack->attacker, PERK_BONUS_RANGED_DAMAGE);
     } else {
         damageBonus = 0;
     }
@@ -5450,8 +5711,27 @@ void _combat_anim_finished()
         return;
     }
 
-    if (gDude == _main_ctd.attacker) {
+    // Co-op client: the turn-loop epilogue clears COMBAT_STATE_PLAYER_TURN
+    // BEFORE applying the wait posture (gameUiDisable + WAIT_WATCH), so a
+    // lingering move/attack animation completing after the turn ended must
+    // not re-enable the UI or restore the move cursor. Clobbering the wait
+    // posture leaves the client's next turn starting with the UI already
+    // "enabled" (gameUiEnable becomes a no-op, the hex cursor never shows)
+    // and the cursor stuck on the invisible edge-scroll state.
+    bool playerTurnActive = (gCombatState & COMBAT_STATE_PLAYER_TURN) != 0;
+    if (gDude == _main_ctd.attacker && (playerTurnActive || !gMpIsClient)) {
         gameUiEnable();
+    }
+
+    // Co-op: _combat_anim_begin set the WAIT cursor (26) and disabled the UI
+    // for the attack animation; gameUiEnable restores the interface but never
+    // the 2D cursor, so after every attack the player's own turn looks stuck
+    // in WAIT mode. Restore the move cursor for the co-op player — but only
+    // while their turn is actually active.
+    if (gMpActive && (gMpIsHost || gMpIsClient) && gDude == _main_ctd.attacker
+        && playerTurnActive) {
+        gameMouseSetCursor(MOUSE_CURSOR_ARROW);
+        gameMouseSetMode(GAME_MOUSE_MODE_MOVE);
     }
 
     if (_combat_cleanup_enabled) {
@@ -5499,6 +5779,13 @@ void _combat_anim_finished()
             }
         }
     }
+
+    // Co-op client: the predicted attack's animation batch has settled; lift
+    // the monitor suppression so the host's broadcast lines and normal local
+    // feedback show again. (No-op when nothing was suppressed.)
+    if (gMpActive && gMpIsClient) {
+        MpCombatEndLocalAttackPrediction();
+    }
 }
 
 // 0x425FBC
@@ -5507,7 +5794,8 @@ static void _combat_standup(Object* a1)
     int v2;
 
     v2 = 3;
-    if (a1 == gDude && perkGetRank(a1, PERK_QUICK_RECOVERY)) {
+    // Co-op: Quick Recovery is a player perk — honor it for remote avatars.
+    if (MpCombatIsPlayerCritter(a1) && perkGetRank(a1, PERK_QUICK_RECOVERY)) {
         v2 = 1;
     }
 

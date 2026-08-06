@@ -39,6 +39,8 @@
 #include "mouse.h"
 #include "movie.h"
 #include "movie_effect.h"
+#include "multiplayer.h"
+#include "multiplayer_combat.h"
 #include "object.h"
 #include "options.h"
 #include "palette.h"
@@ -71,6 +73,7 @@
 #include "version.h"
 #include "win32.h"
 #include "window_manager.h"
+#include "window_manager_private.h"
 #include "worldmap.h"
 
 #if __APPLE__
@@ -151,6 +154,7 @@ int gameInitWithOptions(const char* windowTitle, bool isMapper, int font, int fl
     settingsInit(isMapper, argc, argv);
 
     debugModeInit(settings.debug.mode.c_str());
+    debugInstallCrashHandler(settings.debug.console_output_path.c_str());
 
     gIsMapper = isMapper;
 
@@ -399,6 +403,9 @@ int gameInitWithOptions(const char* windowTitle, bool isMapper, int font, int fl
     // SFALL: Execute all code that should be executed AFTER game init
     sfallOnAfterGameInit();
 
+    // Co-op: initialize networking now so the host/join menu can use ENet.
+    MpInit();
+
     return 0;
 }
 
@@ -450,6 +457,10 @@ void gameReset()
     sfall_gl_scr_reset();
     sfall_ini_cache_clear();
     sfallOnGameReset();
+
+    // Co-op: tear down any active session when the game resets.
+    MpReset();
+
     gGameLoaded = false;
 }
 
@@ -457,6 +468,10 @@ void gameReset()
 void gameExit()
 {
     debugPrint("\nGame Exit\n");
+
+    // Co-op: shut down any active session before tearing down the game state
+    // that the multiplayer module references (objects, map data, etc.).
+    MpShutdown();
 
     sfallOnGameModeChange(1, GameMode::getCurrentGameMode());
 
@@ -625,10 +640,34 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
         break;
     case KEY_UPPERCASE_A:
     case KEY_LOWERCASE_A:
+        if (gMpActive) {
+            debugFilePrint("MPCOMBAT: A key pressed inCombat=%d uiDisabled=%d barEnabled=%d",
+                isInCombatMode ? 1 : 0, gameUiIsDisabled() ? 1 : 0, interfaceBarEnabled() ? 1 : 0);
+        }
         if (interfaceBarEnabled()) {
             if (!isInCombatMode) {
-                _combat(nullptr);
+                if (gMpIsClient && gMpActive) {
+                    // Co-op: combat is host-authoritative — the client only
+                    // requests it; the host starts the real sequence. No
+                    // target: the host falls back to its own ordering.
+                    MpCombatSendStartRequest(nullptr);
+                } else {
+                    debugFilePrint("MPCOMBAT: host manual combat entry (A key)");
+                    _combat(nullptr);
+                }
+            } else if (gMpActive) {
+                debugFilePrint("MPCOMBAT: A key ignored (already in combat)");
             }
+        }
+        break;
+    case KEY_RETURN:
+        // Co-op: the end-combat button (RETURN) must work for every player,
+        // including watchers whose blocking turn loop is not running. The
+        // acting player's own loop handles RETURN; everyone else routes the
+        // request to the host, which runs the vanilla enemy check.
+        if (gMpIsClient && gMpActive && MpCombatIsActive() && !gMpCombat.turnActive) {
+            MpCombatSendEndRequest();
+            break;
         }
         break;
     case KEY_UPPERCASE_N:
@@ -654,6 +693,12 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
     case KEY_LOWERCASE_C:
         if (interfaceBarEnabled()) {
             soundPlayFile("ib1p1xx1");
+            if (gMpActive && gMpIsClient) {
+                // Co-op: the character profile is host-authoritative; local
+                // edits would diverge from the synced profile.
+                win_timed_msg("Character editor is unavailable in co-op", COLOR_RED);
+                break;
+            }
             bool isoWasEnabled = isoDisable();
             characterEditorShow(false);
             if (isoWasEnabled) {
@@ -869,6 +914,11 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
     case KEY_CTRL_S:
     case KEY_F4:
         soundPlayFile("ib1p1xx1");
+        // Co-op: a session save would serialize the synthetic player protos.
+        if (gMpActive) {
+            win_timed_msg("Saving is unavailable during a co-op session", COLOR_RED);
+            break;
+        }
         if (lsgSaveGame(1) == -1) {
             debugPrint("\n ** Error calling SaveGame()! **\n");
         }
@@ -876,6 +926,12 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
     case KEY_CTRL_L:
     case KEY_F5:
         soundPlayFile("ib1p1xx1");
+        // Co-op: loading replaces the map/dude out from under the network
+        // state — the session cannot recover.
+        if (gMpActive) {
+            win_timed_msg("Loading is unavailable during a co-op session", COLOR_RED);
+            break;
+        }
         if (lsgLoadGame(LOAD_SAVE_MODE_NORMAL) == -1) {
             debugPrint("\n ** Error calling LoadGame()! **\n");
         }
@@ -883,6 +939,10 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
     case KEY_F6:
         if (1) {
             soundPlayFile("ib1p1xx1");
+            if (gMpActive) {
+                win_timed_msg("Saving is unavailable during a co-op session", COLOR_RED);
+                break;
+            }
 
             int rc = lsgSaveGame(LOAD_SAVE_MODE_QUICK);
             if (rc == -1) {
@@ -898,6 +958,10 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
     case KEY_F7:
         if (1) {
             soundPlayFile("ib1p1xx1");
+            if (gMpActive) {
+                win_timed_msg("Loading is unavailable during a co-op session", COLOR_RED);
+                break;
+            }
 
             int rc = lsgLoadGame(LOAD_SAVE_MODE_QUICK);
             if (rc == -1) {

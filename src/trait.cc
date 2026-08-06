@@ -4,6 +4,7 @@
 
 #include "game.h"
 #include "message.h"
+#include "multiplayer_profile.h"
 #include "object.h"
 #include "platform_compat.h"
 #include "skill.h"
@@ -174,103 +175,116 @@ bool traitIsSelected(Trait trait)
     return gSelectedTraits[0] == trait || gSelectedTraits[1] == trait;
 }
 
+bool traitIsSelectedFor(Object* critter, int trait)
+{
+    MpPlayerRuntime* runtime = MpProfileFindRuntimeByObject(critter);
+    if (runtime == nullptr) return traitIsSelected((Trait)trait);
+    return runtime->profile.selectedTraits[0] == trait
+        || runtime->profile.selectedTraits[1] == trait;
+}
+
 // Returns stat modifier depending on selected traits.
 //
 // 0x4B3C7C trait_adjust_stat
 int traitGetStatModifier(Stat stat)
 {
+    return traitGetStatModifierFor(gDude, stat);
+}
+
+int traitGetStatModifierFor(Object* critter, int stat)
+{
     int modifier = 0;
 
     switch (stat) {
     case STAT_STRENGTH:
-        if (traitIsSelected(TRAIT_GIFTED)) {
+        if (traitIsSelectedFor(critter, TRAIT_GIFTED)) {
             modifier += 1;
         }
-        if (traitIsSelected(TRAIT_BRUISER)) {
+        if (traitIsSelectedFor(critter, TRAIT_BRUISER)) {
             modifier += 2;
         }
         break;
     case STAT_PERCEPTION:
-        if (traitIsSelected(TRAIT_GIFTED)) {
+        if (traitIsSelectedFor(critter, TRAIT_GIFTED)) {
             modifier += 1;
         }
         break;
     case STAT_ENDURANCE:
-        if (traitIsSelected(TRAIT_GIFTED)) {
+        if (traitIsSelectedFor(critter, TRAIT_GIFTED)) {
             modifier += 1;
         }
         break;
     case STAT_CHARISMA:
-        if (traitIsSelected(TRAIT_GIFTED)) {
+        if (traitIsSelectedFor(critter, TRAIT_GIFTED)) {
             modifier += 1;
         }
         break;
     case STAT_INTELLIGENCE:
-        if (traitIsSelected(TRAIT_GIFTED)) {
+        if (traitIsSelectedFor(critter, TRAIT_GIFTED)) {
             modifier += 1;
         }
         break;
     case STAT_AGILITY:
-        if (traitIsSelected(TRAIT_GIFTED)) {
+        if (traitIsSelectedFor(critter, TRAIT_GIFTED)) {
             modifier += 1;
         }
-        if (traitIsSelected(TRAIT_SMALL_FRAME)) {
+        if (traitIsSelectedFor(critter, TRAIT_SMALL_FRAME)) {
             modifier += 1;
         }
         break;
     case STAT_LUCK:
-        if (traitIsSelected(TRAIT_GIFTED)) {
+        if (traitIsSelectedFor(critter, TRAIT_GIFTED)) {
             modifier += 1;
         }
         break;
     case STAT_MAXIMUM_ACTION_POINTS:
-        if (traitIsSelected(TRAIT_BRUISER)) {
+        if (traitIsSelectedFor(critter, TRAIT_BRUISER)) {
             modifier -= 2;
         }
         break;
     case STAT_ARMOR_CLASS:
-        if (traitIsSelected(TRAIT_KAMIKAZE)) {
-            modifier -= critterGetBaseStat(gDude, STAT_ARMOR_CLASS);
+        if (traitIsSelectedFor(critter, TRAIT_KAMIKAZE)) {
+            modifier -= critterGetBaseStat(critter, STAT_ARMOR_CLASS);
         }
         break;
     case STAT_MELEE_DAMAGE:
-        if (traitIsSelected(TRAIT_HEAVY_HANDED)) {
+        if (traitIsSelectedFor(critter, TRAIT_HEAVY_HANDED)) {
             modifier += 4;
         }
         break;
     case STAT_CARRY_WEIGHT:
-        if (traitIsSelected(TRAIT_SMALL_FRAME)) {
-            modifier -= 10 * critterGetBaseStat(gDude, STAT_STRENGTH);
+        if (traitIsSelectedFor(critter, TRAIT_SMALL_FRAME)) {
+            modifier -= 10 * critterGetBaseStat(critter, STAT_STRENGTH);
         }
         break;
     case STAT_SEQUENCE:
-        if (traitIsSelected(TRAIT_KAMIKAZE)) {
+        if (traitIsSelectedFor(critter, TRAIT_KAMIKAZE)) {
             modifier += 5;
         }
         break;
     case STAT_HEALING_RATE:
-        if (traitIsSelected(TRAIT_FAST_METABOLISM)) {
+        if (traitIsSelectedFor(critter, TRAIT_FAST_METABOLISM)) {
             modifier += 2;
         }
         break;
     case STAT_CRITICAL_CHANCE:
-        if (traitIsSelected(TRAIT_FINESSE)) {
+        if (traitIsSelectedFor(critter, TRAIT_FINESSE)) {
             modifier += 10;
         }
         break;
     case STAT_BETTER_CRITICALS:
-        if (traitIsSelected(TRAIT_HEAVY_HANDED)) {
+        if (traitIsSelectedFor(critter, TRAIT_HEAVY_HANDED)) {
             modifier -= 30;
         }
         break;
     case STAT_RADIATION_RESISTANCE:
-        if (traitIsSelected(TRAIT_FAST_METABOLISM)) {
-            modifier -= critterGetBaseStat(gDude, STAT_RADIATION_RESISTANCE);
+        if (traitIsSelectedFor(critter, TRAIT_FAST_METABOLISM)) {
+            modifier -= critterGetBaseStat(critter, STAT_RADIATION_RESISTANCE);
         }
         break;
     case STAT_POISON_RESISTANCE:
-        if (traitIsSelected(TRAIT_FAST_METABOLISM)) {
-            modifier -= critterGetBaseStat(gDude, STAT_POISON_RESISTANCE);
+        if (traitIsSelectedFor(critter, TRAIT_FAST_METABOLISM)) {
+            modifier -= critterGetBaseStat(critter, STAT_POISON_RESISTANCE);
         }
         break;
     default:
@@ -285,13 +299,18 @@ int traitGetStatModifier(Stat stat)
 // 0x4B40FC trait_adjust_skill
 int traitGetSkillModifier(Skill skill)
 {
+    return traitGetSkillModifierFor(gDude, skill);
+}
+
+int traitGetSkillModifierFor(Object* critter, Skill skill)
+{
     int modifier = 0;
 
-    if (traitIsSelected(TRAIT_GIFTED)) {
+    if (traitIsSelectedFor(critter, TRAIT_GIFTED)) {
         modifier -= 10;
     }
 
-    if (traitIsSelected(TRAIT_GOOD_NATURED)) {
+    if (traitIsSelectedFor(critter, TRAIT_GOOD_NATURED)) {
         switch (skill) {
         case SKILL_SMALL_GUNS:
         case SKILL_BIG_GUNS:

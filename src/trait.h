@@ -8,6 +8,8 @@
 
 namespace fallout {
 
+struct Object;
+
 int traitsInit();
 void traitsReset();
 void traitsExit();
@@ -21,6 +23,9 @@ int traitGetFrmId(Trait trait);
 bool traitIsSelected(Trait trait);
 int traitGetStatModifier(Stat stat);
 int traitGetSkillModifier(Skill skill);
+bool traitIsSelectedFor(Object* critter, int trait);
+int traitGetStatModifierFor(Object* critter, int stat);
+int traitGetSkillModifierFor(Object* critter, Skill skill);
 
 } // namespace fallout
 

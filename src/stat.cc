@@ -17,6 +17,7 @@
 #include "item.h"
 #include "memory.h"
 #include "message.h"
+#include "multiplayer_profile.h"
 #include "object.h"
 #include "party_member.h"
 #include "perk.h"
@@ -348,11 +349,11 @@ int critterGetStat(Object* critter, Stat stat)
                 if (_combat_whose_turn() != critter) {
                     int armorClassBonus = critter->data.critter.combat.ap * unspentApBonus;
 
-                    if (critter == gDude) {
-                        if (perkHasRank(gDude, PERK_HTH_EVADE)) {
+                    if (critter == gDude || MpProfileIsNetworkPlayer(critter)) {
+                        if (perkHasRank(critter, PERK_HTH_EVADE)) {
                             bool hasWeapon = false;
 
-                            Object* item2 = critterGetItem2(gDude);
+                            Object* item2 = critterGetItem2(critter);
                             if (item2 != nullptr) {
                                 if (itemGetType(item2) == ITEM_TYPE_WEAPON) {
                                     if (weaponGetAnimationCode(item2) != WEAPON_ANIMATION_NONE) {
@@ -362,7 +363,7 @@ int critterGetStat(Object* critter, Stat stat)
                             }
 
                             if (!hasWeapon) {
-                                Object* item1 = critterGetItem1(gDude);
+                                Object* item1 = critterGetItem1(critter);
                                 if (item1 != nullptr) {
                                     if (itemGetType(item1) == ITEM_TYPE_WEAPON) {
                                         if (weaponGetAnimationCode(item1) != WEAPON_ANIMATION_NONE) {
@@ -374,7 +375,7 @@ int critterGetStat(Object* critter, Stat stat)
 
                             if (!hasWeapon) {
                                 armorClassBonus += critter->data.critter.combat.ap * perkGetRank(gDude, PERK_HTH_EVADE) * unspentApPerkBonus;
-                                value += skillGetValue(gDude, SKILL_UNARMED) / 12;
+                                value += skillGetValue(critter, SKILL_UNARMED) / 12;
                             }
                         }
                     }
@@ -389,7 +390,7 @@ int critterGetStat(Object* critter, Stat stat)
             break;
         }
 
-        if (critter == gDude) {
+        if (critter == gDude || MpProfileIsNetworkPlayer(critter)) {
             switch (stat) {
             case STAT_STRENGTH:
                 if (perkGetRank(critter, PERK_GAIN_STRENGTH)) {
@@ -547,8 +548,8 @@ int critterGetBaseStatWithTraitModifier(Object* critter, Stat stat)
 {
     int value = critterGetBaseStat(critter, stat);
 
-    if (critter == gDude) {
-        value += traitGetStatModifier(stat);
+    if (critter == gDude || MpProfileIsNetworkPlayer(critter)) {
+        value += traitGetStatModifierFor(critter, stat);
     }
 
     return value;
@@ -603,8 +604,8 @@ int critterSetBaseStat(Object* critter, Stat stat, int value)
             return -1;
         }
 
-        if (critter == gDude) {
-            value -= traitGetStatModifier(stat);
+        if (critter == gDude || MpProfileIsNetworkPlayer(critter)) {
+            value -= traitGetStatModifierFor(critter, stat);
         }
 
         if (value < statGetMinimum(critter, stat)) {
@@ -643,8 +644,8 @@ int critterIncBaseStat(Object* critter, Stat stat)
 {
     int value = critterGetBaseStat(critter, stat);
 
-    if (critter == gDude) {
-        value += traitGetStatModifier(stat);
+    if (critter == gDude || MpProfileIsNetworkPlayer(critter)) {
+        value += traitGetStatModifierFor(critter, stat);
     }
 
     return critterSetBaseStat(critter, stat, value + 1);
@@ -655,8 +656,8 @@ int critterDecBaseStat(Object* critter, Stat stat)
 {
     int value = critterGetBaseStat(critter, stat);
 
-    if (critter == gDude) {
-        value += traitGetStatModifier(stat);
+    if (critter == gDude || MpProfileIsNetworkPlayer(critter)) {
+        value += traitGetStatModifierFor(critter, stat);
     }
 
     return critterSetBaseStat(critter, stat, value - 1);

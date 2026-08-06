@@ -808,7 +808,10 @@ int itemGetWeight(Object* item)
     }
 
     Proto* proto;
-    protoGetProto(item->pid, &proto);
+    if (protoGetProto(item->pid, &proto) == -1) {
+        debugFilePrint("ITEM: itemGetWeight bad proto pid=0x%X tile=%d fid=0x%X", item->pid, item->tile, item->fid);
+        return 0;
+    }
     int weight = proto->item.weight;
 
     // NOTE: Uninline.

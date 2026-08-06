@@ -23,6 +23,8 @@
 #include "kb.h"
 #include "map.h"
 #include "mouse.h"
+#include "multiplayer.h"
+#include "multiplayer_combat.h"
 #include "object.h"
 #include "party_member.h"
 #include "perk.h"
@@ -2821,6 +2823,25 @@ void _object_animate()
 
         Object* object = sad->obj;
 
+        // Co-op: remote networked critters are driven by host state updates,
+        // but the local client's own player keeps the normal local animation
+        // path so movement remains responsive and interruptible.
+        //
+        // Fast-complete instead of skipping: attack sequences register the
+        // defender's animations (dodge, knockdown, death) in the same
+        // sequence as the attacker's swing. A skipped SAD would stall the
+        // whole sequence forever — _anim_set_end never fires,
+        // _combat_anim_finished never runs, and the client's UI stays locked
+        // on the wait cursor with every later attack rejected (prioritized
+        // sequence never cleared). Completing the SAD keeps the sequence
+        // bookkeeping draining; the host's state updates still drive what
+        // the player actually sees.
+        if (gMpIsClient && gMpActive && MpIsNetworkedCritter(object) && object != gDude) {
+            sad->step = ANIM_COMPLETE;
+            _anim_set_continue(sad->animationSequenceIndex, 1);
+            continue;
+        }
+
         unsigned int time = getTicks();
         if (getTicksBetween(time, sad->animationTimestamp) < sad->ticksPerFrame) {
             continue;
@@ -3043,25 +3064,65 @@ int _check_move(int* actionPointsPtr)
 // 0x4180B4
 int _dude_move(int actionPoints)
 {
-    // 0x51072C
-    static int lastDestination = -2;
-
     int tile = _check_move(&actionPoints);
     if (tile == -1) {
         return -1;
     }
 
-    if (lastDestination == tile) {
-        return _dude_run(actionPoints);
+    return _dude_move_to_tile(tile, gDude->elevation, actionPoints, nullptr);
+}
+
+int _dude_move_to_tile(int tile, int elevation, int actionPoints, bool* isRun)
+{
+    // 0x51072C
+    static int lastDestination = -2;
+
+    if (!hexGridTileIsValid(tile) || !elevationIsValid(elevation)) {
+        return -1;
     }
 
+    bool run = lastDestination == tile;
     lastDestination = tile;
+    if (isRun != nullptr) {
+        *isRun = run;
+    }
 
-    reg_anim_begin(ANIMATION_REQUEST_RESERVED);
+    // Co-op: the client's combat movement is an intent — the host resolves
+    // the authoritative walk on its copy; the local walk is prediction only.
+    if (gMpActive && gMpIsClient && MpCombatIsActive()) {
+        MpCombatSendMoveIntent(tile, elevation, run);
+    }
 
-    animationRegisterMoveToTile(gDude, tile, gDude->elevation, actionPoints, 0);
+    if (run) {
+        return _dude_run_to_tile(tile, elevation, actionPoints);
+    }
 
-    return reg_anim_end();
+    if (reg_anim_begin(ANIMATION_REQUEST_RESERVED) != 0) {
+        return -1;
+    }
+
+    int rc = animationRegisterMoveToTile(gDude, tile, elevation, actionPoints, 0);
+    int endRc = reg_anim_end();
+    return rc != 0 ? rc : endRc;
+}
+
+int _dude_run_to_tile(int tile, int elevation, int actionPoints)
+{
+    if (!hexGridTileIsValid(tile) || !elevationIsValid(elevation)) {
+        return -1;
+    }
+
+    if (!perkGetRank(gDude, PERK_SILENT_RUNNING)) {
+        dudeDisableState(DUDE_STATE_SNEAKING);
+    }
+
+    if (reg_anim_begin(ANIMATION_REQUEST_RESERVED) != 0) {
+        return -1;
+    }
+
+    int rc = animationRegisterRunToTile(gDude, tile, elevation, actionPoints, 0);
+    int endRc = reg_anim_end();
+    return rc != 0 ? rc : endRc;
 }
 
 // 0x41810C
@@ -3072,15 +3133,7 @@ int _dude_run(int actionPoints)
         return -1;
     }
 
-    if (!perkGetRank(gDude, PERK_SILENT_RUNNING)) {
-        dudeDisableState(DUDE_STATE_SNEAKING);
-    }
-
-    reg_anim_begin(ANIMATION_REQUEST_RESERVED);
-
-    animationRegisterRunToTile(gDude, tile, gDude->elevation, actionPoints, 0);
-
-    return reg_anim_end();
+    return _dude_run_to_tile(tile, gDude->elevation, actionPoints);
 }
 
 // 0x418168
@@ -3125,7 +3178,8 @@ void _dude_fidget()
             break;
         }
 
-        if ((object->flags & OBJECT_HIDDEN) == 0 && FID_TYPE(object->fid) == OBJ_TYPE_CRITTER && animationTypeFromFid(object->fid) == ANIM_STAND && !critterIsDead(object)) {
+        if ((object->flags & OBJECT_HIDDEN) == 0 && FID_TYPE(object->fid) == OBJ_TYPE_CRITTER && animationTypeFromFid(object->fid) == ANIM_STAND && !critterIsDead(object)
+            && !(gMpIsClient && gMpActive && MpIsNetworkedCritter(object))) {
             Rect rect;
             objectGetRect(object, &rect);
 

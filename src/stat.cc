@@ -1005,7 +1005,13 @@ int pcAddExperienceWithOptions(int xp, bool doParty, int* xpGained)
             critterSetBonusStat(gDude, STAT_MAXIMUM_HIT_POINTS, bonusHp + hpPerLevel);
 
             int maxHpAfter = critterGetStat(gDude, STAT_MAXIMUM_HIT_POINTS);
-            critterAdjustHitPoints(gDude, maxHpAfter - maxHpBefore);
+            // Co-op: HP is host-authoritative. The client's level-up heal
+            // would fight the state sync (the host mirrors the max-HP gain
+            // onto the avatar and the tick channel delivers it once). Skip
+            // the local heal — the max-HP bonus still rides the profile.
+            if (!(gMpActive && gMpIsClient)) {
+                critterAdjustHitPoints(gDude, maxHpAfter - maxHpBefore);
+            }
 
             interfaceRenderHitPoints(false);
 

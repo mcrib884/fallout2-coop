@@ -1,6 +1,7 @@
 #ifndef ACTIONS_H
 #define ACTIONS_H
 
+#include "animation.h"
 #include "combat_defs.h"
 #include "obj_types.h"
 #include "perk_defs.h"
@@ -21,6 +22,10 @@ int actionUseSkill(Object* user, Object* target, Skill skill);
 bool _is_hit_from_front(const Object* attacker, const Object* defender);
 bool _can_see(Object* source, Object* target);
 bool _action_explode_running();
+// Plays the damage feedback (flinch anim, pain sound, blood, death/fall
+// anims) for a resolved attack. Co-op: the client replays the host's
+// authoritative outcome with this.
+void showDamageToObject(Object* defender, int damage, int flags, Object* weapon, bool hitFromFront, int knockbackDistance, int knockbackRotation, AnimationType attackerAnimation, Object* attacker, int delay);
 int actionExplode(int tile, int elevation, int minDamage, int maxDamage, Object* sourceObj, bool animate);
 int actionTalk(Object* obj, Object* critter);
 void actionDamage(int tile, int elevation, int minDamage, int maxDamage, DamageType damageType, bool animated, bool bypassArmor);

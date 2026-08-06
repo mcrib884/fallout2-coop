@@ -13,10 +13,12 @@
 #include "skill_defs.h"
 #include "stat_defs.h"
 #include "trait_defs.h"
+#include "net.h"
 
 namespace fallout {
 
-constexpr uint16_t MP_PROFILE_SCHEMA_VERSION = 1;
+// Bumped when the wire layout changes (sectioned body in v2).
+constexpr uint16_t MP_PROFILE_SCHEMA_VERSION = 2;
 constexpr size_t MP_PROFILE_NAME_LENGTH = 32;
 constexpr size_t MP_PROFILE_MAX_BYTES = 16 * 1024 * 1024;
 constexpr size_t MP_PROFILE_MAX_INVENTORY_NODES = 4096;
@@ -122,6 +124,40 @@ struct MpPlayerRuntime {
     int syntheticPid = -1;
 };
 
+// Persistent profile sections. The wire format ships a subset of these; the
+// volatile runtime fields (transform, hp/ap, combat state, object flags) are
+// deliberately NOT part of any section — the per-tick state channel owns them.
+enum ProfileSectionId {
+    PROFILE_SECTION_IDENTITY = 1,   // name, proto identity, bodyType, experience, modelName
+    PROFILE_SECTION_BASE_STATS = 2,
+    PROFILE_SECTION_BONUS_STATS = 3,
+    PROFILE_SECTION_SKILLS = 4,
+    PROFILE_SECTION_PC_STATS = 5,   // pcStats + editor state
+    PROFILE_SECTION_TAGS_TRAITS = 6,
+    PROFILE_SECTION_PERKS = 7,
+    PROFILE_SECTION_KILLS = 8,
+    PROFILE_SECTION_SKILL_USE = 9,  // skillUseTimes + sneakWorking
+    PROFILE_SECTION_INVENTORY = 10,
+    PROFILE_SECTION_MODEL = 11,     // modelHash + payload (files per includeModel)
+    PROFILE_SECTION_VOLATILE = 12,  // join-only: spawn transform + hp/ap snapshot
+    PROFILE_SECTION_COUNT = 12,
+};
+
+// Serializes ONE section's payload (no section header). The MODEL section
+// includes the file payload only when includeModel is set.
+bool MpProfileSerializeSection(const MpPlayerProfile& profile, uint8_t sectionId,
+    bool includeModel, std::vector<uint8_t>* out);
+// Parses a concatenated section body into |profile| (which acts as the base —
+// absent sections keep their current values). Returns the mask of sections
+// actually present (bit id-1), or 0 on failure.
+uint32_t MpProfileDeserializeSections(const void* data, size_t dataLength,
+    MpPlayerProfile* profile);
+// True when the section's persistent content differs between two profiles.
+// The MODEL section compares identity (modelHash) only; the VOLATILE section
+// always compares false (it is never change-detected).
+bool MpProfileSectionChanged(const MpPlayerProfile& a, const MpPlayerProfile& b,
+    uint8_t sectionId);
+
 bool MpProfileCaptureLocal(MpPlayerProfile* profile);
 // Local capture without model file bytes; used for per-tick change detection.
 bool MpProfileCaptureLocalNoModel(MpPlayerProfile* profile);
@@ -132,8 +168,29 @@ bool MpProfileCaptureObject(const Object* object, MpPlayerProfile* profile);
 bool MpProfileCaptureObjectNoModel(const Object* object, MpPlayerProfile* profile);
 bool MpProfileValidate(const MpPlayerProfile& profile);
 uint32_t MpProfileHash(const MpPlayerProfile& profile);
-bool MpProfileSerialize(const MpPlayerProfile& profile, std::vector<uint8_t>* data);
+bool MpProfileSerialize(const MpPlayerProfile& profile, std::vector<uint8_t>* data,
+    bool includeModel = true);
 bool MpProfileDeserialize(const void* data, size_t dataLength, MpPlayerProfile* profile);
+
+// Builds a sectioned wire body: concatenated [id][res][size]+payload sections
+// for every section present in changedSections (0 = all sections). Fills the
+// section info table and the content hash (hash of exactly the shipped bytes).
+bool MpProfileBuildBody(const MpPlayerProfile& profile, uint32_t changedSections,
+    bool includeModel, std::vector<uint8_t>* body,
+    NetProfileSectionInfo* infos, uint16_t* sectionCount, uint32_t* contentHash);
+// FNV-1a hash of raw bytes — matches the wire content-hash convention.
+uint32_t MpProfileHashBytes(const void* data, size_t size);
+
+// Session model registry: model payloads are content-addressed by hash and
+// transferred once per peer; receivers resolve later profiles from here.
+void MpModelRegistryRemember(uint32_t modelHash, const std::vector<MpModelFile>& files);
+bool MpModelRegistryResolve(uint32_t modelHash, std::vector<MpModelFile>* out);
+void MpModelRegistryClear();
+
+// Fills profile->modelFiles from the registry when the payload was skipped on
+// the wire. Returns false only when the model is genuinely unknown (the
+// caller should request a re-send WITH the payload).
+bool MpProfileResolveModel(MpPlayerProfile* profile);
 
 MpPlayerRuntime* MpProfileCreateRuntime(uint8_t netId, const MpPlayerProfile& profile,
     int tile, int elevation, int rotation);
@@ -146,7 +203,8 @@ void MpProfileUpdateRuntime(uint8_t netId, const MpPlayerProfile& profile);
 // applyPcStats=false preserves the local pc-stat block (XP/level owned by the
 // local instance; host-granted combat XP is applied via pcAddExperience
 // delta before this call instead).
-bool MpProfileApplyLocal(const MpPlayerProfile& profile, bool applyPcStats = true);
+bool MpProfileApplyLocal(const MpPlayerProfile& profile, bool applyPcStats = true,
+    uint32_t changedSections = 0);
 MpPlayerRuntime* MpProfileGetRuntime(uint8_t netId);
 MpPlayerRuntime* MpProfileFindRuntimeByObject(const Object* object);
 void MpProfileDetachAvatar(uint8_t netId);
@@ -158,7 +216,8 @@ void MpProfileDestroyAllRuntimes();
 // stats, skills, flags, experience, inventory) onto the LIVE avatar object —
 // never recreating it. Transform/HP/combat fields are ignored (they live on
 // the per-tick state channel). Returns false when the avatar is not available.
-bool MpProfileApplyRuntimeUpdate(uint8_t netId, const MpPlayerProfile& profile);
+bool MpProfileApplyRuntimeUpdate(uint8_t netId, const MpPlayerProfile& profile,
+    uint32_t changedSections = 0);
 
 // Host: grant combat XP to every remote player's avatar. Only the avatar's
 // proto experience is bumped — the stored runtime profile is left untouched

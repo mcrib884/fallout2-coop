@@ -83,7 +83,7 @@ static AnimationType actionBlood(Object* obj, AnimationType anim, int delay);
 static AnimationType pickDeathAnim(Object* attacker, Object* defender, Object* weapon, int damage, AnimationType attackerAnimation, bool hitFromFront);
 static AnimationType checkDeathAnim(Object* obj, AnimationType anim, int minViolenceLevel, bool hitFromFront);
 static int _internal_destroy(Object* _, Object* toDestroy);
-static void showDamageToObject(Object* defender, int damage, int flags, Object* weapon, bool hitFromFront, int knockbackDistance, int knockbackRotation, AnimationType attackerAnimation, Object* attacker, int delay);
+void showDamageToObject(Object* defender, int damage, int flags, Object* weapon, bool hitFromFront, int knockbackDistance, int knockbackRotation, AnimationType attackerAnimation, Object* attacker, int delay);
 static int _show_death(Object* obj, AnimationType anim);
 static int showDamageToExtras(Attack* attack);
 static void showDamage(Attack* attack, AnimationType attackerAnimation, int delay);
@@ -551,6 +551,13 @@ static void showDamageToAttacker(Attack* attack, AnimationType attackerAnimation
 // 0x4110AC show_damage
 void showDamage(Attack* attack, AnimationType attackerAnimation, int delay)
 {
+    // Co-op: the acting client's local attack is a prediction — no floating
+    // damage numbers from its own dice (the host's broadcast monitor
+    // messages carry the authoritative amounts).
+    if (gMpActive && gMpIsClient && MpCombatIsActive() && attack->attacker == gDude) {
+        return;
+    }
+
     for (int index = 0; index < attack->extrasLength; index++) {
         Object* object = attack->extras[index];
         if (FID_TYPE(object->fid) == OBJ_TYPE_CRITTER) {

@@ -1635,17 +1635,19 @@ void inventoryOpen()
 
             if (actionPointsRequired > 0) {
                 int apBefore = gDude->data.critter.combat.ap;
-                if (actionPointsRequired > gDude->data.critter.combat.ap) {
-                    gDude->data.critter.combat.ap = 0;
-                } else {
-                    gDude->data.critter.combat.ap -= actionPointsRequired;
-                }
-                interfaceRenderActionPoints(gDude->data.critter.combat.ap, _combat_free_move);
                 if (gMpActive && gMpIsClient) {
-                    // Co-op: the local deduction is prediction only — the
-                    // host must deduct from its authoritative copy or the
-                    // next state sync refunds the AP.
+                    // Thin client: AP is host-authoritative. The host charges
+                    // the cost below and the mirrored AP lands via the tick
+                    // state — a local deduction here would be a prediction
+                    // write fighting the state channel (double-write desync).
                     MpCombatSendInventoryApCost(actionPointsRequired);
+                } else {
+                    if (actionPointsRequired > gDude->data.critter.combat.ap) {
+                        gDude->data.critter.combat.ap = 0;
+                    } else {
+                        gDude->data.critter.combat.ap -= actionPointsRequired;
+                    }
+                    interfaceRenderActionPoints(gDude->data.critter.combat.ap, _combat_free_move);
                 }
                 if (gMpActive) {
                     debugFilePrint("MPINV: open consumed cost=%d apBefore=%d apAfter=%d client=%d",

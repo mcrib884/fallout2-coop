@@ -121,6 +121,13 @@ public:
         return true;
     }
 
+    bool skip(size_t size)
+    {
+        if (_remaining() < size) return false;
+        _offset += size;
+        return true;
+    }
+
     size_t remaining() const { return _remaining(); }
 
 private:
@@ -422,18 +429,27 @@ static bool installModelFiles(MpPlayerProfile* profile)
     if (profile == nullptr || profile->modelName[0] == '\0') return true;
     if (profile->modelFiles.empty()) {
         int modelId = artListIndex(OBJ_TYPE_CRITTER, profile->modelName);
-        if (modelId < 0) {
-            debugFilePrint("MPROF: install model failed name='%s' not in art list", profile->modelName);
+        if (modelId >= 0) {
+            profile->localModelIndex = modelId;
+            debugFilePrint("MPROF: install model by name='%s' index=%d", profile->modelName, modelId);
+            return true;
+        }
+        // Custom model whose payload was skipped on the wire (the receiver
+        // was assumed to have it): pull it from the session registry.
+        if (!MpModelRegistryResolve(profile->modelHash, &profile->modelFiles)) {
+            debugFilePrint("MPROF: install model failed name='%s' hash=%08X not in registry",
+                profile->modelName, profile->modelHash);
             return false;
         }
-        profile->localModelIndex = modelId;
-        debugFilePrint("MPROF: install model by name='%s' index=%d", profile->modelName, modelId);
-        return true;
+        debugFilePrint("MPROF: install model from registry name='%s' hash=%08X files=%zu",
+            profile->modelName, profile->modelHash, profile->modelFiles.size());
     }
     if (hashModelFiles(profile->modelFiles) != profile->modelHash) {
         debugFilePrint("MPROF: install model failed hash mismatch name='%s'", profile->modelName);
         return false;
     }
+    // Remember the payload so future skipped-model profiles resolve locally.
+    MpModelRegistryRemember(profile->modelHash, profile->modelFiles);
 
     // File operations need the root WITHOUT a trailing backslash
     // (compat_mkdir_recursive fails on a trailing separator), but the art
@@ -590,217 +606,390 @@ static void writeIntArray(Writer* writer, const int32_t* values, size_t count)
     for (size_t index = 0; index < count; index++) writer->i32(values[index]);
 }
 
-static bool readProfileBody(Reader* reader, MpPlayerProfile* profile)
+static bool readProfileSectionIdentity(Reader* r, MpPlayerProfile* p)
 {
-    if (!reader->bytes(profile->name, sizeof(profile->name))) return false;
-    if (!reader->i32(&profile->prototypeMessageId)
-        || !reader->i32(&profile->prototypeFlags)
-        || !reader->i32(&profile->prototypeExtendedFlags)
-        || !reader->i32(&profile->prototypeLightDistance)
-        || !reader->i32(&profile->prototypeLightIntensity)
-        || !reader->i32(&profile->prototypeHeadFid)
-        || !reader->i32(&profile->prototypeFid)
-        || !reader->i32(&profile->prototypeAiPacket)
-        || !reader->i32(&profile->prototypeTeam)
-        || !reader->i32(&profile->critterFlags)
-        || !readIntArray(reader, profile->baseStats, SAVEABLE_STAT_COUNT)
-        || !readIntArray(reader, profile->bonusStats, SAVEABLE_STAT_COUNT)
-        || !readIntArray(reader, profile->skills, SKILL_COUNT)
-        || !reader->i32(&profile->bodyType)
-        || !reader->i32(&profile->experience)
-        || !reader->i32(&profile->killType)
-        || !reader->i32(&profile->damageType)
-        || !readIntArray(reader, profile->pcStats, PC_STAT_COUNT)
-        || !readIntArray(reader, profile->taggedSkills, NUM_TAGGED_SKILLS)
-        || !readIntArray(reader, profile->selectedTraits, TRAITS_MAX_SELECTED_COUNT)
-        || !readIntArray(reader, profile->perkRanks, PERK_COUNT)
-        || !readIntArray(reader, profile->killCounts, KILL_TYPE_DEFAULT_COUNT)
-        || !readIntArray(reader, &profile->skillUseTimes[0][0], SKILL_COUNT * 3)
-        || !reader->i32(&profile->sneakWorking)
-        || !reader->i32(&profile->editorLastLevel)
-        || !reader->i32(&profile->editorHasFreePerk)
-        || !reader->i32(&profile->remainingCharacterPoints)
-        || !reader->i32(&profile->tile)
-        || !reader->i32(&profile->x)
-        || !reader->i32(&profile->y)
-        || !reader->i32(&profile->sx)
-        || !reader->i32(&profile->sy)
-        || !reader->i32(&profile->frame)
-        || !reader->i32(&profile->rotation)
-        || !reader->i32(&profile->fid)
-        || !reader->i32(&profile->flags)
-        || !reader->i32(&profile->elevation)
-        || !reader->i32(&profile->lightDistance)
-        || !reader->i32(&profile->lightIntensity)
-        || !reader->i32(&profile->hp)
-        || !reader->i32(&profile->radiation)
-        || !reader->i32(&profile->poison)
-        || !reader->i32(&profile->reaction)
-        || !reader->i32(&profile->combatManeuver)
-        || !reader->i32(&profile->combatAp)
-        || !reader->i32(&profile->combatResults)
-        || !reader->i32(&profile->combatDamageLastTurn)
-        || !reader->i32(&profile->combatAiPacket)
-        || !reader->i32(&profile->combatTeam)
-        || !reader->u32(&profile->whoHitMeNetId)
-        || !reader->bytes(profile->modelName, sizeof(profile->modelName))) {
+    if (!r->bytes(p->name, sizeof(p->name))
+        || !r->i32(&p->prototypeMessageId)
+        || !r->i32(&p->prototypeFlags)
+        || !r->i32(&p->prototypeExtendedFlags)
+        || !r->i32(&p->prototypeLightDistance)
+        || !r->i32(&p->prototypeLightIntensity)
+        || !r->i32(&p->prototypeHeadFid)
+        || !r->i32(&p->prototypeFid)
+        || !r->i32(&p->prototypeAiPacket)
+        || !r->i32(&p->prototypeTeam)
+        || !r->i32(&p->critterFlags)
+        || !r->i32(&p->bodyType)
+        || !r->i32(&p->experience)
+        || !r->i32(&p->killType)
+        || !r->i32(&p->damageType)
+        || !r->bytes(p->modelName, sizeof(p->modelName))) {
         return false;
     }
-    profile->name[MP_PROFILE_NAME_LENGTH - 1] = '\0';
-    profile->modelName[12] = '\0';
+    p->name[MP_PROFILE_NAME_LENGTH - 1] = '\0';
+    p->modelName[12] = '\0';
+    return true;
+}
 
-    uint32_t modelFileCount;
-    if (!reader->u32(&profile->modelHash) || !reader->u32(&modelFileCount)
-        || modelFileCount > 512) {
-        return false;
-    }
-    profile->modelFiles.clear();
-    for (uint32_t index = 0; index < modelFileCount; index++) {
-        uint32_t pathLength;
-        uint32_t dataLength;
-        if (!reader->u32(&pathLength) || pathLength == 0 || pathLength > 64
-            || !reader->u32(&dataLength) || dataLength == 0
-            || dataLength > MP_PROFILE_MAX_BYTES / 2
-            || pathLength > reader->remaining()) {
-            return false;
-        }
-        MpModelFile file;
-        file.path.resize(pathLength);
-        if (!reader->bytes(file.path.data(), pathLength)
-            || !isSafeModelFilePath(file.path)
-            || dataLength > reader->remaining()) {
-            return false;
-        }
-        file.data.resize(dataLength);
-        if (!reader->bytes(file.data.data(), dataLength)) return false;
-        profile->modelFiles.push_back(std::move(file));
-    }
+static void writeProfileSectionIdentity(Writer* w, const MpPlayerProfile& p)
+{
+    w->bytes(p.name, sizeof(p.name));
+    w->i32(p.prototypeMessageId);
+    w->i32(p.prototypeFlags);
+    w->i32(p.prototypeExtendedFlags);
+    w->i32(p.prototypeLightDistance);
+    w->i32(p.prototypeLightIntensity);
+    w->i32(p.prototypeHeadFid);
+    w->i32(p.prototypeFid);
+    w->i32(p.prototypeAiPacket);
+    w->i32(p.prototypeTeam);
+    w->i32(p.critterFlags);
+    w->i32(p.bodyType);
+    w->i32(p.experience);
+    w->i32(p.killType);
+    w->i32(p.damageType);
+    w->bytes(p.modelName, sizeof(p.modelName));
+}
 
+static bool readProfileSectionBaseStats(Reader* r, MpPlayerProfile* p)
+{
+    return readIntArray(r, p->baseStats, SAVEABLE_STAT_COUNT);
+}
+
+static void writeProfileSectionBaseStats(Writer* w, const MpPlayerProfile& p)
+{
+    writeIntArray(w, p.baseStats, SAVEABLE_STAT_COUNT);
+}
+
+static bool readProfileSectionBonusStats(Reader* r, MpPlayerProfile* p)
+{
+    return readIntArray(r, p->bonusStats, SAVEABLE_STAT_COUNT);
+}
+
+static void writeProfileSectionBonusStats(Writer* w, const MpPlayerProfile& p)
+{
+    writeIntArray(w, p.bonusStats, SAVEABLE_STAT_COUNT);
+}
+
+static bool readProfileSectionSkills(Reader* r, MpPlayerProfile* p)
+{
+    return readIntArray(r, p->skills, SKILL_COUNT);
+}
+
+static void writeProfileSectionSkills(Writer* w, const MpPlayerProfile& p)
+{
+    writeIntArray(w, p.skills, SKILL_COUNT);
+}
+
+static bool readProfileSectionPcStats(Reader* r, MpPlayerProfile* p)
+{
+    return readIntArray(r, p->pcStats, PC_STAT_COUNT)
+        && r->i32(&p->editorLastLevel)
+        && r->i32(&p->editorHasFreePerk)
+        && r->i32(&p->remainingCharacterPoints);
+}
+
+static void writeProfileSectionPcStats(Writer* w, const MpPlayerProfile& p)
+{
+    writeIntArray(w, p.pcStats, PC_STAT_COUNT);
+    w->i32(p.editorLastLevel);
+    w->i32(p.editorHasFreePerk);
+    w->i32(p.remainingCharacterPoints);
+}
+
+static bool readProfileSectionTagsTraits(Reader* r, MpPlayerProfile* p)
+{
+    return readIntArray(r, p->taggedSkills, NUM_TAGGED_SKILLS)
+        && readIntArray(r, p->selectedTraits, TRAITS_MAX_SELECTED_COUNT);
+}
+
+static void writeProfileSectionTagsTraits(Writer* w, const MpPlayerProfile& p)
+{
+    writeIntArray(w, p.taggedSkills, NUM_TAGGED_SKILLS);
+    writeIntArray(w, p.selectedTraits, TRAITS_MAX_SELECTED_COUNT);
+}
+
+static bool readProfileSectionPerks(Reader* r, MpPlayerProfile* p)
+{
+    return readIntArray(r, p->perkRanks, PERK_COUNT);
+}
+
+static void writeProfileSectionPerks(Writer* w, const MpPlayerProfile& p)
+{
+    writeIntArray(w, p.perkRanks, PERK_COUNT);
+}
+
+static bool readProfileSectionKills(Reader* r, MpPlayerProfile* p)
+{
+    return readIntArray(r, p->killCounts, KILL_TYPE_DEFAULT_COUNT);
+}
+
+static void writeProfileSectionKills(Writer* w, const MpPlayerProfile& p)
+{
+    writeIntArray(w, p.killCounts, KILL_TYPE_DEFAULT_COUNT);
+}
+
+static bool readProfileSectionSkillUse(Reader* r, MpPlayerProfile* p)
+{
+    return readIntArray(r, &p->skillUseTimes[0][0], SKILL_COUNT * 3)
+        && r->i32(&p->sneakWorking);
+}
+
+static void writeProfileSectionSkillUse(Writer* w, const MpPlayerProfile& p)
+{
+    writeIntArray(w, &p.skillUseTimes[0][0], SKILL_COUNT * 3);
+    w->i32(p.sneakWorking);
+}
+
+static bool readProfileSectionInventory(Reader* r, MpPlayerProfile* p)
+{
     uint32_t rootCount;
     uint32_t nodeCount;
-    if (!reader->u32(&rootCount) || !reader->u32(&nodeCount)
+    if (!r->u32(&rootCount) || !r->u32(&nodeCount)
         || rootCount > MP_PROFILE_MAX_INVENTORY_NODES
         || nodeCount > MP_PROFILE_MAX_INVENTORY_NODES) {
         return false;
     }
-    profile->rootInventory.resize(rootCount);
-    for (uint32_t& id : profile->rootInventory) {
-        if (!reader->u32(&id)) return false;
+    p->rootInventory.resize(rootCount);
+    for (uint32_t& id : p->rootInventory) {
+        if (!r->u32(&id)) return false;
     }
-    profile->inventory.clear();
-    profile->inventory.resize(nodeCount);
-    for (MpInventoryNode& node : profile->inventory) {
+    p->inventory.clear();
+    p->inventory.resize(nodeCount);
+    for (MpInventoryNode& node : p->inventory) {
         uint32_t childCount;
-        if (!reader->u32(&node.id)
-            || !reader->i32(&node.pid)
-            || !reader->i32(&node.fid)
-            || !reader->i32(&node.frame)
-            || !reader->i32(&node.rotation)
-            || !reader->i32(&node.flags)
-            || !reader->i32(&node.dataFlags)
-            || !reader->i32(&node.quantity)
-            || !reader->i32(&node.lightDistance)
-            || !reader->i32(&node.lightIntensity)
-            || !reader->i32(&node.weaponAmmoQuantity)
-            || !reader->i32(&node.weaponAmmoTypePid)
-            || !reader->i32(&node.ammoQuantity)
-            || !reader->i32(&node.miscCharges)
-            || !reader->i32(&node.keyCode)
-            || !reader->u32(&childCount)
+        if (!r->u32(&node.id)
+            || !r->i32(&node.pid)
+            || !r->i32(&node.fid)
+            || !r->i32(&node.frame)
+            || !r->i32(&node.rotation)
+            || !r->i32(&node.flags)
+            || !r->i32(&node.dataFlags)
+            || !r->i32(&node.quantity)
+            || !r->i32(&node.lightDistance)
+            || !r->i32(&node.lightIntensity)
+            || !r->i32(&node.weaponAmmoQuantity)
+            || !r->i32(&node.weaponAmmoTypePid)
+            || !r->i32(&node.ammoQuantity)
+            || !r->i32(&node.miscCharges)
+            || !r->i32(&node.keyCode)
+            || !r->u32(&childCount)
             || childCount > MP_PROFILE_MAX_INVENTORY_NODES) {
             return false;
         }
         node.children.resize(childCount);
         for (uint32_t& child : node.children) {
-            if (!reader->u32(&child)) return false;
+            if (!r->u32(&child)) return false;
         }
     }
-    return reader->remaining() == 0;
+    return true;
 }
 
-static void writeProfileBody(Writer* writer, const MpPlayerProfile& profile)
+static void writeProfileSectionInventory(Writer* w, const MpPlayerProfile& p)
 {
-    writer->bytes(profile.name, sizeof(profile.name));
-    writer->i32(profile.prototypeMessageId);
-    writer->i32(profile.prototypeFlags);
-    writer->i32(profile.prototypeExtendedFlags);
-    writer->i32(profile.prototypeLightDistance);
-    writer->i32(profile.prototypeLightIntensity);
-    writer->i32(profile.prototypeHeadFid);
-    writer->i32(profile.prototypeFid);
-    writer->i32(profile.prototypeAiPacket);
-    writer->i32(profile.prototypeTeam);
-    writer->i32(profile.critterFlags);
-    writeIntArray(writer, profile.baseStats, SAVEABLE_STAT_COUNT);
-    writeIntArray(writer, profile.bonusStats, SAVEABLE_STAT_COUNT);
-    writeIntArray(writer, profile.skills, SKILL_COUNT);
-    writer->i32(profile.bodyType);
-    writer->i32(profile.experience);
-    writer->i32(profile.killType);
-    writer->i32(profile.damageType);
-    writeIntArray(writer, profile.pcStats, PC_STAT_COUNT);
-    writeIntArray(writer, profile.taggedSkills, NUM_TAGGED_SKILLS);
-    writeIntArray(writer, profile.selectedTraits, TRAITS_MAX_SELECTED_COUNT);
-    writeIntArray(writer, profile.perkRanks, PERK_COUNT);
-    writeIntArray(writer, profile.killCounts, KILL_TYPE_DEFAULT_COUNT);
-    writeIntArray(writer, &profile.skillUseTimes[0][0], SKILL_COUNT * 3);
-    writer->i32(profile.sneakWorking);
-    writer->i32(profile.editorLastLevel);
-    writer->i32(profile.editorHasFreePerk);
-    writer->i32(profile.remainingCharacterPoints);
-    writer->i32(profile.tile);
-    writer->i32(profile.x);
-    writer->i32(profile.y);
-    writer->i32(profile.sx);
-    writer->i32(profile.sy);
-    writer->i32(profile.frame);
-    writer->i32(profile.rotation);
-    writer->i32(profile.fid);
-    writer->i32(profile.flags);
-    writer->i32(profile.elevation);
-    writer->i32(profile.lightDistance);
-    writer->i32(profile.lightIntensity);
-    writer->i32(profile.hp);
-    writer->i32(profile.radiation);
-    writer->i32(profile.poison);
-    writer->i32(profile.reaction);
-    writer->i32(profile.combatManeuver);
-    writer->i32(profile.combatAp);
-    writer->i32(profile.combatResults);
-    writer->i32(profile.combatDamageLastTurn);
-    writer->i32(profile.combatAiPacket);
-    writer->i32(profile.combatTeam);
-    writer->u32(profile.whoHitMeNetId);
-    writer->bytes(profile.modelName, sizeof(profile.modelName));
-    writer->u32(profile.modelHash);
-    writer->u32((uint32_t)profile.modelFiles.size());
-    for (const MpModelFile& file : profile.modelFiles) {
-        writer->u32((uint32_t)file.path.size());
-        writer->u32((uint32_t)file.data.size());
-        writer->bytes(file.path.data(), file.path.size());
-        writer->bytes(file.data.data(), file.data.size());
+    w->u32((uint32_t)p.rootInventory.size());
+    w->u32((uint32_t)p.inventory.size());
+    for (uint32_t id : p.rootInventory) w->u32(id);
+    for (const MpInventoryNode& node : p.inventory) {
+        w->u32(node.id);
+        w->i32(node.pid);
+        w->i32(node.fid);
+        w->i32(node.frame);
+        w->i32(node.rotation);
+        w->i32(node.flags);
+        w->i32(node.dataFlags);
+        w->i32(node.quantity);
+        w->i32(node.lightDistance);
+        w->i32(node.lightIntensity);
+        w->i32(node.weaponAmmoQuantity);
+        w->i32(node.weaponAmmoTypePid);
+        w->i32(node.ammoQuantity);
+        w->i32(node.miscCharges);
+        w->i32(node.keyCode);
+        w->u32((uint32_t)node.children.size());
+        for (uint32_t child : node.children) w->u32(child);
     }
-    writer->u32((uint32_t)profile.rootInventory.size());
-    writer->u32((uint32_t)profile.inventory.size());
-    for (uint32_t id : profile.rootInventory) writer->u32(id);
-    for (const MpInventoryNode& node : profile.inventory) {
-        writer->u32(node.id);
-        writer->i32(node.pid);
-        writer->i32(node.fid);
-        writer->i32(node.frame);
-        writer->i32(node.rotation);
-        writer->i32(node.flags);
-        writer->i32(node.dataFlags);
-        writer->i32(node.quantity);
-        writer->i32(node.lightDistance);
-        writer->i32(node.lightIntensity);
-        writer->i32(node.weaponAmmoQuantity);
-        writer->i32(node.weaponAmmoTypePid);
-        writer->i32(node.ammoQuantity);
-        writer->i32(node.miscCharges);
-        writer->i32(node.keyCode);
-        writer->u32((uint32_t)node.children.size());
-        for (uint32_t child : node.children) writer->u32(child);
+}
+
+static bool readProfileSectionModel(Reader* r, MpPlayerProfile* p)
+{
+    uint32_t modelFileCount;
+    if (!r->u32(&p->modelHash) || !r->u32(&modelFileCount)
+        || modelFileCount > 512) {
+        return false;
+    }
+    p->modelFiles.clear();
+    for (uint32_t index = 0; index < modelFileCount; index++) {
+        uint32_t pathLength;
+        uint32_t dataLength;
+        if (!r->u32(&pathLength) || pathLength == 0 || pathLength > 64
+            || !r->u32(&dataLength) || dataLength == 0
+            || dataLength > MP_PROFILE_MAX_BYTES / 2
+            || pathLength > r->remaining()) {
+            return false;
+        }
+        MpModelFile file;
+        file.path.resize(pathLength);
+        if (!r->bytes(file.path.data(), pathLength)
+            || !isSafeModelFilePath(file.path)
+            || dataLength > r->remaining()) {
+            return false;
+        }
+        file.data.resize(dataLength);
+        if (!r->bytes(file.data.data(), dataLength)) return false;
+        p->modelFiles.push_back(std::move(file));
+    }
+    return true;
+}
+
+static void writeProfileSectionModel(Writer* w, const MpPlayerProfile& p, bool includeModel)
+{
+    w->u32(p.modelHash);
+    // The model payload is omitted when the receiver is known to hold it; the
+    // hash always travels so the receiver can resolve or request it.
+    w->u32((uint32_t)(includeModel ? p.modelFiles.size() : 0));
+    if (includeModel) {
+        for (const MpModelFile& file : p.modelFiles) {
+            w->u32((uint32_t)file.path.size());
+            w->u32((uint32_t)file.data.size());
+            w->bytes(file.path.data(), file.path.size());
+            w->bytes(file.data.data(), file.data.size());
+        }
+    }
+}
+
+static bool readProfileSectionVolatile(Reader* r, MpPlayerProfile* p)
+{
+    return r->i32(&p->tile)
+        && r->i32(&p->x)
+        && r->i32(&p->y)
+        && r->i32(&p->sx)
+        && r->i32(&p->sy)
+        && r->i32(&p->frame)
+        && r->i32(&p->rotation)
+        && r->i32(&p->fid)
+        && r->i32(&p->flags)
+        && r->i32(&p->elevation)
+        && r->i32(&p->lightDistance)
+        && r->i32(&p->lightIntensity)
+        && r->i32(&p->hp)
+        && r->i32(&p->radiation)
+        && r->i32(&p->poison)
+        && r->i32(&p->reaction)
+        && r->i32(&p->combatManeuver)
+        && r->i32(&p->combatAp)
+        && r->i32(&p->combatResults)
+        && r->i32(&p->combatDamageLastTurn)
+        && r->i32(&p->combatAiPacket)
+        && r->i32(&p->combatTeam)
+        && r->u32(&p->whoHitMeNetId);
+}
+
+static void writeProfileSectionVolatile(Writer* w, const MpPlayerProfile& p)
+{
+    w->i32(p.tile);
+    w->i32(p.x);
+    w->i32(p.y);
+    w->i32(p.sx);
+    w->i32(p.sy);
+    w->i32(p.frame);
+    w->i32(p.rotation);
+    w->i32(p.fid);
+    w->i32(p.flags);
+    w->i32(p.elevation);
+    w->i32(p.lightDistance);
+    w->i32(p.lightIntensity);
+    w->i32(p.hp);
+    w->i32(p.radiation);
+    w->i32(p.poison);
+    w->i32(p.reaction);
+    w->i32(p.combatManeuver);
+    w->i32(p.combatAp);
+    w->i32(p.combatResults);
+    w->i32(p.combatDamageLastTurn);
+    w->i32(p.combatAiPacket);
+    w->i32(p.combatTeam);
+    w->u32(p.whoHitMeNetId);
+}
+
+// Serializes one section's payload (no section header) into |writer|.
+static bool writeSectionBody(Writer* writer, const MpPlayerProfile& profile,
+    ProfileSectionId sectionId, bool includeModel)
+{
+    switch (sectionId) {
+    case PROFILE_SECTION_IDENTITY:
+        writeProfileSectionIdentity(writer, profile);
+        break;
+    case PROFILE_SECTION_BASE_STATS:
+        writeProfileSectionBaseStats(writer, profile);
+        break;
+    case PROFILE_SECTION_BONUS_STATS:
+        writeProfileSectionBonusStats(writer, profile);
+        break;
+    case PROFILE_SECTION_SKILLS:
+        writeProfileSectionSkills(writer, profile);
+        break;
+    case PROFILE_SECTION_PC_STATS:
+        writeProfileSectionPcStats(writer, profile);
+        break;
+    case PROFILE_SECTION_TAGS_TRAITS:
+        writeProfileSectionTagsTraits(writer, profile);
+        break;
+    case PROFILE_SECTION_PERKS:
+        writeProfileSectionPerks(writer, profile);
+        break;
+    case PROFILE_SECTION_KILLS:
+        writeProfileSectionKills(writer, profile);
+        break;
+    case PROFILE_SECTION_SKILL_USE:
+        writeProfileSectionSkillUse(writer, profile);
+        break;
+    case PROFILE_SECTION_INVENTORY:
+        writeProfileSectionInventory(writer, profile);
+        break;
+    case PROFILE_SECTION_MODEL:
+        writeProfileSectionModel(writer, profile, includeModel);
+        break;
+    case PROFILE_SECTION_VOLATILE:
+        writeProfileSectionVolatile(writer, profile);
+        break;
+    default:
+        return false;
+    }
+    return true;
+}
+
+// Parses one section's payload into |profile|.
+static bool readSectionBody(Reader* reader, MpPlayerProfile* profile,
+    ProfileSectionId sectionId)
+{
+    switch (sectionId) {
+    case PROFILE_SECTION_IDENTITY:
+        return readProfileSectionIdentity(reader, profile);
+    case PROFILE_SECTION_BASE_STATS:
+        return readProfileSectionBaseStats(reader, profile);
+    case PROFILE_SECTION_BONUS_STATS:
+        return readProfileSectionBonusStats(reader, profile);
+    case PROFILE_SECTION_SKILLS:
+        return readProfileSectionSkills(reader, profile);
+    case PROFILE_SECTION_PC_STATS:
+        return readProfileSectionPcStats(reader, profile);
+    case PROFILE_SECTION_TAGS_TRAITS:
+        return readProfileSectionTagsTraits(reader, profile);
+    case PROFILE_SECTION_PERKS:
+        return readProfileSectionPerks(reader, profile);
+    case PROFILE_SECTION_KILLS:
+        return readProfileSectionKills(reader, profile);
+    case PROFILE_SECTION_SKILL_USE:
+        return readProfileSectionSkillUse(reader, profile);
+    case PROFILE_SECTION_INVENTORY:
+        return readProfileSectionInventory(reader, profile);
+    case PROFILE_SECTION_MODEL:
+        return readProfileSectionModel(reader, profile);
+    case PROFILE_SECTION_VOLATILE:
+        return readProfileSectionVolatile(reader, profile);
+    default:
+        return false;
     }
 }
 
@@ -848,6 +1037,64 @@ static bool validateInventory(const MpPlayerProfile& profile)
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// session model registry (public: header-declared, lives outside the
+// anonymous namespace so installModelFiles inside it can call through the
+// header declarations without ambiguity)
+// ---------------------------------------------------------------------------
+
+static std::unordered_map<uint32_t, std::vector<MpModelFile>> gMpModelRegistry;
+
+void MpModelRegistryRemember(uint32_t modelHash, const std::vector<MpModelFile>& files)
+{
+    if (modelHash == 0 || files.empty()) {
+        return;
+    }
+    gMpModelRegistry[modelHash] = files;
+    debugFilePrint("MPROF: model registry remember hash=%08X files=%zu entries=%zu",
+        modelHash, files.size(), gMpModelRegistry.size());
+}
+
+bool MpModelRegistryResolve(uint32_t modelHash, std::vector<MpModelFile>* out)
+{
+    if (out == nullptr) {
+        return false;
+    }
+    auto it = gMpModelRegistry.find(modelHash);
+    if (it == gMpModelRegistry.end()) {
+        return false;
+    }
+    *out = it->second;
+    return true;
+}
+
+void MpModelRegistryClear()
+{
+    if (!gMpModelRegistry.empty()) {
+        debugFilePrint("MPROF: model registry clear entries=%zu", gMpModelRegistry.size());
+        gMpModelRegistry.clear();
+    }
+}
+
+bool MpProfileResolveModel(MpPlayerProfile* profile)
+{
+    if (profile == nullptr || profile->modelHash == 0) {
+        // No model needed.
+        return true;
+    }
+    if (!profile->modelFiles.empty()) {
+        // Payload already present.
+        return true;
+    }
+    if (profile->modelName[0] != '\0') {
+        // Vanilla art: resolvable locally without the payload.
+        if (artListIndex(OBJ_TYPE_CRITTER, profile->modelName) >= 0) {
+            return true;
+        }
+    }
+    return MpModelRegistryResolve(profile->modelHash, &profile->modelFiles);
+}
 
 bool MpProfileCaptureObject(const Object* object, MpPlayerProfile* profile)
 {
@@ -1051,22 +1298,28 @@ uint32_t MpProfileHash(const MpPlayerProfile& profile)
     return hashBytes(data.data(), data.size());
 }
 
-bool MpProfileSerialize(const MpPlayerProfile& profile, std::vector<uint8_t>* data)
+bool MpProfileSerialize(const MpPlayerProfile& profile, std::vector<uint8_t>* data,
+    bool includeModel)
 {
     if (data == nullptr || !MpProfileValidate(profile)) return false;
-    Writer body;
-    writeProfileBody(&body, profile);
-    if (body.data().size() > MP_PROFILE_MAX_BYTES - kProfileHeaderSize) return false;
-    uint32_t crc = hashBytes(body.data().data(), body.data().size());
+    std::vector<uint8_t> body;
+    NetProfileSectionInfo infos[PROFILE_SECTION_COUNT];
+    uint16_t sectionCount = 0;
+    uint32_t crc = 0;
+    if (!MpProfileBuildBody(profile, /*changedSections=*/0, includeModel,
+            &body, infos, &sectionCount, &crc)) {
+        return false;
+    }
+    if (body.size() > MP_PROFILE_MAX_BYTES - kProfileHeaderSize) return false;
 
     Writer output;
     output.u32(kProfileMagic);
     output.u16(profile.schemaVersion);
     output.u16(0);
     output.u32(profile.generation);
-    output.u32((uint32_t)body.data().size());
+    output.u32((uint32_t)body.size());
     output.u32(crc);
-    output.bytes(body.data().data(), body.data().size());
+    output.bytes(body.data(), body.size());
     *data = output.data();
     return true;
 }
@@ -1091,13 +1344,133 @@ bool MpProfileDeserialize(const void* data, size_t dataLength, MpPlayerProfile* 
     std::vector<uint8_t> body(bodyLength);
     if (!reader.bytes(body.data(), body.size())
         || hashBytes(body.data(), body.size()) != expectedHash) return false;
-    Reader bodyReader(body.data(), body.size());
     MpPlayerProfile candidate;
     candidate.schemaVersion = schema;
     candidate.generation = generation;
-    if (!readProfileBody(&bodyReader, &candidate) || !MpProfileValidate(candidate)) return false;
+    uint32_t mask = MpProfileDeserializeSections(body.data(), body.size(), &candidate);
+    if (mask == 0 || !MpProfileValidate(candidate)) return false;
     *profile = std::move(candidate);
     return true;
+}
+
+bool MpProfileSerializeSection(const MpPlayerProfile& profile, uint8_t sectionId,
+    bool includeModel, std::vector<uint8_t>* out)
+{
+    if (out == nullptr || sectionId < PROFILE_SECTION_IDENTITY
+        || sectionId > PROFILE_SECTION_COUNT) {
+        return false;
+    }
+    Writer writer;
+    if (!writeSectionBody(&writer, profile, (ProfileSectionId)sectionId, includeModel)) {
+        return false;
+    }
+    *out = writer.data();
+    return true;
+}
+
+uint32_t MpProfileDeserializeSections(const void* data, size_t dataLength,
+    MpPlayerProfile* profile)
+{
+    if (data == nullptr || profile == nullptr) {
+        return 0;
+    }
+    Reader reader(data, dataLength);
+    uint32_t mask = 0;
+    while (reader.remaining() > 0) {
+        uint8_t id = 0;
+        uint8_t reserved = 0;
+        uint32_t size = 0;
+        size_t headerStart = dataLength - reader.remaining();
+        if (!reader.u8(&id) || !reader.u8(&reserved) || !reader.u32(&size)
+            || id < PROFILE_SECTION_IDENTITY || id > PROFILE_SECTION_COUNT
+            || size > reader.remaining()) {
+            debugFilePrint("MPROF: deserialize bad header offset=%zu remaining=%zu id=%u size=%u",
+                headerStart, reader.remaining(), (unsigned)id, (unsigned)size);
+            return 0;
+        }
+        // The Reader does not expose its offset — derive the payload start
+        // from the bytes remaining and construct a bounded sub-reader.
+        size_t payloadStart = dataLength - reader.remaining();
+        Reader section((const uint8_t*)data + payloadStart, size);
+        if (!readSectionBody(&section, profile, (ProfileSectionId)id)) {
+            debugFilePrint("MPROF: deserialize section body failed id=%u size=%u offset=%zu remaining=%zu",
+                (unsigned)id, (unsigned)size, payloadStart, reader.remaining());
+            return 0;
+        }
+        // The payload was consumed by the sub-reader — advance the parent
+        // past it or the next header read lands inside this payload.
+        if (!reader.skip(size)) {
+            debugFilePrint("MPROF: deserialize section skip failed id=%u size=%u",
+                (unsigned)id, (unsigned)size);
+            return 0;
+        }
+        mask |= (1u << (id - 1));
+    }
+    return mask;
+}
+
+bool MpProfileSectionChanged(const MpPlayerProfile& a, const MpPlayerProfile& b,
+    uint8_t sectionId)
+{
+    if (sectionId == PROFILE_SECTION_VOLATILE) {
+        // Volatile fields are owned by the per-tick state channel — never
+        // change-detected (and never sent by the detection loops).
+        return false;
+    }
+    if (sectionId == PROFILE_SECTION_MODEL) {
+        // Model identity: change-detection captures are model-file-free, so
+        // their file hash is always 0 — the model NAME is the identity signal
+        // (the payload itself is content-addressed by the real hash).
+        return a.modelHash != b.modelHash
+            || strncmp(a.modelName, b.modelName, sizeof(a.modelName)) != 0;
+    }
+    std::vector<uint8_t> sectionA;
+    std::vector<uint8_t> sectionB;
+    if (!MpProfileSerializeSection(a, sectionId, /*includeModel=*/false, &sectionA)
+        || !MpProfileSerializeSection(b, sectionId, /*includeModel=*/false, &sectionB)) {
+        return true; // cannot serialize — assume changed
+    }
+    return sectionA != sectionB;
+}
+
+bool MpProfileBuildBody(const MpPlayerProfile& profile, uint32_t changedSections,
+    bool includeModel, std::vector<uint8_t>* body,
+    NetProfileSectionInfo* infos, uint16_t* sectionCount, uint32_t* contentHash)
+{
+    if (body == nullptr || infos == nullptr || sectionCount == nullptr
+        || contentHash == nullptr) {
+        return false;
+    }
+    Writer writer;
+    uint16_t count = 0;
+    for (int id = PROFILE_SECTION_IDENTITY; id <= PROFILE_SECTION_COUNT; id++) {
+        if (changedSections != 0 && (changedSections & (1u << (id - 1))) == 0) {
+            continue;
+        }
+        std::vector<uint8_t> payload;
+        bool modelPayload = (id == PROFILE_SECTION_MODEL) && includeModel;
+        if (!MpProfileSerializeSection(profile, (uint8_t)id, modelPayload, &payload)) {
+            return false;
+        }
+        infos[count].id = (uint8_t)id;
+        infos[count].reserved = 0;
+        infos[count].reserved2 = 0;
+        infos[count].byteSize = (uint32_t)payload.size();
+        writer.u8((uint8_t)id);
+        writer.u8(0);
+        writer.u32((uint32_t)payload.size());
+        writer.bytes(payload.data(), payload.size());
+        count++;
+    }
+    *body = writer.data();
+    *sectionCount = count;
+    *contentHash = hashBytes(body->data(), body->size());
+    return true;
+}
+
+uint32_t MpProfileHashBytes(const void* data, size_t size)
+{
+    return hashBytes(data, size);
 }
 
 MpPlayerRuntime* MpProfileCreateRuntime(uint8_t netId, const MpPlayerProfile& profile,
@@ -1287,7 +1660,7 @@ void MpProfileUpdateRuntime(uint8_t netId, const MpPlayerProfile& profile)
 // and the inventory graph. Transform/HP/combat fields are intentionally NOT
 // touched — they live on the per-tick player/object state channel. Called on
 // the host after a client profile update.
-static bool mpProfileReapplyAvatar(MpPlayerRuntime& runtime)
+static bool mpProfileReapplyAvatar(MpPlayerRuntime& runtime, uint32_t changedSections)
 {
     Object* object = runtime.object;
     if (object == nullptr) {
@@ -1300,44 +1673,61 @@ static bool mpProfileReapplyAvatar(MpPlayerRuntime& runtime)
     }
 
     const MpPlayerProfile& profile = runtime.profile;
-    proto->critter.messageId = profile.prototypeMessageId;
-    proto->critter.fid = profile.prototypeFid;
-    proto->critter.lightDistance = profile.prototypeLightDistance;
-    proto->critter.lightIntensity = profile.prototypeLightIntensity;
-    proto->critter.flags = profile.prototypeFlags;
-    proto->critter.extendedFlags = profile.prototypeExtendedFlags;
-    proto->critter.data.flags = profile.critterFlags;
-    memcpy(proto->critter.data.baseStats, profile.baseStats, sizeof(profile.baseStats));
-    memcpy(proto->critter.data.bonusStats, profile.bonusStats, sizeof(profile.bonusStats));
-    memcpy(proto->critter.data.skills, profile.skills, sizeof(profile.skills));
-    proto->critter.data.bodyType = (BodyType)profile.bodyType;
-    proto->critter.data.experience = profile.experience;
-    proto->critter.data.killType = (KillType)profile.killType;
-    proto->critter.data.damageType = (DamageType)profile.damageType;
-    proto->critter.headFid = profile.prototypeHeadFid;
-    proto->critter.aiPacket = profile.prototypeAiPacket;
-    proto->critter.team = profile.prototypeTeam;
-
-    // The object's own fields derived from the proto at creation.
-    object->lightDistance = profile.lightDistance;
-    object->lightIntensity = profile.lightIntensity;
-
-    // Rebuild the inventory graph from the canonical profile. The old items
-    // are detached and destroyed (children first) like MpProfileDetachAvatar.
-    mpProfileDestroyObjectItems(object);
-    object->data.inventory.length = 0;
-    std::unordered_map<uint32_t, Object*> built;
-    for (uint32_t root : profile.rootInventory) {
-        if (!applyItemNode(profile, root, object, &built, 0)) {
-            debugFilePrint("MPROF: reapply avatar inventory failed root=%u", root);
-            return false;
+    // Only the sections present on the wire are written; changedSections == 0
+    // means "apply everything" (join transfers).
+    if (changedSections == 0
+        || (changedSections & (1u << (PROFILE_SECTION_IDENTITY - 1))) != 0) {
+        proto->critter.messageId = profile.prototypeMessageId;
+        proto->critter.fid = profile.prototypeFid;
+        proto->critter.lightDistance = profile.prototypeLightDistance;
+        proto->critter.lightIntensity = profile.prototypeLightIntensity;
+        proto->critter.flags = profile.prototypeFlags;
+        proto->critter.extendedFlags = profile.prototypeExtendedFlags;
+        proto->critter.data.flags = profile.critterFlags;
+        proto->critter.data.bodyType = (BodyType)profile.bodyType;
+        proto->critter.data.experience = profile.experience;
+        proto->critter.data.killType = (KillType)profile.killType;
+        proto->critter.data.damageType = (DamageType)profile.damageType;
+        proto->critter.headFid = profile.prototypeHeadFid;
+        proto->critter.aiPacket = profile.prototypeAiPacket;
+        proto->critter.team = profile.prototypeTeam;
+        // The object's own fields derived from the proto at creation.
+        object->lightDistance = profile.lightDistance;
+        object->lightIntensity = profile.lightIntensity;
+    }
+    if (changedSections == 0
+        || (changedSections & (1u << (PROFILE_SECTION_BASE_STATS - 1))) != 0) {
+        memcpy(proto->critter.data.baseStats, profile.baseStats, sizeof(profile.baseStats));
+    }
+    if (changedSections == 0
+        || (changedSections & (1u << (PROFILE_SECTION_BONUS_STATS - 1))) != 0) {
+        memcpy(proto->critter.data.bonusStats, profile.bonusStats, sizeof(profile.bonusStats));
+    }
+    if (changedSections == 0
+        || (changedSections & (1u << (PROFILE_SECTION_SKILLS - 1))) != 0) {
+        memcpy(proto->critter.data.skills, profile.skills, sizeof(profile.skills));
+    }
+    if (changedSections == 0
+        || (changedSections & (1u << (PROFILE_SECTION_INVENTORY - 1))) != 0) {
+        // Rebuild the inventory graph from the canonical profile. The old
+        // items are detached and destroyed (children first) like
+        // MpProfileDetachAvatar.
+        mpProfileDestroyObjectItems(object);
+        object->data.inventory.length = 0;
+        std::unordered_map<uint32_t, Object*> built;
+        for (uint32_t root : profile.rootInventory) {
+            if (!applyItemNode(profile, root, object, &built, 0)) {
+                debugFilePrint("MPROF: reapply avatar inventory failed root=%u", root);
+                return false;
+            }
         }
     }
     objectReorder(object);
     return true;
 }
 
-bool MpProfileApplyRuntimeUpdate(uint8_t netId, const MpPlayerProfile& profile)
+bool MpProfileApplyRuntimeUpdate(uint8_t netId, const MpPlayerProfile& profile,
+    uint32_t changedSections)
 {
     auto it = gRuntimes.find(netId);
     if (it == gRuntimes.end() || it->second.object == nullptr) {
@@ -1353,13 +1743,33 @@ bool MpProfileApplyRuntimeUpdate(uint8_t netId, const MpPlayerProfile& profile)
     if (it == gRuntimes.end() || it->second.object == nullptr) {
         return false;
     }
-    if (!mpProfileReapplyAvatar(it->second)) {
+    // Level-ups raise STAT_MAXIMUM_HIT_POINTS (bonusStats) and heal the
+    // character by the same amount (vanilla pcAddExperience). The avatar's
+    // current HP is host-authoritative and never rides the profile, so the
+    // gain must be mirrored here — otherwise the state sync reverts the
+    // client's level-up heal and its HP oscillates.
+    int maxHpBefore = critterGetStat(it->second.object, STAT_MAXIMUM_HIT_POINTS);
+    if (!mpProfileReapplyAvatar(it->second, changedSections)) {
         debugFilePrint("MPROF: apply runtime update reapply failed netId=%u", netId);
         return false;
     }
-    debugFilePrint("MPROF: apply runtime update done netId=%u name='%s' gen=%u items=%zu",
+    // The maxHp-before/after comparison is the detection — it is self-limiting
+    // (no delta, no heal) and must NOT be mask-gated: the client's level-up
+    // upload can legitimately carry only PC_STATS (XP/level) while the max-HP
+    // bonus already rode an earlier section, and the gate would skip the heal
+    // and leave the avatar's HP behind the client's.
+    {
+        int maxHpAfter = critterGetStat(it->second.object, STAT_MAXIMUM_HIT_POINTS);
+        if (maxHpAfter > maxHpBefore) {
+            critterAdjustHitPoints(it->second.object, maxHpAfter - maxHpBefore);
+            debugFilePrint("MPROF: level-up hp mirrored netId=%u maxHp=%d->%d hp=%d",
+                netId, maxHpBefore, maxHpAfter,
+                critterGetHitPoints(it->second.object));
+        }
+    }
+    debugFilePrint("MPROF: apply runtime update done netId=%u name='%s' gen=%u items=%zu sections=%08X",
         netId, it->second.profile.name, it->second.profile.generation,
-        it->second.profile.rootInventory.size());
+        it->second.profile.rootInventory.size(), changedSections);
     return true;
 }
 
@@ -1387,11 +1797,12 @@ void MpProfileGrantCombatXp(int xp)
     }
 }
 
-bool MpProfileApplyLocal(const MpPlayerProfile& profile, bool applyPcStats)
+bool MpProfileApplyLocal(const MpPlayerProfile& profile, bool applyPcStats,
+    uint32_t changedSections)
 {
-    debugFilePrint("MPROF: apply local begin name='%s' gen=%u nodes=%zu roots=%zu applyPcStats=%d",
+    debugFilePrint("MPROF: apply local begin name='%s' gen=%u nodes=%zu roots=%zu applyPcStats=%d sections=%08X",
         profile.name, profile.generation, profile.inventory.size(), profile.rootInventory.size(),
-        applyPcStats ? 1 : 0);
+        applyPcStats ? 1 : 0, changedSections);
     if (!MpProfileValidate(profile) || gDude == nullptr) {
         debugFilePrint("MPROF: apply local failed validate/dude");
         return false;
@@ -1403,73 +1814,110 @@ bool MpProfileApplyLocal(const MpPlayerProfile& profile, bool applyPcStats)
         return false;
     }
 
-    proto->critter.data.flags = profile.critterFlags;
-    memcpy(proto->critter.data.baseStats, profile.baseStats, sizeof(profile.baseStats));
-    memcpy(proto->critter.data.bonusStats, profile.bonusStats, sizeof(profile.bonusStats));
-    memcpy(proto->critter.data.skills, profile.skills, sizeof(profile.skills));
-    proto->critter.data.bodyType = (BodyType)profile.bodyType;
-    proto->critter.data.experience = profile.experience;
-    proto->critter.data.killType = (KillType)profile.killType;
-    proto->critter.data.damageType = (DamageType)profile.damageType;
-    proto->critter.flags = profile.prototypeFlags;
-    proto->critter.extendedFlags = profile.prototypeExtendedFlags;
-    proto->critter.lightDistance = profile.prototypeLightDistance;
-    proto->critter.lightIntensity = profile.prototypeLightIntensity;
-    proto->critter.headFid = profile.prototypeHeadFid;
-    proto->critter.aiPacket = profile.prototypeAiPacket;
-    proto->critter.team = profile.prototypeTeam;
+    // Only the sections present on the wire are written; changedSections == 0
+    // means "apply everything" (join transfers).
+    if (changedSections == 0
+        || (changedSections & (1u << (PROFILE_SECTION_IDENTITY - 1))) != 0) {
+        proto->critter.data.flags = profile.critterFlags;
+        proto->critter.data.bodyType = (BodyType)profile.bodyType;
+        proto->critter.data.experience = profile.experience;
+        proto->critter.data.killType = (KillType)profile.killType;
+        proto->critter.data.damageType = (DamageType)profile.damageType;
+        proto->critter.flags = profile.prototypeFlags;
+        proto->critter.extendedFlags = profile.prototypeExtendedFlags;
+        proto->critter.lightDistance = profile.prototypeLightDistance;
+        proto->critter.lightIntensity = profile.prototypeLightIntensity;
+        proto->critter.headFid = profile.prototypeHeadFid;
+        proto->critter.aiPacket = profile.prototypeAiPacket;
+        proto->critter.team = profile.prototypeTeam;
+        dudeSetName(profile.name);
+    }
+    if (changedSections == 0
+        || (changedSections & (1u << (PROFILE_SECTION_BASE_STATS - 1))) != 0) {
+        memcpy(proto->critter.data.baseStats, profile.baseStats, sizeof(profile.baseStats));
+    }
+    if (changedSections == 0
+        || (changedSections & (1u << (PROFILE_SECTION_BONUS_STATS - 1))) != 0) {
+        memcpy(proto->critter.data.bonusStats, profile.bonusStats, sizeof(profile.bonusStats));
+    }
+    if (changedSections == 0
+        || (changedSections & (1u << (PROFILE_SECTION_SKILLS - 1))) != 0) {
+        memcpy(proto->critter.data.skills, profile.skills, sizeof(profile.skills));
+    }
+    // The volatile runtime fields ride the per-tick state channel; they only
+    // appear in join transfers (changedSections == 0 or the VOLATILE bit).
+    if (changedSections == 0
+        || (changedSections & (1u << (PROFILE_SECTION_VOLATILE - 1))) != 0) {
+        gDude->data.critter.hp = profile.hp;
+        gDude->data.critter.radiation = profile.radiation;
+        gDude->data.critter.poison = profile.poison;
+        gDude->data.critter.reaction = profile.reaction;
+        gDude->data.critter.combat.maneuver = profile.combatManeuver;
+        gDude->data.critter.combat.ap = profile.combatAp;
+        gDude->data.critter.combat.results = profile.combatResults;
+        gDude->data.critter.combat.damageLastTurn = profile.combatDamageLastTurn;
+        gDude->data.critter.combat.aiPacket = profile.combatAiPacket;
+        gDude->data.critter.combat.team = profile.combatTeam;
+        gDude->data.critter.combat.whoHitMe = nullptr;
+    }
 
-    dudeSetName(profile.name);
-    gDude->data.critter.hp = profile.hp;
-    gDude->data.critter.radiation = profile.radiation;
-    gDude->data.critter.poison = profile.poison;
-    gDude->data.critter.reaction = profile.reaction;
-    gDude->data.critter.combat.maneuver = profile.combatManeuver;
-    gDude->data.critter.combat.ap = profile.combatAp;
-    gDude->data.critter.combat.results = profile.combatResults;
-    gDude->data.critter.combat.damageLastTurn = profile.combatDamageLastTurn;
-    gDude->data.critter.combat.aiPacket = profile.combatAiPacket;
-    gDude->data.critter.combat.team = profile.combatTeam;
-    gDude->data.critter.combat.whoHitMe = nullptr;
-
-    for (int index = 0; index < PC_STAT_COUNT; index++) {
-        if (applyPcStats) {
-            pcSetStat((PcStat)index, profile.pcStats[index]);
+    if (changedSections == 0
+        || (changedSections & (1u << (PROFILE_SECTION_PC_STATS - 1))) != 0) {
+        for (int index = 0; index < PC_STAT_COUNT; index++) {
+            if (applyPcStats) {
+                pcSetStat((PcStat)index, profile.pcStats[index]);
+            }
         }
     }
-    skillsSetTagged((Skill*)profile.taggedSkills, NUM_TAGGED_SKILLS);
-    traitsSetSelected((Trait)profile.selectedTraits[0], (Trait)profile.selectedTraits[1]);
-    perksSetRanks(profile.perkRanks, PERK_COUNT);
-    killsSetAll(profile.killCounts, KILL_TYPE_DEFAULT_COUNT);
-    critterSetSneakWorking(profile.sneakWorking);
+    if (changedSections == 0
+        || (changedSections & (1u << (PROFILE_SECTION_TAGS_TRAITS - 1))) != 0) {
+        skillsSetTagged((Skill*)profile.taggedSkills, NUM_TAGGED_SKILLS);
+        traitsSetSelected((Trait)profile.selectedTraits[0], (Trait)profile.selectedTraits[1]);
+    }
+    if (changedSections == 0
+        || (changedSections & (1u << (PROFILE_SECTION_PERKS - 1))) != 0) {
+        perksSetRanks(profile.perkRanks, PERK_COUNT);
+    }
+    if (changedSections == 0
+        || (changedSections & (1u << (PROFILE_SECTION_KILLS - 1))) != 0) {
+        killsSetAll(profile.killCounts, KILL_TYPE_DEFAULT_COUNT);
+    }
+    if (changedSections == 0
+        || (changedSections & (1u << (PROFILE_SECTION_SKILL_USE - 1))) != 0) {
+        critterSetSneakWorking(profile.sneakWorking);
+    }
 
     // Rebuild the local inventory graph from the canonical profile. The old
     // items are detached quietly (no sfx/hooks) and destroyed; the new graph
     // is rebuilt recursively with equipment flags restored, so hands/armor
     // resolve from the item flags exactly like the host's avatar.
-    std::vector<std::pair<Object*, int>> oldItems;
-    Inventory* inventory = &gDude->data.inventory;
-    for (int index = 0; index < inventory->length; index++) {
-        if (inventory->items[index].item != nullptr) {
-            oldItems.emplace_back(inventory->items[index].item,
-                inventory->items[index].quantity);
+    if (changedSections == 0
+        || (changedSections & (1u << (PROFILE_SECTION_INVENTORY - 1))) != 0) {
+        std::vector<std::pair<Object*, int>> oldItems;
+        Inventory* inventory = &gDude->data.inventory;
+        for (int index = 0; index < inventory->length; index++) {
+            if (inventory->items[index].item != nullptr) {
+                oldItems.emplace_back(inventory->items[index].item,
+                    inventory->items[index].quantity);
+            }
+        }
+        for (auto& entry : oldItems) {
+            if (itemRemoveQuietly(gDude, entry.first, entry.second) != 0) {
+                continue;
+            }
+            entry.first->flags &= ~OBJECT_NO_REMOVE;
+            objectDestroy(entry.first, nullptr);
+        }
+        std::unordered_map<uint32_t, Object*> built;
+        for (uint32_t root : profile.rootInventory) {
+            if (!applyItemNode(profile, root, gDude, &built, 0)) {
+                debugFilePrint("MPROF: apply local inventory rebuild failed root=%u", root);
+                return false;
+            }
         }
     }
-    for (auto& entry : oldItems) {
-        if (itemRemoveQuietly(gDude, entry.first, entry.second) != 0) {
-            continue;
-        }
-        entry.first->flags &= ~OBJECT_NO_REMOVE;
-        objectDestroy(entry.first, nullptr);
-    }
-    std::unordered_map<uint32_t, Object*> built;
-    for (uint32_t root : profile.rootInventory) {
-        if (!applyItemNode(profile, root, gDude, &built, 0)) {
-            debugFilePrint("MPROF: apply local inventory rebuild failed root=%u", root);
-            return false;
-        }
-    }
-    debugFilePrint("MPROF: apply local done name='%s' items=%zu hp=%d", profile.name, built.size(), profile.hp);
+    debugFilePrint("MPROF: apply local done name='%s' items=%zu hp=%d",
+        profile.name, profile.inventory.size(), profile.hp);
     return true;
 }
 
@@ -1540,6 +1988,16 @@ void MpProfileDestroyRuntime(uint8_t netId)
     MpPlayerRuntime& runtime = it->second;
     if (runtime.object != nullptr) {
         gObjectToRuntime.erase(runtime.object);
+        if (gMpIsClient && gMpSession.netIdToObj != nullptr) {
+            // Drop the reverse-map entry for the dying avatar so a stale
+            // pointer can never linger on a destroyed object — the fresh
+            // runtime re-registers on creation.
+            for (int i = 1; i < gMpSession.netIdToObjCount; i++) {
+                if (gMpSession.netIdToObj[i] == runtime.object) {
+                    gMpSession.netIdToObj[i] = nullptr;
+                }
+            }
+        }
         if (runtime.object != gDude) {
             mpProfileDestroyObjectItems(runtime.object);
             runtime.object->flags &= ~OBJECT_NO_REMOVE;
@@ -1556,6 +2014,7 @@ void MpProfileDestroyAllRuntimes()
     while (!gRuntimes.empty()) MpProfileDestroyRuntime(gRuntimes.begin()->first);
     gObjectToRuntime.clear();
     artClearSessionModels();
+    MpModelRegistryClear();
 }
 
 const char* MpProfileGetName(const Object* object)

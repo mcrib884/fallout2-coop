@@ -41,6 +41,7 @@
 #include "movie_effect.h"
 #include "multiplayer.h"
 #include "multiplayer_combat.h"
+#include "multiplayer_debug.h"
 #include "object.h"
 #include "options.h"
 #include "palette.h"
@@ -623,6 +624,16 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
     case KEY_CTRL_Q:
     case KEY_CTRL_X:
     case KEY_F10:
+    case KEY_F11:
+        // Co-op debug menu: every player can grant themselves money, XP,
+        // HP, skill points, level, skills, stats and perks.
+        if (eventCode == KEY_F11) {
+            if (gDude != nullptr) {
+                soundPlayFile("ib1p1xx1");
+                MpDebugMenuShow();
+            }
+            break;
+        }
         soundPlayFile("ib1p1xx1");
         showQuitConfirmationDialog();
         break;

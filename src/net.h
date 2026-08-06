@@ -58,8 +58,13 @@ enum NetPacketType {
     NET_PKT_COMBAT_END_DENIED = 30,
     NET_PKT_COMBAT_ENDED = 31,
     NET_PKT_COMBAT_MESSAGE = 32,
-    NET_PKT_PLAYER_STATUS = 33,   // host -> clients: player downed/revived
-    NET_PKT_GAME_OVER = 34,       // host -> clients: all players downed
+    NET_PKT_PLAYER_STATUS = 33,   // DEPRECATED -> NET_PKT_PLAYER_EVENT (DOWNED/REVIVED)
+    NET_PKT_GAME_OVER = 34,       // DEPRECATED -> NET_PKT_PLAYER_EVENT (GAME_OVER)
+    NET_PKT_DEBUG_CMD = 35,       // DEPRECATED -> NET_PKT_PLAYER_CMD (HEAL)
+    NET_PKT_COMBAT_ATTACK_RESULT = 36, // DEPRECATED -> NET_PKT_PLAYER_EVENT (ATTACK_RESULT)
+    NET_PKT_PLAYER_CMD = 37,      // client -> host: generic player command (runtime fields)
+    NET_PKT_PLAYER_EVENT = 38,    // host -> clients: generic player event (reliable)
+    NET_PKT_MODEL_REQUEST = 39,   // receiver -> sender: profile model payload missing
 };
 
 enum NetUnreliablePacketType {
@@ -90,10 +95,6 @@ typedef struct NetCombatStartRequestPayload {
 enum NetCombatCmdType {
     NET_COMBAT_CMD_MOVE = 1,
     NET_COMBAT_CMD_ATTACK = 2,
-    // Client->host: the acting client spent AP on inventory (open cost,
-    // item use). The host deducts it from its authoritative copy so the
-    // next state sync confirms it instead of refunding the client.
-    NET_COMBAT_CMD_INV_AP_COST = 3,
 };
 
 typedef struct NetCombatCmdPayload {
@@ -236,16 +237,31 @@ typedef struct NetPlayerLeftPayload {
     uint32_t objNetId;
 } NetPlayerLeftPayload;
 
+// A profile transfer is a concatenation of independent sections. Only the
+// sections whose persistent content changed since the last transfer to this
+// peer are shipped; the volatile runtime fields (transform, hp/ap, combat
+// state, object flags) live in NO section — they are owned exclusively by
+// the per-tick state channel, which structurally ends the "forgot to zero a
+// volatile field in the change-detection hash" bug class.
+typedef struct NetProfileSectionInfo {
+    uint8_t id;        // ProfileSectionId
+    uint8_t reserved;
+    uint16_t reserved2;
+    uint32_t byteSize; // model payloads can exceed 64KB
+} NetProfileSectionInfo;
+
 typedef struct NetPlayerProfileBeginPayload {
     uint32_t streamId;
     uint8_t netId;
-    uint8_t reserved0;
+    uint8_t modelIncluded; // 1 = the MODEL section carries the model payload
     uint16_t schemaVersion;
     uint32_t generation;
     uint32_t objNetId;
     uint32_t totalBytes;
     uint32_t chunkCount;
-    uint32_t contentHash;
+    uint32_t contentHash; // hash of the serialized body (exactly the shipped sections)
+    uint16_t sectionCount;
+    NetProfileSectionInfo sections[12];
 } NetPlayerProfileBeginPayload;
 
 typedef struct NetPlayerProfileChunkHeader {
@@ -272,7 +288,15 @@ typedef struct NetPlayerProfileAckPayload {
     uint8_t accepted;
     uint16_t reason;
     uint32_t generation;
+    uint32_t modelHash; // model payload received with this profile (0 = none)
 } NetPlayerProfileAckPayload;
+
+// Receiver -> sender: the profile's model payload was skipped (assumed
+// known) but this peer does not have it — re-send the profile WITH the model.
+typedef struct NetModelRequestPayload {
+    uint8_t netId;
+    uint32_t modelHash;
+} NetModelRequestPayload;
 
 typedef struct NetMapFullSyncChunkHeader {
     uint32_t syncId;
@@ -325,6 +349,51 @@ typedef struct NetMapFullSyncObjectPayload {
     int32_t combatManeuver;
     int32_t combatResults;
 } NetMapFullSyncObjectPayload;
+
+// Per-player debug menu commands (client -> host). The menu edits the
+// player's own sheet, which rides the profile channel; only the volatile
+// runtime fields (current HP) need the host's authority.
+typedef struct NetDebugCmdPayload {
+    uint8_t action; // NetDebugAction
+    int32_t value;  // 0 = full
+} NetDebugCmdPayload;
+
+enum NetDebugAction {
+    NET_DEBUG_ACTION_HEAL = 1,
+};
+
+// Generic client -> host player command. Every client-initiated runtime
+// change (heal, inventory AP cost, ...) rides this single route — the host
+// validates and applies it to the sender's avatar. The per-tick state
+// channel then carries the result back. (DEPRECATED: NET_PKT_DEBUG_CMD)
+typedef struct NetPlayerCmdPayload {
+    uint8_t opcode; // NetPlayerCmdOpcode
+    int32_t arg1;
+    uint32_t arg2;
+} NetPlayerCmdPayload;
+
+enum NetPlayerCmdOpcode {
+    NET_PLAYER_CMD_HEAL = 1,         // arg1: 0 = full, else amount
+    NET_PLAYER_CMD_INVENTORY_AP = 2, // arg1: AP cost to deduct
+};
+
+// Generic host -> client player event (reliable). Discrete player lifecycle
+// and combat outcomes ride this single route. (DEPRECATED: NET_PKT_PLAYER_STATUS,
+// NET_PKT_GAME_OVER, NET_PKT_COMBAT_ATTACK_RESULT)
+typedef struct NetPlayerEventPayload {
+    uint8_t opcode; // NetPlayerEventOpcode
+    uint8_t netId;  // player the event concerns
+    int32_t arg1;
+    int32_t arg2;
+    int32_t arg3;
+    uint32_t arg4;
+} NetPlayerEventPayload;
+
+enum NetPlayerEventOpcode {
+    NET_PLAYER_EVENT_DOWNED = 1,        // arg1: 1 downed / 0 revived; arg2: hp
+    NET_PLAYER_EVENT_GAME_OVER = 2,     // arg1: reason
+    NET_PLAYER_EVENT_ATTACK_RESULT = 3, // arg1: damage; arg2: attackerFlags; arg3: defenderFlags; arg4: targetNetId
+};
 #pragma pack(pop)
 
 // --- Transport API ---

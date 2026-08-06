@@ -178,6 +178,14 @@ bool MpPlayerIsDownedByNetId(uint8_t netId);
 void MpPlayerDown(Object* critter);
 // Host: revive every downed player with 5% of max HP (combat ended).
 void MpCombatEndReviveDowned();
+// Co-op combat outcome sync: host reads the last resolved attack, client
+// replays the authoritative result's feedback (flinch, pain sound, blood).
+void MpGetLastAttackResult(int* outDamage, int* outAttackerFlags, int* outDefenderFlags);
+Object* MpGetLastAttackWeapon();
+// Co-op: swap the script combat's start-data override out for the duration
+// of a remote attack resolve (its min/max clamp would zero remote damage).
+CombatStartData* MpCombatSwapStartData(CombatStartData* value);
+void MpReplayLocalAttackResult(int damage, int attackerFlags, int defenderFlags);
 // apply (client)
 void MpApplyPlayerStatus(const NetPlayerStatusPayload* payload);
 void MpApplyGameOver(const NetGameOverPayload* payload);

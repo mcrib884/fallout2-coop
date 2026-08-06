@@ -3670,12 +3670,16 @@ void _combat(CombatStartData* csd)
         || (csd->defender == nullptr || csd->defender->elevation == gElevation)) {
         bool wasInCombat = isInCombat();
 
-        _combat_begin(nullptr);
-
-        // Co-op: tell every client that combat started (host authority).
+        // Co-op: tell every client combat is starting BEFORE the host plays
+        // its combat-HUD entry animation. _combat_begin's animated end-button
+        // show blocks for ~1s, and a broadcast after it would queue the
+        // clients' own HUD animation behind the host's — they would enter
+        // combat mode only once the host's finished.
         if (gMpIsHost && gMpActive) {
             MpCombatOnStarted();
         }
+
+        _combat_begin(nullptr);
 
         int curIndex;
 
@@ -3846,6 +3850,20 @@ void _combat(CombatStartData* csd)
     }
 }
 
+// Co-op: the remote attack resolve runs inside the initiating turn's pump,
+// while the script combat's start-data override (_gcsd) is still live. The
+// override is meant for the vanilla initiator only — its min/max clamp would
+// zero the damage of every remote attack resolved during that window (the
+// temple ambush's empty CombatStartData: min=0/max=0 → defenderDamage clamped
+// to 0). Swap it out for the duration of a remote resolve and restore it so
+// the host's own vanilla turn sequencing is untouched.
+CombatStartData* MpCombatSwapStartData(CombatStartData* value)
+{
+    CombatStartData* old = _gcsd;
+    _gcsd = value;
+    return old;
+}
+
 // 0x422EC4
 void attackInit(Attack* attack, Object* attacker, Object* defender, HitMode hitMode, HitLocation hitLocation)
 {
@@ -3924,10 +3942,20 @@ int _combat_attack(Object* attacker, Object* defender, HitMode hitMode, HitLocat
         return -1;
     }
 
-    if (actionPoints > attacker->data.critter.combat.ap) {
-        attacker->data.critter.combat.ap = 0;
-    } else {
-        attacker->data.critter.combat.ap -= actionPoints;
+    // Thin client: the acting client's AP is host-authoritative. The intent
+    // below goes to the host, which deducts ONCE on its avatar; the mirrored
+    // AP lands through the tick state. A local deduction here would be a
+    // prediction write fighting the state channel (the AP-bounce bug). The
+    // local render below still shows the mirrored value, which the state
+    // apply refreshes when the host's deduction lands.
+    bool thinClientAttack = gMpActive && gMpIsClient && MpCombatIsActive()
+        && attacker == gDude;
+    if (!thinClientAttack) {
+        if (actionPoints > attacker->data.critter.combat.ap) {
+            attacker->data.critter.combat.ap = 0;
+        } else {
+            attacker->data.critter.combat.ap -= actionPoints;
+        }
     }
 
     if (attacker == gDude) {
@@ -5121,6 +5149,54 @@ static void attackComputeDamage(Attack* attack, int numRounds, int baseDamageMul
     scriptHooks_ComputeDamage(attack, numRounds, baseDamageMult);
 }
 
+// Co-op: expose the last resolved attack's outcome (the damage applies at
+// the strike frame, but the outcome is computed synchronously in
+// _combat_attack). The host reads this to tell the attacking client what
+// actually happened.
+void MpGetLastAttackResult(int* outDamage, int* outAttackerFlags, int* outDefenderFlags)
+{
+    if (outDamage != nullptr) {
+        *outDamage = _main_ctd.defenderDamage;
+    }
+    if (outAttackerFlags != nullptr) {
+        *outAttackerFlags = _main_ctd.attackerFlags;
+    }
+    if (outDefenderFlags != nullptr) {
+        *outDefenderFlags = _main_ctd.defenderFlags;
+    }
+}
+
+// Co-op: the weapon resolved for the last attack (diagnostic — the damage
+// formula branches on it: a null weapon means the unarmed table).
+Object* MpGetLastAttackWeapon()
+{
+    return _main_ctd.weapon;
+}
+
+// Client: the host's authoritative result for the local attack arrived. The
+// local prediction only animated the swing; the outcome feedback (flinch,
+// pain sound, blood) replays here with the host's values. State-affecting
+// flags (death/down/knockdown) are deliberately NOT replayed — the host's
+// state/status sync carries those; replaying them locally would double-apply.
+void MpReplayLocalAttackResult(int damage, int attackerFlags, int defenderFlags)
+{
+    if (!gMpActive || !gMpIsClient || _main_ctd.defender == nullptr) {
+        return;
+    }
+    if ((attackerFlags & DAM_HIT) == 0) {
+        // Miss: the swing already played; there is nothing else to show.
+        return;
+    }
+    int flags = defenderFlags & ~(DAM_DEAD | DAM_KNOCKED_OUT | DAM_KNOCKED_DOWN | DAM_LOSE_TURN);
+    bool hitFromFront = _is_hit_from_front(_main_ctd.attacker, _main_ctd.defender);
+    int knockbackRotation = tileGetRotationTo(_main_ctd.attacker->tile, _main_ctd.defender->tile);
+    AnimationType attackerAnimForShow = _main_ctd.attacker->fid == FRAME_ID_FORCE_FIELD_NS
+        ? animationTypeFromFid(_main_ctd.attacker->fid)
+        : critterGetAnimationForHitMode(_main_ctd.attacker, _main_ctd.hitMode);
+    showDamageToObject(_main_ctd.defender, damage, flags, _main_ctd.weapon,
+        hitFromFront, 0, knockbackRotation, attackerAnimForShow, _main_ctd.attacker, 0);
+}
+
 // 0x424BAC
 void attackComputeDeathFlags(Attack* attack)
 {
@@ -5135,6 +5211,16 @@ void attackComputeDeathFlags(Attack* attack)
 // 0x424C04
 void _apply_damage(Attack* attack, bool animated)
 {
+    // Co-op: the acting client's local attack is a prediction — the host's
+    // resolution is truth. Skipping the damage application here means the
+    // client never flashes a local hit that the authoritative roll may
+    // overturn (HP would snap back a beat later via the state sync). The
+    // host's broadcast monitor messages and the player/object state channel
+    // carry the real outcome.
+    if (gMpActive && gMpIsClient && MpCombatIsActive() && attack->attacker == gDude) {
+        return;
+    }
+
     Object* attacker = attack->attacker;
     bool attackerIsCritter = attacker != nullptr && FID_TYPE(attacker->fid) == OBJ_TYPE_CRITTER;
     bool hitUnintendedTarget = attack->defender != attack->intendedTarget;

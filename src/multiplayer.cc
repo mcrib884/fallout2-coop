@@ -26,6 +26,7 @@
 #include "map.h"
 #include "multiplayer_vote.h"
 #include "multiplayer_combat.h"
+#include "multiplayer_debug.h"
 #include "multiplayer_profile.h"
 #include "object.h"
 #include "party_member.h"
@@ -68,9 +69,8 @@ static uint32_t gMpNextProfileStreamId = 0;
 // unified sync pushes every change up through the profile channel so the
 // host's avatar and the other clients stay in lockstep.
 static uint32_t gMpLocalProfileSyncTick = 0;
-static uint32_t gMpLastUploadedProfileHash = 0;
-static char gMpLastUploadedModelName[13] = {};
 static bool gMpLocalProfileSyncReady = false;
+static MpPlayerProfile gMpLastUploadedProfile;
 
 struct MpProfileReceiveState {
     bool active = false;
@@ -97,11 +97,12 @@ static MultiplayerPlayer* mpPlayerFindByPeer(ENetPeer* peer);
 static int mpFindPlayerSpawnTile(int preferredTile, int elevation);
 static void mpBuildMapSyncPayload(NetMapSyncPayload* payload);
 static bool mpSendProfile(ENetPeer* peer, uint8_t netId, uint32_t objNetId,
-    const MpPlayerProfile& profile);
+    const MpPlayerProfile& profile, bool includeModel, uint8_t receiverNetId = 0,
+    uint32_t changedSections = 0);
 static void mpBroadcastProfileToClients(uint8_t netId, uint32_t objNetId,
-    const MpPlayerProfile& profile, bool skipOwner);
+    const MpPlayerProfile& profile, bool skipOwner, uint32_t changedSections = 0);
 static void mpApplyReceivedProfile(uint8_t netId, uint32_t objNetId,
-    const MpPlayerProfile& profile);
+    const MpPlayerProfile& profile, uint32_t changedSections);
 static void mpClientTryFinishMapSync();
 static void mpDebugDumpLightState(const char* tag);
 
@@ -169,10 +170,32 @@ static bool mpObjectIsInAnyPlayerInventory(Object* obj)
 // Helpers
 // ---------------------------------------------------------------------------
 
+// Model-delivery knowledge. gMpReceiverKnownModels: host-side — models each
+// connected client has already received (keyed by the receiver's player
+// netId). gMpHostKnownModels: client-side — models the host has acked.
+static std::unordered_map<uint8_t, std::unordered_set<uint32_t>> gMpReceiverKnownModels;
+static std::unordered_set<uint32_t> gMpHostKnownModels;
+
 static void mpZeroSession()
 {
     memset(&gMpSession, 0, sizeof(gMpSession));
     gMpSession.state = MP_STATE_NONE;
+    // Model-delivery knowledge lives outside the session struct (mpZeroSession
+    // memsets it): host-side per-receiver sets of models each client already
+    // holds, and the client-side set of models the host has acked.
+    gMpReceiverKnownModels.clear();
+    gMpHostKnownModels.clear();
+}
+
+// Host-side: has this receiver already been sent the model payload for
+// modelHash? (modelHash 0 = no model — always "known".)
+static bool mpReceiverHasModel(uint8_t receiverNetId, uint32_t modelHash)
+{
+    if (modelHash == 0) {
+        return true;
+    }
+    auto it = gMpReceiverKnownModels.find(receiverNetId);
+    return it != gMpReceiverKnownModels.end() && it->second.count(modelHash) != 0;
 }
 
 // Every received packet must contain exactly one valid header and payload.
@@ -212,7 +235,8 @@ static uint32_t mpAllocProfileStreamId()
 }
 
 static bool mpSendProfile(ENetPeer* peer, uint8_t netId, uint32_t objNetId,
-    const MpPlayerProfile& profile)
+    const MpPlayerProfile& profile, bool includeModel, uint8_t receiverNetId,
+    uint32_t changedSections)
 {
     if (peer == nullptr || !MpProfileValidate(profile)) {
         debugFilePrint("MP: send profile invalid peer=%p netId=%u", (void*)peer, netId);
@@ -220,10 +244,28 @@ static bool mpSendProfile(ENetPeer* peer, uint8_t netId, uint32_t objNetId,
     }
 
     std::vector<uint8_t> bytes;
-    if (!MpProfileSerialize(profile, &bytes) || bytes.empty()
-        || bytes.size() > MP_PROFILE_MAX_BYTES) {
-        debugFilePrint("MP: send profile serialize failed netId=%u name='%s'", netId, profile.name);
+    NetProfileSectionInfo infos[PROFILE_SECTION_COUNT];
+    uint16_t sectionCount = 0;
+    uint32_t bodyHash = 0;
+    if (!MpProfileBuildBody(profile, changedSections, includeModel,
+            &bytes, infos, &sectionCount, &bodyHash)
+        || bytes.empty() || bytes.size() > MP_PROFILE_MAX_BYTES) {
+        debugFilePrint("MP: send profile build failed netId=%u name='%s' sections=%u",
+            netId, profile.name, changedSections);
         return false;
+    }
+    // Diag: the first bytes must be section headers [id][0][size]; if the
+    // wire body starts with text the sender is not using the sectioned path.
+    {
+        size_t n = bytes.size() < 24 ? bytes.size() : 24;
+        std::string hex;
+        for (size_t i = 0; i < n; i++) {
+            char buf[4];
+            snprintf(buf, sizeof(buf), "%02X", bytes[i]);
+            hex += buf;
+        }
+        debugFilePrint("MP: send profile head netId=%u bytes=%zu head=%s",
+            netId, bytes.size(), hex.c_str());
     }
 
     constexpr size_t kChunkDataSize = NET_MAX_PACKET_SIZE
@@ -235,18 +277,24 @@ static bool mpSendProfile(ENetPeer* peer, uint8_t netId, uint32_t objNetId,
     }
 
     uint32_t streamId = mpAllocProfileStreamId();
-    debugFilePrint("MP: send profile begin netId=%u name='%s' gen=%u objNet=%u bytes=%zu chunks=%u stream=%u",
-        netId, profile.name, profile.generation, objNetId, bytes.size(), chunkCount, streamId);
+    debugFilePrint("MP: send profile begin netId=%u name='%s' gen=%u objNet=%u bytes=%zu chunks=%u stream=%u model=%d sections=%u",
+        netId, profile.name, profile.generation, objNetId, bytes.size(), chunkCount, streamId,
+        includeModel ? 1 : 0, sectionCount);
     NetPlayerProfileBeginPayload begin;
     memset(&begin, 0, sizeof(begin));
     begin.streamId = streamId;
     begin.netId = netId;
+    begin.modelIncluded = includeModel ? 1 : 0;
     begin.schemaVersion = profile.schemaVersion;
     begin.generation = profile.generation;
     begin.objNetId = objNetId;
     begin.totalBytes = (uint32_t)bytes.size();
     begin.chunkCount = chunkCount;
-    begin.contentHash = MpProfileHash(profile);
+    begin.contentHash = bodyHash;
+    begin.sectionCount = sectionCount;
+    for (uint16_t i = 0; i < sectionCount && i < PROFILE_SECTION_COUNT; i++) {
+        begin.sections[i] = infos[i];
+    }
     if (!NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_PLAYER_PROFILE_BEGIN,
             &begin, sizeof(begin))) {
         return false;
@@ -282,8 +330,15 @@ static bool mpSendProfile(ENetPeer* peer, uint8_t netId, uint32_t objNetId,
     end.netId = netId;
     end.generation = profile.generation;
     end.contentHash = begin.contentHash;
-    return NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_PLAYER_PROFILE_END,
+    bool sent = NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_PLAYER_PROFILE_END,
         &end, sizeof(end));
+    if (sent && gMpIsHost && includeModel && receiverNetId != 0
+        && !profile.modelFiles.empty() && profile.modelHash != 0) {
+        // The receiver now holds this model — skip the payload on the next
+        // profile to it (until the model changes).
+        gMpReceiverKnownModels[receiverNetId].insert(profile.modelHash);
+    }
+    return sent;
 }
 
 static void mpSendProfileReject(ENetPeer* peer, uint8_t netId, uint32_t streamId, uint16_t reason)
@@ -299,7 +354,7 @@ static void mpSendProfileReject(ENetPeer* peer, uint8_t netId, uint32_t streamId
 }
 
 static void mpSendProfileAck(ENetPeer* peer, uint8_t netId, uint32_t streamId,
-    uint32_t generation, bool accepted, uint16_t reason = 0)
+    uint32_t generation, bool accepted, uint16_t reason = 0, uint32_t modelHash = 0)
 {
     if (peer == nullptr) return;
     NetPlayerProfileAckPayload ack;
@@ -309,13 +364,14 @@ static void mpSendProfileAck(ENetPeer* peer, uint8_t netId, uint32_t streamId,
     ack.accepted = accepted ? 1 : 0;
     ack.reason = reason;
     ack.generation = generation;
+    ack.modelHash = modelHash;
     NetSendPacket(peer, NET_CHANNEL_RELIABLE, accepted
         ? NET_PKT_PLAYER_PROFILE_ACK
         : NET_PKT_PLAYER_PROFILE_REJECT, &ack, sizeof(ack));
 }
 
 static void mpApplyReceivedProfile(uint8_t netId, uint32_t objNetId,
-    const MpPlayerProfile& profile)
+    const MpPlayerProfile& profile, uint32_t changedSections)
 {
     if (!gMpIsClient || netId == 0 || netId > NET_MAX_PLAYERS) {
         debugFilePrint("MP: apply received profile ignored netId=%u client=%d", netId, gMpIsClient);
@@ -367,7 +423,7 @@ static void mpApplyReceivedProfile(uint8_t netId, uint32_t objNetId,
                 netId, gained);
             pcAddExperience(gained);
         }
-        MpProfileApplyLocal(profile, /*applyPcStats=*/false);
+        MpProfileApplyLocal(profile, /*applyPcStats=*/false, changedSections);
     } else {
         if (player->obj != nullptr) {
             if (gMpSession.netIdToObj != nullptr && player->objNetId < (uint32_t)gMpSession.netIdToObjCapacity) {
@@ -382,6 +438,10 @@ static void mpApplyReceivedProfile(uint8_t netId, uint32_t objNetId,
             debugFilePrint("MP: apply received profile runtime create failed netId=%u", netId);
             return;
         }
+        // The runtime avatar is the player's only interactive object on this
+        // machine — register it under its object netId so reverse lookups
+        // (attack targets, USE_SKILL targets) resolve.
+        MpRegisterObjNetId(runtime->object, player->objNetId);
         player->obj = runtime->object;
         if (player->objNetId != 0) {
             MpRegisterObjNetId(player->obj, player->objNetId);
@@ -400,7 +460,7 @@ static void mpApplyReceivedProfile(uint8_t netId, uint32_t objNetId,
 }
 
 static void mpHostAcceptProfile(MultiplayerPlayer* player, ENetPeer* peer,
-    const MpPlayerProfile& profile, uint32_t streamId)
+    const MpPlayerProfile& profile, uint32_t streamId, uint32_t changedSections)
 {
     if (!gMpIsHost || player == nullptr || peer == nullptr || !MpProfileValidate(profile)) {
         debugFilePrint("MP: host accept profile rejected netId=%u handshaken=%d validate=%d",
@@ -424,7 +484,7 @@ static void mpHostAcceptProfile(MultiplayerPlayer* player, ENetPeer* peer,
             mpSendProfileAck(peer, player->netId, streamId, player->profileGeneration, true);
             return;
         }
-        if (!MpProfileApplyRuntimeUpdate(player->netId, profile)) {
+        if (!MpProfileApplyRuntimeUpdate(player->netId, profile, changedSections)) {
             debugFilePrint("MP: host accept profile update apply failed netId=%u",
                 player->netId);
             mpSendProfileReject(peer, player->netId, streamId, 6);
@@ -436,14 +496,16 @@ static void mpHostAcceptProfile(MultiplayerPlayer* player, ENetPeer* peer,
             strncpy(player->name, runtime->profile.name, NET_PEER_NAME_LENGTH - 1);
             player->name[NET_PEER_NAME_LENGTH - 1] = '\0';
         }
-        mpSendProfileAck(peer, player->netId, streamId, player->profileGeneration, true);
+        mpSendProfileAck(peer, player->netId, streamId, player->profileGeneration, true,
+            0, runtime != nullptr ? runtime->profile.modelHash : 0);
         // Other clients must see the updated sheet (perks/items/stats) too.
         // The owner is skipped: it just uploaded this exact generation, and
         // the echo's inventory rebuild is pure waste. Host-side changes to
         // this player's sheet are still broadcast back to it by the per-tick
         // detect (mpHostSyncProfiles, skipOwner=false).
         mpBroadcastProfileToClients(player->netId, player->objNetId,
-            runtime != nullptr ? runtime->profile : profile, /*skipOwner=*/true);
+            runtime != nullptr ? runtime->profile : profile, /*skipOwner=*/true,
+            changedSections);
         player->lastProfileBroadcastGeneration = player->profileGeneration;
         return;
     }
@@ -492,7 +554,8 @@ static void mpHostAcceptProfile(MultiplayerPlayer* player, ENetPeer* peer,
     objectReorder(player->obj);
     gMpSession.numPlayers++;
 
-    mpSendProfileAck(peer, player->netId, streamId, profile.generation, true);
+    mpSendProfileAck(peer, player->netId, streamId, profile.generation, true, 0,
+        profile.modelHash);
 
     NetWelcomePayload welcome;
     memset(&welcome, 0, sizeof(welcome));
@@ -510,7 +573,11 @@ static void mpHostAcceptProfile(MultiplayerPlayer* player, ENetPeer* peer,
         }
         MpPlayerRuntime* otherRuntime = MpProfileGetRuntime(other->netId);
         if (otherRuntime == nullptr) continue;
-        mpSendProfile(peer, other->netId, other->objNetId, otherRuntime->profile);
+        // The joining peer starts with an empty model registry — always ship
+        // the payload, and record it under the joiner's netId so later
+        // broadcasts skip it.
+        mpSendProfile(peer, other->netId, other->objNetId, otherRuntime->profile,
+            /*includeModel=*/true, player->netId);
     }
 
     NetPlayerJoinedPayload hostJoined;
@@ -537,7 +604,14 @@ static void mpHostAcceptProfile(MultiplayerPlayer* player, ENetPeer* peer,
             && other->peer != peer) {
             MpPlayerRuntime* newRuntime = MpProfileGetRuntime(player->netId);
             if (newRuntime != nullptr) {
-                mpSendProfile(other->peer, player->netId, player->objNetId, newRuntime->profile);
+                // Ship the joiner's model to this client only if it does not
+                // already hold the payload (a previous player may have used
+                // the same model).
+                mpSendProfile(other->peer, player->netId, player->objNetId,
+                    newRuntime->profile,
+                    /*includeModel=*/!mpReceiverHasModel(other->netId,
+                        newRuntime->profile.modelHash),
+                    other->netId);
             }
             NetSendPacket(other->peer, NET_CHANNEL_RELIABLE, NET_PKT_PLAYER_JOINED,
                 &joined, sizeof(joined));
@@ -656,24 +730,68 @@ static void mpHandleProfileEnd(ENetPeer* peer, const void* payload, size_t paylo
         mpSendProfileReject(peer, state.netId, state.streamId, 4);
         return;
     }
-    MpPlayerProfile profile;
-    if (!MpProfileDeserialize(state.bytes.data(), state.bytes.size(), &profile)
-        || profile.generation != state.generation
-        || MpProfileHash(profile) != state.expectedHash) {
-        debugFilePrint("MP: profile end deserialize/hash failed netId=%u stream=%u bytes=%zu",
+    // The content hash covers exactly the shipped bytes (the received body).
+    if (MpProfileHashBytes(state.bytes.data(), state.bytes.size()) != state.expectedHash) {
+        debugFilePrint("MP: profile end hash failed netId=%u stream=%u bytes=%zu",
             state.netId, state.streamId, state.bytes.size());
         mpSendProfileReject(peer, state.netId, state.streamId, 5);
         return;
     }
-    debugFilePrint("MP: profile end complete netId=%u stream=%u name='%s' gen=%u bytes=%zu",
-        state.netId, state.streamId, profile.name, profile.generation, state.bytes.size());
+    {
+        // Diag: the reassembled body must start with section headers; a text
+        // head here means the sender's body is not sectioned.
+        size_t n = state.bytes.size() < 24 ? state.bytes.size() : 24;
+        std::string hex;
+        for (size_t i = 0; i < n; i++) {
+            char buf[4];
+            snprintf(buf, sizeof(buf), "%02X", state.bytes[i]);
+            hex += buf;
+        }
+        debugFilePrint("MP: profile end head netId=%u bytes=%zu head=%s",
+            state.netId, state.bytes.size(), hex.c_str());
+    }
+
+    // Partial transfers merge over the stored profile: absent sections keep
+    // their current values. The changed-sections mask tells the apply paths
+    // exactly what to touch.
+    MpPlayerProfile merged;
+    MpPlayerRuntime* storedRuntime = MpProfileGetRuntime(state.netId);
+    if (storedRuntime != nullptr) {
+        merged = storedRuntime->profile;
+    }
+    uint32_t changedSections = MpProfileDeserializeSections(state.bytes.data(),
+        state.bytes.size(), &merged);
+    if (changedSections == 0) {
+        debugFilePrint("MP: profile end deserialize failed netId=%u stream=%u bytes=%zu",
+            state.netId, state.streamId, state.bytes.size());
+        mpSendProfileReject(peer, state.netId, state.streamId, 5);
+        return;
+    }
+    merged.generation = state.generation;
+    merged.schemaVersion = MP_PROFILE_SCHEMA_VERSION;
+    // The model payload may have been skipped (the sender assumed this peer
+    // already holds it). If we genuinely don't have it, ask for a re-send
+    // WITH the payload and drop this copy — applying without the model would
+    // fail anyway.
+    if (!MpProfileResolveModel(&merged)) {
+        NetModelRequestPayload req;
+        req.netId = state.netId;
+        req.modelHash = merged.modelHash;
+        NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_MODEL_REQUEST, &req, sizeof(req));
+        debugFilePrint("MP: profile model missing, requested netId=%u hash=%08X",
+            state.netId, merged.modelHash);
+        return;
+    }
+    debugFilePrint("MP: profile end complete netId=%u stream=%u name='%s' gen=%u bytes=%zu sections=%08X",
+        state.netId, state.streamId, merged.name, merged.generation, state.bytes.size(),
+        changedSections);
 
     if (gMpIsHost) {
         MultiplayerPlayer* player = mpPlayerFindByPeer(peer);
-        mpHostAcceptProfile(player, peer, profile, state.streamId);
+        mpHostAcceptProfile(player, peer, merged, state.streamId, changedSections);
     } else {
-        mpApplyReceivedProfile(state.netId, state.objNetId, profile);
-        mpSendProfileAck(peer, state.netId, state.streamId, profile.generation, true);
+        mpApplyReceivedProfile(state.netId, state.objNetId, merged, changedSections);
+        mpSendProfileAck(peer, state.netId, state.streamId, merged.generation, true);
     }
 }
 
@@ -1691,7 +1809,7 @@ static void mpHostRemovePlayer(MultiplayerPlayer* player)
 }
 
 static void mpBroadcastProfileToClients(uint8_t netId, uint32_t objNetId,
-    const MpPlayerProfile& profile, bool skipOwner)
+    const MpPlayerProfile& profile, bool skipOwner, uint32_t changedSections)
 {
     for (int index = 0; index < NET_MAX_PLAYERS; index++) {
         MultiplayerPlayer* other = &gMpSession.players[index];
@@ -1705,7 +1823,10 @@ static void mpBroadcastProfileToClients(uint8_t netId, uint32_t objNetId,
             // still reach the owner through the detect path (skipOwner=false).
             continue;
         }
-        mpSendProfile(other->peer, netId, objNetId, profile);
+        // Skip the model payload for clients that already hold it.
+        bool includeModel = !mpReceiverHasModel(other->netId, profile.modelHash);
+        mpSendProfile(other->peer, netId, objNetId, profile, includeModel, other->netId,
+            changedSections);
     }
 }
 
@@ -1758,32 +1879,19 @@ static void mpHostSyncProfiles()
         }
 
         MpPlayerProfile stored = runtime->profile;
-        stored.modelFiles.clear();
-        stored.modelHash = 0;
-        MpPlayerProfile cmp = captured;
-        cmp.modelFiles.clear();
-        cmp.modelHash = 0;
-        // Volatile runtime fields are owned by the per-tick player-state
-        // channel (transform, fid, hp/ap/radiation/poison, combat results).
-        // Exclude them from change detection so combat/movement never spams
-        // full profile broadcasts; only persistent state changes trigger one.
-        cmp.tile = stored.tile = -1;
-        cmp.x = stored.x = 0;
-        cmp.y = stored.y = 0;
-        cmp.sx = stored.sx = 0;
-        cmp.sy = stored.sy = 0;
-        cmp.frame = stored.frame = 0;
-        cmp.rotation = stored.rotation = ROTATION_NE;
-        cmp.fid = stored.fid = 0;
-        cmp.elevation = stored.elevation = 0;
-        cmp.hp = stored.hp = 0;
-        cmp.radiation = stored.radiation = 0;
-        cmp.poison = stored.poison = 0;
-        cmp.combatAp = stored.combatAp = 0;
-        cmp.combatResults = stored.combatResults = 0;
-        cmp.combatDamageLastTurn = stored.combatDamageLastTurn = 0;
-        cmp.whoHitMeNetId = stored.whoHitMeNetId = 0;
-        if (MpProfileHash(cmp) == MpProfileHash(stored)) {
+        // Per-section change detection: the volatile runtime fields (transform,
+        // hp/ap, combat state, object flags) are in NO section by construction,
+        // so no volatile-zeroing footgun can ever hide here again. Only the
+        // persistent sections are compared; the MODEL section compares its
+        // identity (hash) only.
+        uint32_t changedSections = 0;
+        for (int sectionId = PROFILE_SECTION_IDENTITY;
+            sectionId <= PROFILE_SECTION_SKILL_USE; sectionId++) {
+            if (MpProfileSectionChanged(captured, stored, (uint8_t)sectionId)) {
+                changedSections |= (1u << (sectionId - 1));
+            }
+        }
+        if (changedSections == 0) {
             continue;
         }
 
@@ -1831,45 +1939,20 @@ static void mpHostSyncProfiles()
             continue;
         }
         mpBroadcastProfileToClients(netId, player->objNetId, runtime->profile,
-            /*skipOwner=*/false);
+            /*skipOwner=*/false, changedSections);
         player->lastProfileBroadcastGeneration = runtime->profile.generation;
-        debugFilePrint("MP: profile changed netId=%u generation=%u broadcast",
-            netId, runtime->profile.generation);
+        debugFilePrint("MP: profile changed netId=%u generation=%u sections=%08X broadcast",
+            netId, runtime->profile.generation, changedSections);
     }
 }
 
-// Change-detection hash of the local character sheet. Volatile fields that
-// ride the per-tick state channel (transform, hp/ap/radiation/poison, combat
-// results) are excluded, mirroring the host's mpHostSyncProfiles comparison,
-// so walking/fighting never triggers an upload — only real sheet changes do.
-static uint32_t mpLocalProfileChangeHash(const MpPlayerProfile& captured)
-{
-    MpPlayerProfile cmp = captured;
-    cmp.tile = -1;
-    cmp.x = 0;
-    cmp.y = 0;
-    cmp.sx = 0;
-    cmp.sy = 0;
-    cmp.frame = 0;
-    cmp.rotation = ROTATION_NE;
-    cmp.fid = 0;
-    cmp.elevation = 0;
-    cmp.hp = 0;
-    cmp.radiation = 0;
-    cmp.poison = 0;
-    cmp.combatAp = 0;
-    cmp.combatResults = 0;
-    cmp.combatDamageLastTurn = 0;
-    cmp.whoHitMeNetId = 0;
-    return MpProfileHash(cmp);
-}
-
 // Unified client->host character-sheet sync: capture the local sheet once a
-// second and upload it through the profile channel when it changed. The host
-// applies it onto the avatar in place (MpProfileApplyRuntimeUpdate), so
-// level-up perks, spent skill points, looted/dropped items, script XP and
+// second and upload the CHANGED sections through the profile channel. The
+// host applies them onto the avatar in place (MpProfileApplyRuntimeUpdate),
+// so level-up perks, spent skill points, looted/dropped items, script XP and
 // stat changes all reach the host's combat resolution and every other client
-// without any per-attribute protocol.
+// without any per-attribute protocol. Volatile fields (transform, hp/ap,
+// combat state, object flags) are in NO section — they never ride this path.
 static void mpClientSyncLocalProfile()
 {
     if (!gMpIsClient || !gMpActive || gMpSession.hostPeer == nullptr
@@ -1896,22 +1979,22 @@ static void mpClientSyncLocalProfile()
         return;
     }
 
-    uint32_t hash = mpLocalProfileChangeHash(captured);
-    bool modelChanged = gMpLastUploadedModelName[0] == '\0'
-        || strncmp(gMpLastUploadedModelName, captured.modelName,
-            sizeof(captured.modelName)) != 0;
-    if (gMpLocalProfileSyncReady
-        && hash == gMpLastUploadedProfileHash && !modelChanged) {
+    uint32_t changedSections = 0;
+    for (int sectionId = PROFILE_SECTION_IDENTITY;
+        sectionId <= PROFILE_SECTION_SKILL_USE; sectionId++) {
+        if (MpProfileSectionChanged(captured, gMpLastUploadedProfile,
+                (uint8_t)sectionId)) {
+            changedSections |= (1u << (sectionId - 1));
+        }
+    }
+    if (gMpLocalProfileSyncReady && changedSections == 0) {
         return;
     }
 
     if (!gMpLocalProfileSyncReady) {
         // First detection after join: the join-time upload is the baseline —
         // never immediately re-upload an identical sheet.
-        gMpLastUploadedProfileHash = hash;
-        strncpy(gMpLastUploadedModelName, captured.modelName,
-            sizeof(gMpLastUploadedModelName));
-        gMpLastUploadedModelName[sizeof(gMpLastUploadedModelName) - 1] = '\0';
+        gMpLastUploadedProfile = captured;
         gMpLocalProfileSyncReady = true;
         return;
     }
@@ -1920,6 +2003,7 @@ static void mpClientSyncLocalProfile()
     // (the host preserves it); a model identity change (armor swap) requires
     // the full capture so the new files ride along.
     MpPlayerProfile upload = captured;
+    bool modelChanged = (changedSections & (1u << (PROFILE_SECTION_MODEL - 1))) != 0;
     if (modelChanged) {
         if (!MpProfileCaptureLocal(&upload)) {
             debugFilePrint("MP: local profile upload model capture failed");
@@ -1930,22 +2014,23 @@ static void mpClientSyncLocalProfile()
     if (upload.generation == 0) {
         upload.generation = 1;
     }
-    if (!mpSendProfile(gMpSession.hostPeer, localNetId, player->objNetId, upload)) {
-        debugFilePrint("MP: local profile upload failed netId=%u gen=%u",
-            localNetId, upload.generation);
+    // Skip the model payload once the host has acked holding it; only model
+    // identity changes (new hash) or the first upload carry the files.
+    bool includeModel = !gMpHostKnownModels.count(upload.modelHash);
+    if (!mpSendProfile(gMpSession.hostPeer, localNetId, player->objNetId, upload,
+            includeModel, /*receiverNetId=*/0, changedSections)) {
+        debugFilePrint("MP: local profile upload failed netId=%u gen=%u sections=%08X",
+            localNetId, upload.generation, changedSections);
         return;
     }
+    gMpLastUploadedProfile = captured;
     // Optimistically advance the slot's generation so the next upload carries
     // a strictly higher generation (the host rejects gen <= its own). Echo
     // broadcasts of this generation bump it further — either way it only
     // ever climbs.
     player->profileGeneration = upload.generation;
-    gMpLastUploadedProfileHash = hash;
-    strncpy(gMpLastUploadedModelName, captured.modelName,
-        sizeof(gMpLastUploadedModelName));
-    gMpLastUploadedModelName[sizeof(gMpLastUploadedModelName) - 1] = '\0';
-    debugFilePrint("MP: local profile uploaded netId=%u gen=%u hash=%08X modelChanged=%d",
-        localNetId, upload.generation, hash, modelChanged ? 1 : 0);
+    debugFilePrint("MP: local profile uploaded netId=%u gen=%u sections=%08X",
+        localNetId, upload.generation, changedSections);
 }
 
 void MpTick()
@@ -2401,6 +2486,68 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                 MpCombatOnEndedPacket();
                 break;
             }
+            case NET_PKT_PLAYER_CMD: {
+                if (payloadLen != sizeof(NetPlayerCmdPayload)) {
+                    return;
+                }
+                MultiplayerPlayer* p = mpPlayerFindByPeer(peer);
+                if (p == nullptr || !p->isHandshaken || p->obj == nullptr) {
+                    return;
+                }
+                const NetPlayerCmdPayload* cmd = (const NetPlayerCmdPayload*)payload;
+                switch (cmd->opcode) {
+                case NET_PLAYER_CMD_HEAL:
+                    MpDebugApplyHeal(p->obj, cmd->arg1);
+                    break;
+                case NET_PLAYER_CMD_INVENTORY_AP: {
+                    int cost = cmd->arg1;
+                    if (cost < 0) {
+                        cost = 0;
+                    } else if (cost > 100) {
+                        cost = 100;
+                    }
+                    if (cost > 0) {
+                        Object* critter = p->obj;
+                        int apBefore = critter->data.critter.combat.ap;
+                        critter->data.critter.combat.ap = std::max(apBefore - cost, 0);
+                        debugFilePrint("MP: inv ap cost resolved netId=%u cost=%d ap=%d->%d",
+                            p->netId, cost, apBefore, critter->data.critter.combat.ap);
+                    }
+                    break;
+                }
+                default:
+                    debugFilePrint("MP: player cmd unknown opcode=%u netId=%u",
+                        cmd->opcode, p->netId);
+                    break;
+                }
+                break;
+            }
+            case NET_PKT_MODEL_REQUEST: {
+                if (payloadLen != sizeof(NetModelRequestPayload)) {
+                    return;
+                }
+                const NetModelRequestPayload* req = (const NetModelRequestPayload*)payload;
+                MultiplayerPlayer* requester = mpPlayerFindByPeer(peer);
+                if (requester == nullptr || !requester->isHandshaken || req->netId == 0
+                    || req->netId > NET_MAX_PLAYERS) {
+                    return;
+                }
+                MultiplayerPlayer* target = &gMpSession.players[req->netId - 1];
+                MpPlayerRuntime* targetRuntime = MpProfileGetRuntime(req->netId);
+                if (target == nullptr || !target->isConnected
+                    || targetRuntime == nullptr || targetRuntime->object == nullptr) {
+                    return;
+                }
+                // The requester lacks the model payload — re-send just the
+                // MODEL section WITH it (the receiver merges over its stored
+                // copy, which already holds every other section).
+                mpSendProfile(peer, req->netId, target->objNetId,
+                    targetRuntime->profile, /*includeModel=*/true, requester->netId,
+                    (1u << (PROFILE_SECTION_MODEL - 1)));
+                debugFilePrint("MP: model resend netId=%u hash=%08X to netId=%u",
+                    req->netId, req->modelHash, requester->netId);
+                break;
+            }
             default:
                 break;
             }
@@ -2427,7 +2574,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
         }
         if (!NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_HELLO, &hello, sizeof(hello))
             || !gMpPendingClientProfileValid
-            || !mpSendProfile(peer, 0, 0, gMpPendingClientProfile)) {
+            || !mpSendProfile(peer, 0, 0, gMpPendingClientProfile, /*includeModel=*/true)) {
             debugFilePrint("MP: client hello/profile upload failed, disconnecting");
             mpRequestClientDisconnect(false);
         }
@@ -2516,6 +2663,42 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             }
             break;
         }
+        case NET_PKT_PLAYER_PROFILE_ACK: {
+            if (payloadLen != sizeof(NetPlayerProfileAckPayload)) return;
+            const NetPlayerProfileAckPayload* ack = (const NetPlayerProfileAckPayload*)payload;
+            if (ack->accepted != 0 && ack->modelHash != 0) {
+                // The host now holds this model — skip the payload on future
+                // uploads with the same hash.
+                gMpHostKnownModels.insert(ack->modelHash);
+                debugFilePrint("MP: model ack received hash=%08X", ack->modelHash);
+            }
+            break;
+        }
+        case NET_PKT_MODEL_REQUEST: {
+            // The host asked for our model payload (it never received it).
+            if (payloadLen != sizeof(NetModelRequestPayload)) return;
+            const NetModelRequestPayload* req = (const NetModelRequestPayload*)payload;
+            if (req->netId == gMpSession.localNetId) {
+                MpPlayerProfile resend;
+                if (MpProfileCaptureLocal(&resend)) {
+                    resend.generation = gMpSession.players[req->netId - 1].profileGeneration + 1;
+                    if (resend.generation == 0) {
+                        resend.generation = 1;
+                    }
+                    // Only the MODEL section is missing on the host — resend
+                    // it with the payload.
+                    if (mpSendProfile(gMpSession.hostPeer, req->netId,
+                            gMpSession.players[req->netId - 1].objNetId, resend,
+                            /*includeModel=*/true, /*receiverNetId=*/0,
+                            (1u << (PROFILE_SECTION_MODEL - 1)))) {
+                        gMpHostKnownModels.insert(req->modelHash);
+                        debugFilePrint("MP: model resend sent netId=%u hash=%08X",
+                            req->netId, req->modelHash);
+                    }
+                }
+            }
+            break;
+        }
         case NET_PKT_WELCOME: {
             if (payloadLen != sizeof(NetWelcomePayload)) {
                 return;
@@ -2593,18 +2776,41 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             MpApplyPlayerState((const NetPlayerStateUpdatePayload*)payload);
             break;
         }
-        case NET_PKT_PLAYER_STATUS: {
-            if (payloadLen != sizeof(NetPlayerStatusPayload)) {
+        case NET_PKT_PLAYER_EVENT: {
+            if (payloadLen != sizeof(NetPlayerEventPayload)) {
                 return;
             }
-            MpApplyPlayerStatus((const NetPlayerStatusPayload*)payload);
-            break;
-        }
-        case NET_PKT_GAME_OVER: {
-            if (payloadLen != sizeof(NetGameOverPayload)) {
-                return;
+            const NetPlayerEventPayload* evt = (const NetPlayerEventPayload*)payload;
+            switch (evt->opcode) {
+            case NET_PLAYER_EVENT_DOWNED: {
+                NetPlayerStatusPayload status;
+                status.netId = evt->netId;
+                status.downed = (uint8_t)evt->arg1;
+                status.hp = evt->arg2;
+                MpApplyPlayerStatus(&status);
+                break;
             }
-            MpApplyGameOver((const NetGameOverPayload*)payload);
+            case NET_PLAYER_EVENT_GAME_OVER: {
+                NetGameOverPayload gameOver;
+                gameOver.reason = (uint8_t)evt->arg1;
+                MpApplyGameOver(&gameOver);
+                break;
+            }
+            case NET_PLAYER_EVENT_ATTACK_RESULT: {
+                if (evt->netId == gMpSession.localNetId) {
+                    // The host resolved our own attack — replay the feedback
+                    // with the authoritative numbers.
+                    MpReplayLocalAttackResult(evt->arg1, evt->arg2, evt->arg3);
+                } else {
+                    debugFilePrint("MP: attack result remote netId=%u dmg=%d flags=0x%X",
+                        evt->netId, evt->arg1, evt->arg2);
+                }
+                break;
+            }
+            default:
+                debugFilePrint("MP: player event unknown opcode=%u", evt->opcode);
+                break;
+            }
             break;
         }
         case NET_PKT_OBJECT_STATE_UPDATE: {
@@ -2900,12 +3106,15 @@ static void mpBroadcastPlayerStatus(uint8_t netId, bool downed, int32_t hp)
     if (!gMpIsHost || gMpSession.enetHost == nullptr || netId == 0) {
         return;
     }
-    NetPlayerStatusPayload payload;
+    NetPlayerEventPayload payload;
+    payload.opcode = NET_PLAYER_EVENT_DOWNED;
     payload.netId = netId;
-    payload.downed = downed ? 1 : 0;
-    payload.hp = hp;
+    payload.arg1 = downed ? 1 : 0;
+    payload.arg2 = hp;
+    payload.arg3 = 0;
+    payload.arg4 = 0;
     NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE,
-        NET_PKT_PLAYER_STATUS, &payload, sizeof(payload));
+        NET_PKT_PLAYER_EVENT, &payload, sizeof(payload));
     debugFilePrint("MP: player status broadcast netId=%u downed=%d hp=%d",
         netId, downed ? 1 : 0, hp);
 }
@@ -2932,10 +3141,15 @@ static void mpCheckAllPlayersDown()
     }
     if (connected > 0 && downedCount >= connected) {
         debugFilePrint("MP: GAME OVER — all %d players downed", connected);
-        NetGameOverPayload payload;
-        payload.reason = 1;
+        NetPlayerEventPayload payload;
+        payload.opcode = NET_PLAYER_EVENT_GAME_OVER;
+        payload.netId = 0;
+        payload.arg1 = 1;
+        payload.arg2 = 0;
+        payload.arg3 = 0;
+        payload.arg4 = 0;
         NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE,
-            NET_PKT_GAME_OVER, &payload, sizeof(payload));
+            NET_PKT_PLAYER_EVENT, &payload, sizeof(payload));
         _game_user_wants_to_quit = GAME_QUIT_REQUEST_MAIN_MENU;
     }
 }
@@ -3026,12 +3240,58 @@ void MpCombatEndReviveDowned()
         critter->data.critter.hp = reviveHp;
         mpRestoreStandingVisual(critter, p->downedOrigFid, true);
         p->downedOrigFid = 0;
+        if (critter == gDude) {
+            // The vanilla _combat_over rendered the HUD from the downed
+            // (0 HP) state before the revive ran — redraw it or the bar
+            // keeps showing 0.
+            interfaceRenderHitPoints(true);
+        }
 
         debugFilePrint("MP: player revived netId=%u hp=%d/%d fid=0x%X",
             p->netId, reviveHp, maxHp, critter->fid);
         // The monitor message mirrors to every client while combat runs.
         displayMonitorAddMessage("A downed player gets back up!");
         mpBroadcastPlayerStatus(p->netId, false, reviveHp);
+    }
+}
+
+// Host: debug heal from a player's debug menu (value <= 0 = full). HP is
+// host-authoritative, so the host applies it to the avatar; the regular
+// state/status broadcasts carry the result back to everyone. A downed
+// player gets back up — same revive as combat end.
+void MpDebugApplyHeal(Object* critter, int value)
+{
+    if (!gMpIsHost || !gMpActive || critter == nullptr) {
+        return;
+    }
+    MultiplayerPlayer* p = nullptr;
+    for (int i = 0; i < NET_MAX_PLAYERS; i++) {
+        MultiplayerPlayer* candidate = &gMpSession.players[i];
+        if (candidate->isConnected && candidate->obj == critter) {
+            p = candidate;
+            break;
+        }
+    }
+
+    int maxHp = critterGetStat(critter, STAT_MAXIMUM_HIT_POINTS);
+    int hp = critter->data.critter.hp;
+    int newHp = value <= 0 ? maxHp : hp + value;
+    if (newHp > maxHp) {
+        newHp = maxHp;
+    }
+
+    if (p != nullptr && p->downed) {
+        p->downed = false;
+        critter->data.critter.combat.results &= ~(DAM_DEAD | DAM_KNOCKED_OUT | DAM_KNOCKED_DOWN | DAM_LOSE_TURN);
+        critter->data.critter.hp = newHp > 0 ? newHp : 1;
+        mpRestoreStandingVisual(critter, p->downedOrigFid, true);
+        p->downedOrigFid = 0;
+        debugFilePrint("MPDBG: heal revived netId=%u hp=%d", p->netId, critter->data.critter.hp);
+        displayMonitorAddMessage("A downed player gets back up!");
+        mpBroadcastPlayerStatus(p->netId, false, critter->data.critter.hp);
+    } else {
+        critter->data.critter.hp = newHp;
+        debugFilePrint("MPDBG: heal applied obj=%p hp=%d->%d", critter, hp, newHp);
     }
 }
 
@@ -3810,6 +4070,16 @@ static void mpClearClientMapObjectsForFullSync()
             gMpSession.netIdToObjCapacity * sizeof(Object*));
         gMpSession.netIdToObjCount = 0;
     }
+    // The memset wiped every reverse-map entry, including profile-runtime
+    // avatars. The fresh full-sync skips player objects (profile-owned), so
+    // their registrations must be restored here or netId lookups (attack
+    // targets, skill targets) never resolve for them again.
+    for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+        MultiplayerPlayer* p = &gMpSession.players[index];
+        if (p->isConnected && p->obj != nullptr && p->objNetId != 0) {
+            MpRegisterObjNetId(p->obj, p->objNetId);
+        }
+    }
     for (int index = 0; index < NET_MAX_PLAYERS; index++) {
         if (gMpSession.players[index].isLocal) {
             gMpSession.players[index].obj = gDude;
@@ -4029,8 +4299,10 @@ void MpApplyPlayerState(const NetPlayerStateUpdatePayload* s)
         }
     }
     int oldLocalHp = 0;
+    int oldLocalAp = -1;
     if (isLocalPlayer) {
         oldLocalHp = obj->data.critter.hp;
+        oldLocalAp = obj->data.critter.combat.ap;
     }
     mpApplyCritterState(obj, s->hp, s->ap, s->radiation, s->poison, obj->data.critter.combat.team, obj->data.critter.combat.maneuver, s->combatResults);
     // The host is authoritative over the local player's HP, but the vanilla
@@ -4039,6 +4311,31 @@ void MpApplyPlayerState(const NetPlayerStateUpdatePayload* s)
     // reach the HP bar — refresh it whenever the synced value changes.
     if (isLocalPlayer && obj->data.critter.hp != oldLocalHp) {
         interfaceRenderHitPoints(true);
+    }
+    // Thin client: the AP bar no longer updates from local action writes (the
+    // host owns AP spends). Refresh it when the synced value changes so the
+    // mirror stays visible — same full interface refresh the vanilla action
+    // path uses, not a one-off blit.
+    if (isLocalPlayer && obj->data.critter.combat.ap != oldLocalAp) {
+        interfaceRenderActionPoints(obj->data.critter.combat.ap, _combat_free_move);
+    }
+    // Bounds sanity on the authoritative channel: a wild value here would
+    // corrupt the local mirror (defense against upstream bugs, not remote
+    // tampering — the host is trusted).
+    if (isLocalPlayer) {
+        int maxHp = critterGetStat(obj, STAT_MAXIMUM_HIT_POINTS);
+        int maxAp = critterGetStat(obj, STAT_MAXIMUM_ACTION_POINTS);
+        if (obj->data.critter.hp > maxHp || s->hp > maxHp
+            || s->ap > maxAp || obj->data.critter.combat.ap > maxAp) {
+            static uint32_t gMpStateBoundsLogTick = 0;
+            uint32_t nowTicks = getTicks();
+            if (nowTicks - gMpStateBoundsLogTick > 2000) {
+                gMpStateBoundsLogTick = nowTicks;
+                debugFilePrint("MP: state bounds anomaly netId=%u hp=%d/%d ap=%d/%d",
+                    s->netId, obj->data.critter.hp, maxHp,
+                    obj->data.critter.combat.ap, maxAp);
+            }
+        }
     }
     p->hasInitialState = true;
     mpShowClientPlayer(obj);

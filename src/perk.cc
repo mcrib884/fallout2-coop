@@ -302,12 +302,18 @@ int perksSave(File* stream)
 // 0x49678C perkGetLevelData
 static PerkRankData* perkGetRankData(Object* critter)
 {
+    // The local dude's perks always live in the vanilla party table — the
+    // editor, the debug menu and every engine read go through it, and the
+    // profile capture reads it. The runtime profile only mirrors the local
+    // dude's ranks for echoes/broadcasts; routing gDude to it here would
+    // split the store and make local perk edits invisible to the sync.
+    if (critter == gDude) {
+        return gPartyMemberPerkRanks;
+    }
+
     MpPlayerRuntime* runtime = MpProfileFindRuntimeByObject(critter);
     if (runtime != nullptr) {
         return reinterpret_cast<PerkRankData*>(runtime->profile.perkRanks);
-    }
-    if (critter == gDude) {
-        return gPartyMemberPerkRanks;
     }
 
     for (int index = 1; index < gPartyMemberDescriptionsLength; index++) {

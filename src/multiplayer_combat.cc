@@ -30,6 +30,7 @@
 #include "game_mouse.h"
 #include "input.h"
 #include "interface.h"
+#include "item.h"
 #include "kb.h"
 #include "map.h"
 #include "memory.h"
@@ -39,6 +40,7 @@
 #include "perk.h"
 #include "scripts.h"
 #include "tile.h"
+#include "skill.h"
 #include "stat.h"
 #include "svga.h"
 #include "text_font.h"
@@ -491,26 +493,54 @@ static void mpCombatResolveAttack(MultiplayerPlayer* player, const NetCombatCmdP
 
     HitMode hitMode = (HitMode)cmd->hitMode;
     HitLocation hitLocation = (HitLocation)cmd->hitLocation;
-    _combat_attack(critter, target, hitMode, hitLocation);
-    debugFilePrint("MPCOMBAT: attack resolved netId=%u targetNetId=%u mode=%d loc=%d",
-        player->netId, cmd->targetNetId, (int)hitMode, (int)hitLocation);
-}
-
-static void mpCombatResolveInventoryApCost(MultiplayerPlayer* player, const NetCombatCmdPayload* cmd)
-{
-    Object* critter = player->obj;
-    if (critter == nullptr) {
-        debugFilePrint("MPCOMBAT: inv ap cost rejected (no critter) netId=%u", player->netId);
-        return;
+    // The script combat's start-data override (_gcsd) is still live inside
+    // the initiating turn's pump; it belongs to the vanilla initiator and
+    // its min/max clamp would zero this remote attack's damage. Null it for
+    // the resolve and restore right after.
+    CombatStartData* savedGcsd = MpCombatSwapStartData(nullptr);
+    int rc = _combat_attack(critter, target, hitMode, hitLocation);
+    MpCombatSwapStartData(savedGcsd);
+    if (rc == 0 && player->peer != nullptr) {
+        // The outcome is computed synchronously (damage lands at the strike
+        // frame); send it to the attacking client so it replays the hit
+        // feedback with the authoritative numbers instead of its own roll.
+        int damage = 0;
+        int attackerFlags = 0;
+        int defenderFlags = 0;
+        MpGetLastAttackResult(&damage, &attackerFlags, &defenderFlags);
+        NetPlayerEventPayload result;
+        result.opcode = NET_PLAYER_EVENT_ATTACK_RESULT;
+        result.netId = player->netId;
+        result.arg1 = damage;
+        result.arg2 = attackerFlags;
+        result.arg3 = defenderFlags;
+        result.arg4 = cmd->targetNetId;
+        NetSendPacket(player->peer, NET_CHANNEL_RELIABLE,
+            NET_PKT_PLAYER_EVENT, &result, sizeof(result));
+        // Diagnostic: the damage formula halves the roll and subtracts the
+        // target's DT — a 0 here means the attacker's melee/unarmed damage
+        // resolved to 0, or the DT absorbed everything.
+        Object* lastWeapon = MpGetLastAttackWeapon();
+        DamageType resolvedType = weaponGetDamageType(critter, lastWeapon);
+        int targetDt = target != nullptr
+            ? critterGetStat(target, STAT_DAMAGE_THRESHOLD + resolvedType) : 0;
+        int targetDr = target != nullptr
+            ? critterGetStat(target, STAT_DAMAGE_RESISTANCE + resolvedType)
+            : 0;
+        int attackerUnarmed = skillGetValue(critter, SKILL_UNARMED);
+        debugFilePrint("MPCOMBAT: attack resolved netId=%u targetNetId=%u mode=%d loc=%d dmg=%d flags=0x%X melee=%d weapon=%p wpnPid=0x%X dt=%d dr=%d unarmed=%d str=%d",
+            player->netId, cmd->targetNetId, (int)hitMode, (int)hitLocation,
+            damage, attackerFlags,
+            critterGetStat(critter, STAT_MELEE_DAMAGE),
+            (void*)lastWeapon,
+            lastWeapon != nullptr ? lastWeapon->pid : 0,
+            targetDt, targetDr,
+            attackerUnarmed,
+            critterGetStat(critter, STAT_STRENGTH));
+    } else {
+        debugFilePrint("MPCOMBAT: attack resolved (no result sent) netId=%u rc=%d",
+            player->netId, rc);
     }
-    int cost = std::clamp(cmd->tile, 0, 100);
-    if (cost <= 0) {
-        return;
-    }
-    int apBefore = critter->data.critter.combat.ap;
-    critter->data.critter.combat.ap = std::max(apBefore - cost, 0);
-    debugFilePrint("MPCOMBAT: inv ap cost resolved netId=%u cost=%d ap=%d->%d",
-        player->netId, cost, apBefore, critter->data.critter.combat.ap);
 }
 
 static void mpCombatDrainQueue()
@@ -538,9 +568,6 @@ static void mpCombatDrainQueue()
             break;
         case NET_COMBAT_CMD_ATTACK:
             mpCombatResolveAttack(player, &queued.payload);
-            break;
-        case NET_COMBAT_CMD_INV_AP_COST:
-            mpCombatResolveInventoryApCost(player, &queued.payload);
             break;
         default:
             debugFilePrint("MPCOMBAT: unknown cmd %d netId=%u", queued.payload.cmd, queued.netId);
@@ -699,6 +726,11 @@ void MpCombatOnStartedPacket()
     gameUiDisable(1);
     gameMouseSetCursor(MOUSE_CURSOR_WAIT_WATCH);
     interfaceBarEndButtonsShow(true);
+    // The host's combat HUD is fully drawn the moment its first turn starts
+    // (the initiator acts immediately); the client's AP panel only rendered
+    // at its own turn, so spectators saw a non-combat HUD until the fight
+    // ended. Render it here — the mirrored AP refreshes via the state sync.
+    interfaceRenderActionPoints(gDude != nullptr ? gDude->data.critter.combat.ap : 0, _combat_free_move);
     mpCombatCreateCards();
     debugFilePrint("MPCOMBAT: client mirror entered");
 }
@@ -876,6 +908,11 @@ int MpCombatClientTurnLoop()
 
         int ap = dude->data.critter.combat.ap;
         if (ap <= 0 && _combat_free_move <= 0) {
+            // Soft local exit only: the turn's real end is host-owned — this
+            // break merely sends TURN_END, and the host validates it against
+            // its own authoritative AP. With thin-client AP (no local spends)
+            // the mirrored value lags the host by at most one round trip, so
+            // the exit can fire a beat late; the host never double-ends.
             break;
         }
 
@@ -965,15 +1002,19 @@ void MpCombatSendMoveIntent(int tile, int elevation, bool isRun)
 
 void MpCombatSendInventoryApCost(int cost)
 {
-    if (!gMpIsClient || !gMpActive || !gMpCombat.inCombat || !gMpCombat.turnActive) {
+    if (!gMpIsClient || !gMpActive || gMpSession.hostPeer == nullptr) {
         return;
     }
-    NetCombatCmdPayload payload;
-    memset(&payload, 0, sizeof(payload));
-    payload.cmd = NET_COMBAT_CMD_INV_AP_COST;
-    payload.tile = cost; // the cost rides in the tile field
-    mpCombatSend(NET_PKT_COMBAT_CMD, &payload, sizeof(payload));
-    debugFilePrint("MPCOMBAT: inv ap cost sent cost=%d", cost);
+    // Generic player-command route — the host applies it to our avatar and
+    // the state channel carries the result back. Not combat-gated: it is a
+    // plain runtime-field command.
+    NetPlayerCmdPayload payload;
+    payload.opcode = NET_PLAYER_CMD_INVENTORY_AP;
+    payload.arg1 = cost;
+    payload.arg2 = 0;
+    NetSendPacket(gMpSession.hostPeer, NET_CHANNEL_RELIABLE,
+        NET_PKT_PLAYER_CMD, &payload, sizeof(payload));
+    debugFilePrint("MP: inv ap cost sent cost=%d", cost);
 }
 
 void MpCombatSendAttackIntent(Object* target, HitMode hitMode, HitLocation hitLocation)
@@ -983,7 +1024,25 @@ void MpCombatSendAttackIntent(Object* target, HitMode hitMode, HitLocation hitLo
     }
     uint32_t targetNetId = target != nullptr ? MpGetObjNetId(target) : 0;
     if (targetNetId == 0) {
-        debugFilePrint("MPCOMBAT: attack intent dropped (no target netId)");
+        // Diagnostic: identify the unregistered target (pid/fid distinguish a
+        // profile runtime avatar from a map-synced duplicate) and whether the
+        // reverse map holds it under any id.
+        int inMap = 0;
+        if (target != nullptr && gMpSession.netIdToObj != nullptr) {
+            for (int i = 1; i < gMpSession.netIdToObjCount; i++) {
+                if (gMpSession.netIdToObj[i] == target) {
+                    inMap = i;
+                    break;
+                }
+            }
+        }
+        debugFilePrint("MPCOMBAT: attack intent dropped target=%p pid=0x%X fid=0x%X tile=%d elev=%d isDude=%d count=%d inMapAt=%d",
+            (void*)target, target != nullptr ? target->pid : 0,
+            target != nullptr ? target->fid : 0,
+            target != nullptr ? target->tile : -1,
+            target != nullptr ? target->elevation : -1,
+            target == gDude ? 1 : 0,
+            gMpSession.netIdToObjCount, inMap);
         return;
     }
     NetCombatCmdPayload payload;

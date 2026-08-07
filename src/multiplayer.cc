@@ -27,6 +27,7 @@
 #include "multiplayer_vote.h"
 #include "multiplayer_combat.h"
 #include "multiplayer_debug.h"
+#include "multiplayer_dialog.h"
 #include "multiplayer_profile.h"
 #include "object.h"
 #include "palette.h"
@@ -49,6 +50,10 @@ bool gMpIsHost = false;
 bool gMpIsClient = false;
 bool gMpActive = false;
 bool gMpSuppressExitGridCheck = false;
+// Set while the synchronized dialogue modal is open on a client: MpTick
+// skips the deferred-packet drain so session-changing packets never apply
+// under the modal (the host's DIALOG_END closes the modal first).
+bool gMpModalActive = false;
 static uint32_t gMpLastTileRefreshTick = 0;
 int gMpPendingHostStartAfterLoad = 0;
 int gMpPendingClientStartAfterLoad = 0;
@@ -1406,6 +1411,7 @@ int MpInit()
     gMpProfileReceives.clear();
     gMpPendingClientProfileValid = false;
     MpVoteInit();
+    MpDialogInit();
     if (!NetInit()) {
         debugFilePrint("MP: init NetInit failed");
         debugPrint("MpInit: NetInit failed\n");
@@ -1425,6 +1431,7 @@ void MpShutdown()
         }
     }
     MpVoteShutdown();
+    MpDialogShutdown();
     MpClearNetIdMappings();
     MpProfileDestroyAllRuntimes();
     gMpProfileReceives.clear();
@@ -1452,6 +1459,7 @@ void MpReset()
     }
     MpVoteReset();
     MpCombatReset();
+    MpDialogReset();
     MpClearNetIdMappings();
     MpProfileDestroyAllRuntimes();
     gMpProfileReceives.clear();
@@ -1777,6 +1785,9 @@ static void mpHostRemovePlayer(MultiplayerPlayer* player)
     debugFilePrint("MP: host remove player netId=%u name='%s' handshaken=%d",
         netId, player->name, wasHandshaken ? 1 : 0);
 
+    // Co-op: a dialogue participant disconnected — remove + recalc the vote.
+    MpDialogHostPlayerDisconnected(netId);
+
     if (wasHandshaken && gVoteSession.state == VOTE_STATE_ACTIVE) {
         // A disconnected initiator cancels. A disconnected voter is an
         // immediate NO, so unanimity can never wait for a missing peer.
@@ -2056,8 +2067,11 @@ void MpTick()
 
     // Drain client-deferred packets (queued while a modal blocked the main
     // loop). No modal is open now, so the applies are safe. New deferrals
-    // from NetHostService below go to the tail and drain next tick.
-    size_t deferredCount = gMpDeferredPackets.size();
+    // from NetHostService below go to the tail and drain next tick. While the
+    // synchronized dialogue modal is open this drain is skipped entirely —
+    // the host's DIALOG_END (inline) closes the modal first, and the queued
+    // session-changing packets apply on the first main-loop tick after it.
+    size_t deferredCount = gMpModalActive ? 0 : gMpDeferredPackets.size();
     if (deferredCount > 0) {
         gMpDrainingDeferredPackets = true;
         for (size_t index = 0; index < deferredCount; index++) {
@@ -2169,6 +2183,9 @@ void MpTick()
     // Refresh the vote modal's countdown/tallies once per frame so it ticks.
     // No-op when no vote UI is open.
     MpVoteUpdateUI();
+    // Open the synchronized dialogue modal when the host sent us a session and
+    // we are a participant. Blocks while the modal is up (it pumps MpTick).
+    MpDialogClientMaybeShowUI();
 
     // Remote critters can arrive on tiles whose dirty rects nobody marked;
     // nothing redraws them until the mouse happens to refresh the view. Do a
@@ -2362,7 +2379,13 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                     }
                     break;
                 case NET_PLAYER_ACTION_TALK:
-                    actionTalk(p->obj, target);
+                    // Co-op: a talk targeting an NPC with an active session
+                    // joins it; otherwise record the pending initiator so the
+                    // dialogue session starts with the right player.
+                    if (!MpDialogHostTryJoin(target, p->netId)) {
+                        MpDialogSetPendingInitiator(p->netId);
+                        actionTalk(p->obj, target);
+                    }
                     break;
                 case NET_PLAYER_ACTION_TOUCH:
                     _action_use_an_object(p->obj, target);
@@ -2438,6 +2461,15 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                 MpVoteCastVote(in->voterNetId, in->vote);
                 break;
             }
+            case NET_PKT_DIALOG_CHOICE:
+                MpDialogHostHandleChoice(payload, payloadLen, peer);
+                break;
+            case NET_PKT_DIALOG_LEAVE:
+                MpDialogHostHandleLeave(payload, payloadLen, peer);
+                break;
+            case NET_PKT_BARTER_CMD:
+                MpDialogHostHandleBarterCmd(payload, payloadLen, peer);
+                break;
             case NET_PKT_COMBAT_START_REQUEST: {
                 if (payloadLen != sizeof(NetCombatStartRequestPayload)) {
                     debugFilePrint("MP: combat start request bad length=%zu", payloadLen);
@@ -2787,13 +2819,24 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             MpApplyPlayerState((const NetPlayerStateUpdatePayload*)payload);
             break;
         }
+        case NET_PKT_DIALOG_BEGIN:
+        case NET_PKT_DIALOG_STATE:
+        case NET_PKT_DIALOG_VOTE:
+        case NET_PKT_DIALOG_TRANSCRIPT:
+        case NET_PKT_DIALOG_JOIN:
+        case NET_PKT_DIALOG_LEAVE:
+        case NET_PKT_DIALOG_END:
+        case NET_PKT_BARTER_STATE:
+            // Synchronized dialogue: applied inline (they drive the client's
+            // dialogue modal directly; the modal pumps MpTick itself).
+            MpDialogOnClientPacket(packetType, payload, payloadLen);
+            break;
         case NET_PKT_PLAYER_EVENT: {
             if (payloadLen != sizeof(NetPlayerEventPayload)) {
                 return;
             }
             const NetPlayerEventPayload* evt = (const NetPlayerEventPayload*)payload;
-            switch (evt->opcode) {
-            case NET_PLAYER_EVENT_DOWNED: {
+            switch (evt->opcode) {            case NET_PLAYER_EVENT_DOWNED: {
                 NetPlayerStatusPayload status;
                 status.netId = evt->netId;
                 status.downed = (uint8_t)evt->arg1;
@@ -3848,6 +3891,9 @@ void MpPrepareForMapChange()
         return;
     }
     debugFilePrint("MP: prepare map change begin map=%d", gMapHeader.index);
+
+    // Co-op: no dialogue or barter survives a map transition.
+    MpDialogReset();
 
     // The map load below places gDude at the entering tile and
     // MpFinishHostMapChange respawns remote avatars; if any of those tiles

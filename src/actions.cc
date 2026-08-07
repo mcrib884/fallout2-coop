@@ -22,6 +22,7 @@
 #include "memory.h"
 #include "multiplayer.h"
 #include "multiplayer_combat.h"
+#include "multiplayer_dialog.h"
 #include "object.h"
 #include "party_member.h"
 #include "perk.h"
@@ -1888,6 +1889,19 @@ int actionTalk(Object* obj, Object* critter)
 
     if (FID_TYPE(critter->fid) != OBJ_TYPE_CRITTER) {
         return -1;
+    }
+
+    // Co-op (host): a talk targeting an NPC with an active session joins it;
+    // otherwise record the pending initiator so the session starts with the
+    // right player. Only the host's own talker runs this path — remote
+    // players are intercepted earlier in mpOnNetEvent with their own netId.
+    if (gMpActive && gMpIsHost && obj == gDude) {
+        if (MpDialogHostTryJoin(critter, gMpSession.localNetId)) {
+            return 0;
+        }
+        if (!MpDialogHostActive()) {
+            MpDialogSetPendingInitiator(gMpSession.localNetId);
+        }
     }
 
     AnimationType anim = animationTypeFromFid(gDude->fid);

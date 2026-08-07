@@ -13,6 +13,7 @@
 #include "combat_ai.h"
 #include "multiplayer.h"
 #include "multiplayer_combat.h"
+#include "multiplayer_dialog.h"
 #include "content_config.h"
 #include "critter.h"
 #include "debug.h"
@@ -473,6 +474,12 @@ static void opGiveExpPoints(Program* program)
 {
     int xp = programStackPopInteger(program);
 
+    // Co-op: every connected player gains XP (the host's own flows through
+    // the vanilla path below, remote players get the mirrored math).
+    if (gMpActive && gMpIsHost && MpDialogHostActive()) {
+        MpDialogGrantExperience(xp);
+    }
+
     if (pcAddExperience(xp) != 0) {
         scriptError("\nScript Error: %s: op_give_exp_points: stat_pc_set failed", program->name);
     }
@@ -565,7 +572,8 @@ static void opHasSkill(Program* program)
     int result = 0;
     if (object != nullptr) {
         if (PID_TYPE(object->pid) == OBJ_TYPE_CRITTER) {
-            result = skillGetValue(object, skill);
+            // Co-op: dialogue skill reads use the highest participant skill.
+            result = MpDialogGetSkillValue(object, skill);
         }
     } else {
         scriptPredefinedError(program, "has_skill", SCRIPT_ERROR_OBJECT_IS_NULL);
@@ -608,7 +616,8 @@ static void opRollVsSkill(Program* program)
 
             Script* script;
             if (scriptGetScript(sid, &script) != -1) {
-                roll = skillRoll(object, skill, modifier, &(script->howMuch));
+                // Co-op: dialogue skill checks use the highest participant skill.
+                roll = MpDialogRollSkill(object, skill, modifier, &(script->howMuch));
             }
         }
     } else {
@@ -654,7 +663,8 @@ static void opDoCheck(Program* program)
             case STAT_INTELLIGENCE:
             case STAT_AGILITY:
             case STAT_LUCK:
-                roll = statRoll(object, stat, mod, &(script->howMuch));
+                // Co-op: dialogue stat checks use the highest participant stat.
+                roll = MpDialogRollStat(object, stat, mod, &(script->howMuch));
                 break;
             default:
                 scriptError("\nScript Error: %s: op_do_check: Stat out of range", program->name);
@@ -1340,7 +1350,8 @@ static void opGetCritterStat(Program* program)
 
     int value = -1;
     if (object != nullptr) {
-        value = critterGetStat(object, stat);
+        // Co-op: dialogue stat reads use the highest value among participants.
+        value = MpDialogGetStat(object, stat);
     } else {
         scriptPredefinedError(program, "get_critter_stat", SCRIPT_ERROR_OBJECT_IS_NULL);
     }
@@ -1682,6 +1693,15 @@ static void opAddObjectToInventory(Program* program)
 
     if (owner == nullptr || item == nullptr) {
         return;
+    }
+
+    // Co-op: item rewards granted by a dialogue go to the initiator only.
+    if (gMpActive && gMpIsHost && MpDialogHostActive() && owner == gDude) {
+        Object* initiator = MpDialogGetInitiatorAvatar();
+        if (initiator != nullptr) {
+            owner = initiator;
+            debugFilePrint("MPDIALOG item reward routed to initiator pid=0x%X", item->pid);
+        }
     }
 
     if (item->owner == nullptr) {
@@ -2296,6 +2316,11 @@ static void opCritterHeal(Program* program)
     int amount = programStackPopInteger(program);
     Object* critter = static_cast<Object*>(programStackPopPointer(program));
 
+    // Co-op: healing granted by a dialogue reaches every connected player.
+    if (gMpActive && gMpIsHost && MpDialogHostActive()) {
+        MpDialogHeal(critter, amount);
+    }
+
     int rc = critterAdjustHitPoints(critter, amount);
 
     if (critter == gDude) {
@@ -2647,7 +2672,8 @@ static void opHasTrait(Program* program)
         switch (type) {
         case CRITTER_TRAIT_PERK:
             if (param < PERK_COUNT) {
-                result = perkGetRank(object, static_cast<Perk>(param));
+                // Co-op: perk-driven dialogue behavior follows the initiator.
+                result = MpDialogGetPerkRank(object, param);
             } else {
                 scriptError("\nScript Error: %s: op_has_trait: Perk out of range", program->name);
             }
@@ -4308,6 +4334,10 @@ static void opItemCapsAdjust(Program* program)
     int rc = -1;
 
     if (object != nullptr) {
+        // Co-op: caps granted by a dialogue reach every connected player.
+        if (gMpActive && gMpIsHost && MpDialogHostActive()) {
+            MpDialogAdjustCaps(object, amount);
+        }
         rc = itemCapsAdjust(object, amount);
     } else {
         scriptPredefinedError(program, "item_caps_adjust", SCRIPT_ERROR_OBJECT_IS_NULL);

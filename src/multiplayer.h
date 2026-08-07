@@ -107,6 +107,10 @@ extern MultiplayerSession gMpSession;
 extern bool gMpIsHost;
 extern bool gMpIsClient;
 extern bool gMpActive;
+// Set while the synchronized dialogue modal is open on a client: MpTick
+// skips the deferred-packet drain so session-changing packets never apply
+// under the modal (the host's DIALOG_END closes the modal first).
+extern bool gMpModalActive;
 // While set, the object system's exit-grid hook must not fire. Used around
 // map-change respawns, where players are (re)placed on the new map and a
 // spawn tile that happens to be an exit grid would re-trigger a vote.

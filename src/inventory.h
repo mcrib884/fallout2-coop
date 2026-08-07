@@ -63,6 +63,10 @@ int inventoryUnequipFunc(Object* critter, Hand hand, bool animate);
 int inventoryOpenLooting(Object* looter, Object* target);
 int inventoryOpenStealing(Object* thief, Object* target);
 void barterProcessUI(int win, Object* barterer, Object* playerTable, Object* bartererTable, int barterMod);
+// Co-op: host-authoritative barter transaction. Presets the internal barter
+// globals (gPlayerTableObj/gBartererTableObj) from the given tables, then runs
+// the vanilla commit. Returns 0 on success (vanilla message ids 27/28/31/32).
+int MpBarterAttemptTransaction(Object* dude, Object* offerTable, Object* npc, Object* barterTable);
 int inventorySetTimer(Object* item);
 int inventoryGetWindow();
 void inventoryDisplayStats();

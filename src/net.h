@@ -65,6 +65,18 @@ enum NetPacketType {
     NET_PKT_PLAYER_CMD = 37,      // client -> host: generic player command (runtime fields)
     NET_PKT_PLAYER_EVENT = 38,    // host -> clients: generic player event (reliable)
     NET_PKT_MODEL_REQUEST = 39,   // receiver -> sender: profile model payload missing
+    // --- Synchronized dialogue (host-authoritative) ---
+    NET_PKT_DIALOG_BEGIN = 40,    // host -> all clients: dialogue session opened
+    NET_PKT_DIALOG_STATE = 41,    // host -> participants: current node (chunked)
+    NET_PKT_DIALOG_CHOICE = 42,   // client -> host: participant selected an option
+    NET_PKT_DIALOG_VOTE = 43,     // host -> participants: full vote state
+    NET_PKT_DIALOG_TRANSCRIPT = 44, // host -> all clients: combat-log line
+    NET_PKT_DIALOG_JOIN = 45,     // host -> clients: participant joined
+    NET_PKT_DIALOG_LEAVE = 46,    // client -> host: leave request; host -> clients: left
+    NET_PKT_DIALOG_END = 47,      // host -> clients: session ended
+    // --- Synchronized barter (within a dialogue session) ---
+    NET_PKT_BARTER_CMD = 48,      // client -> host: barter op (start/move/end/commit)
+    NET_PKT_BARTER_STATE = 49,    // host -> barterer: authoritative tables + last op result
 };
 
 enum NetUnreliablePacketType {
@@ -395,6 +407,143 @@ enum NetPlayerEventOpcode {
     NET_PLAYER_EVENT_ATTACK_RESULT = 3, // arg1: damage; arg2: attackerFlags; arg3: defenderFlags; arg4: targetNetId
     NET_PLAYER_EVENT_SKILL_USE = 4,     // arg1: skill message id; arg2: format arg (hp / limb msg id); arg3: target netId; arg4: 1 = play time-skip fade
 };
+
+// --- Synchronized dialogue ---
+
+#define NET_DIALOG_MAX_OPTIONS 30
+#define NET_DIALOG_REPLY_MAX 900
+#define NET_DIALOG_OPTION_TEXT_MAX 384
+#define NET_DIALOG_TRANSCRIPT_MAX 512
+#define NET_DIALOG_TRANSCRIPT_REPLAY 64
+#define NET_DIALOG_VOTE_TIMER_MS 15000
+#define NET_DIALOG_STATE_CHUNK_MAX 2048
+#define NET_BARTER_MAX_ITEMS 250
+
+enum NetDialogEndReason {
+    NET_DIALOG_END_NORMAL = 1,     // dialogue script ended normally (end_dialogue)
+    NET_DIALOG_END_ALL_LEFT = 2,   // every participant left
+    NET_DIALOG_END_COMBAT = 3,     // combat started (single-player end path)
+    NET_DIALOG_END_MAP_CHANGE = 4, // map transition
+    NET_DIALOG_END_NPC_DEAD = 5,   // speaker died or was killed
+    NET_DIALOG_END_RESET = 6,      // no single-player equivalent — full reset
+};
+
+// Host -> all clients: a synchronized dialogue session opened. Participants
+// are listed in join order (first = initiator unless scripted). For
+// player-initiated dialogue only the participants (initiator + joiners) act;
+// scripted conversations include every connected player.
+typedef struct NetDialogBeginPayload {
+    uint32_t sessionId;
+    uint32_t speakerObjNetId; // NPC object netId
+    uint8_t initiatorNetId;   // 0 = scripted (no initiator)
+    uint8_t participantCount;
+    uint8_t participants[NET_MAX_PLAYERS]; // join order
+} NetDialogBeginPayload;
+
+// Host -> participants: the current node, chunked. The body (concatenated
+// across chunks) is: uint8 version; uint16 replyLen; reply[replyLen];
+// uint8 optionCount; per option: int16 msgListId; int16 msgId; int8 reaction;
+// uint16 textLen; text[textLen]. Text is the already-resolved display text.
+typedef struct NetDialogStateChunkHeader {
+    uint32_t sessionId;
+    uint16_t nodeSeq;
+    uint16_t chunkIndex;
+    uint16_t chunkCount;
+    uint16_t chunkSize;
+} NetDialogStateChunkHeader;
+
+// Client -> host: participant chose option (re-picking overwrites; 0xFF = clear).
+typedef struct NetDialogChoicePayload {
+    uint32_t sessionId;
+    uint16_t nodeSeq;
+    uint8_t netId;        // sender (validated against the peer on the host)
+    uint8_t optionIndex;
+} NetDialogChoicePayload;
+
+typedef struct NetDialogVoteEntry {
+    uint8_t netId;
+    uint8_t optionIndex; // 0xFF = no selection yet
+    uint8_t flags;       // bit0 = suspended (bartering)
+} NetDialogVoteEntry;
+
+// Host -> participants: full vote state after every change.
+typedef struct NetDialogVotePayload {
+    uint32_t sessionId;
+    uint16_t nodeSeq;
+    uint8_t initiatorNetId;
+    int8_t resolvedOption; // -1 = none
+    uint8_t timerActive;   // 1 = majority timer running
+    uint16_t timerMs;      // remaining (0 when inactive)
+    uint8_t participantCount;
+    // followed by participantCount NetDialogVoteEntry entries
+} NetDialogVotePayload;
+
+// Host -> all clients: one transcript line for the display/combat monitor.
+// speakerNetId 0 = NPC (host avatar); otherwise the speaking player. The
+// text is the fully formatted line ("Aradesh: ..." / "A + B: ...").
+typedef struct NetDialogTranscriptPayload {
+    uint32_t sessionId;
+    uint16_t seq;
+    uint8_t speakerNetId; // 0 = NPC
+    char text[NET_DIALOG_TRANSCRIPT_MAX];
+} NetDialogTranscriptPayload;
+
+// Host -> clients: participant joined an active session.
+typedef struct NetDialogJoinPayload {
+    uint32_t sessionId;
+    uint8_t netId;
+} NetDialogJoinPayload;
+
+// Client -> host: leave request. Host -> clients: participant left.
+typedef struct NetDialogLeavePayload {
+    uint32_t sessionId;
+    uint8_t netId;
+    uint8_t reason; // 1 = player left (ESC), 2 = disconnected
+} NetDialogLeavePayload;
+
+// Host -> clients: session ended.
+typedef struct NetDialogEndPayload {
+    uint32_t sessionId;
+    uint8_t reason; // NetDialogEndReason
+} NetDialogEndPayload;
+
+// --- Synchronized barter (within a dialogue session) ---
+
+enum NetBarterOpcode {
+    NET_BARTER_OP_START = 1,  // client -> host: open barter
+    NET_BARTER_OP_MOVE = 2,   // client -> host: move item (qty signed; + into table, - back)
+    NET_BARTER_OP_END = 3,    // client -> host: close barter
+    NET_BARTER_OP_COMMIT = 4, // client -> host: attempt transaction
+};
+
+typedef struct NetBarterItem {
+    uint32_t pid;
+    int32_t qty;
+    int32_t unitValue;
+} NetBarterItem;
+
+// Client -> host: barter operation.
+typedef struct NetBarterCmdPayload {
+    uint32_t sessionId;
+    uint8_t op;       // NetBarterOpcode
+    uint8_t netId;    // sender
+    uint8_t target;   // MOVE: 1 = offer table, 2 = request table
+    uint32_t pid;
+    int32_t qty;      // signed
+} NetBarterCmdPayload;
+
+// Host -> barterer: authoritative tables + the result of the last op.
+// Followed by npcItemCount + offerCount + requestCount NetBarterItem entries.
+typedef struct NetBarterStatePayload {
+    uint32_t sessionId;
+    uint8_t netId;
+    uint8_t lastOp;    // echoed NetBarterOpcode (0 = none)
+    uint8_t lastOk;    // 1 = last op applied
+    uint8_t lastMsgId; // vanilla barter message id (27/28/31/32/...), 0 = none
+    uint16_t npcItemCount;
+    uint16_t offerCount;   // this barterer's offer as the host sees it
+    uint16_t requestCount; // this barterer's request as the host sees it
+} NetBarterStatePayload;
 #pragma pack(pop)
 
 // --- Transport API ---

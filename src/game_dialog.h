@@ -44,6 +44,10 @@ int gameDialogGetWindow();
 int gameDialogGetBackgroundWindow();
 void gameDialogSetPartyMemberCcMsgIds(int pid, int startMsgId, int endMsgId);
 void gameDialogResetPartyMemberCcMsgIds();
+int gameDialogGetReplyWindow();
+int gameDialogGetOptionsWindow();
+// Co-op: run the vanilla option-proc path for a resolved vote (host only).
+int gameDialogChooseOption(int optionIndex);
 
 } // namespace fallout
 

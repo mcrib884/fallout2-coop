@@ -12,6 +12,7 @@
 #include "map.h"
 #include "multiplayer.h"
 #include "multiplayer_combat.h"
+#include "multiplayer_dialog.h"
 #include "object.h"
 #include "svga.h"
 #include "text_font.h"
@@ -483,6 +484,11 @@ void MpVoteMaybeShowUI()
 {
     if (gVoteSession.state != VOTE_STATE_ACTIVE || gVoteSession.voteWindow != -1
         || !gVoteSession.uiPending) {
+        return;
+    }
+    // The synchronized dialogue modal owns the screen; the vote opens on the
+    // first top-level tick after the dialogue closes.
+    if (MpDialogAnyModalActive()) {
         return;
     }
     gVoteSession.uiPending = false;

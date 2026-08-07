@@ -28,6 +28,7 @@
 #include "memory.h"
 #include "message.h"
 #include "multiplayer.h"
+#include "multiplayer_dialog.h"
 #include "object.h"
 #include "party_member.h"
 #include "platform_compat.h"
@@ -986,8 +987,9 @@ static void _doBkProcesses()
 
     if (gScriptsEnabled && !gMpIsClient && gCritterProcessingEnabled) {
         // SFALL: Fix to prevent the execution of critter_p_proc and game events
-        // when playing movies.
-        if (!_gdialogActive() && !gameMovieIsPlaying()) {
+        // when playing movies. Co-op: the world keeps ticking behind a
+        // synchronized dialogue (the host's script is paused at dialog_go).
+        if ((!_gdialogActive() || MpDialogAllowWorldTick()) && !gameMovieIsPlaying()) {
             _script_chk_critters();
             _script_chk_timed_events();
         }
@@ -1000,7 +1002,7 @@ static void _script_chk_critters()
     // Co-op: clients don't run critter scripts — host owns the world.
     if (gMpIsClient) return;
 
-    if (!_gdialogActive() && !isInCombat()) {
+    if ((!_gdialogActive() || MpDialogAllowWorldTick()) && !isInCombat()) {
         ScriptList* scriptList;
         ScriptListExtent* scriptListExtent;
 

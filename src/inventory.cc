@@ -5401,6 +5401,17 @@ static int barterAttemptTransaction(Object* dude, Object* offerTable, Object* np
     return 0;
 }
 
+// Co-op: host-authoritative barter transaction. The vanilla transaction reads
+// the file-static gPlayerTableObj/gBartererTableObj globals, so the
+// multiplayer dialogue module routes its canonical per-barterer tables
+// through this wrapper. Runs entirely on the host; clients never commit.
+int MpBarterAttemptTransaction(Object* dude, Object* offerTable, Object* npc, Object* barterTable)
+{
+    gPlayerTableObj = offerTable;
+    gBartererTableObj = barterTable;
+    return barterAttemptTransaction(dude, offerTable, npc, barterTable);
+}
+
 static int barterGetMovedQuantity(Object* item, int maxQuantity, bool fromPlayer, bool fromInventory, bool immediate)
 {
     if (maxQuantity <= 1) {

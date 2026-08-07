@@ -32,6 +32,8 @@
 #include "lips.h"
 #include "memory.h"
 #include "mouse.h"
+#include "multiplayer.h"
+#include "multiplayer_dialog.h"
 #include "object.h"
 #include "party_member.h"
 #include "perk.h"
@@ -852,6 +854,7 @@ void gameDialogEnter(Object* speaker, int mode)
         isoEnable();
         scriptsExecMapUpdateProc();
         _dialog_state_fix = 0;
+        MpDialogClearPendingInitiator();
         return;
     }
 
@@ -860,6 +863,7 @@ void gameDialogEnter(Object* speaker, int mode)
         isoEnable();
         scriptsExecMapUpdateProc();
         _dialog_state_fix = 0;
+        MpDialogClearPendingInitiator();
         return;
     }
 
@@ -1113,6 +1117,9 @@ int _gdialogExitFromScript()
     }
 
     _gdDialogWentOff = true;
+
+    // Co-op: the dialogue script ended; tear down the mp session.
+    MpDialogHostEnd();
 
     return 0;
 }
@@ -1983,6 +1990,8 @@ void gameDialogRenderCaps()
 }
 
 // 0x4465C0 gdProcess
+static void mpDialogNodeReadyCapture(); // defined below (co-op node broadcast)
+
 int gameDialogProcessUI()
 {
     if (_gdReenterLevel == 0) {
@@ -1994,6 +2003,7 @@ int gameDialogProcessUI()
     _gdReenterLevel += 1;
 
     _gdProcessUpdate();
+    mpDialogNodeReadyCapture();
 
     bool autoAdvance = false;
     if (gDialogReplyTextOffset != 0) {
@@ -2012,6 +2022,28 @@ int gameDialogProcessUI()
         int keyCode = inputGetInput();
 
         convertMouseWheelToArrowKey(&keyCode);
+
+        // Co-op: pump the network and world behind the dialogue, then route
+        // dialogue keys through the multiplayer vote. A director host (not a
+        // participant) has no vanilla dialogue input at all.
+        if (gMpActive && gMpIsHost && MpDialogHostActive()) {
+            MpDialogHostPump();
+            if (MpDialogHostShouldExit()) {
+                break;
+            }
+            if (!MpDialogHostIsParticipant()) {
+                // Director host: swallow dialogue keys, keep the quit combos.
+                if (keyCode != KEY_CTRL_Q && keyCode != KEY_CTRL_X && keyCode != KEY_F10) {
+                    keyCode = -1;
+                }
+            } else if (keyCode == KEY_ESCAPE || keyCode == KEY_0) {
+                MpDialogHostLocalLeave();
+                keyCode = -1;
+            } else if (keyCode >= 48 && keyCode <= 57) {
+                MpDialogHostLocalChoice(keyCode - 49);
+                keyCode = -1;
+            }
+        }
 
         if (keyCode == KEY_CTRL_Q || keyCode == KEY_CTRL_X || keyCode == KEY_F10) {
             showQuitConfirmationDialog();
@@ -2166,6 +2198,8 @@ int gameDialogProcessUI()
 }
 
 // 0x4468DC
+static void mpDialogNodeReadyCapture(); // defined below (co-op node broadcast)
+
 int _gdProcessChoice(int optionIndex)
 {
     // FIXME: There is a buffer underread bug when `optionIndex` is -1 (pressing 0 on the
@@ -2234,6 +2268,7 @@ int _gdProcessChoice(int optionIndex)
     }
 
     _gdProcessUpdate();
+    mpDialogNodeReadyCapture();
 
     return 0;
 }
@@ -2260,7 +2295,7 @@ void gameDialogOptionOnMouseEnter(int index)
     _optionRect.right = 388;
 
     int color = COLOR_LIGHT_YELLOW | DRAW_TEXT_FLAG_NO_BG;
-    if (perkHasRank(gDude, PERK_EMPATHY)) {
+    if (MpDialogEmpathyRank() != 0) {
         color = COLOR_LIGHT_YELLOW | DRAW_TEXT_FLAG_NO_BG;
         switch (dialogOptionEntry->reaction) {
         case GAME_DIALOG_REACTION_GOOD:
@@ -2304,7 +2339,7 @@ void gameDialogOptionOnMouseExit(int index)
     _gDialogRefreshOptionsRect(gGameDialogOptionsWindow, &_optionRect);
 
     int color = COLOR_GREEN | DRAW_TEXT_FLAG_NO_BG;
-    if (perkGetRank(gDude, PERK_EMPATHY) != 0) {
+    if (MpDialogEmpathyRank() != 0) {
         color = COLOR_LIGHT_YELLOW | DRAW_TEXT_FLAG_NO_BG;
         switch (dialogOptionEntry->reaction) {
         case GAME_DIALOG_REACTION_GOOD:
@@ -2349,7 +2384,7 @@ void gameDialogRenderReply()
     _replyRect.bottom = 58;
 
     // NOTE: There is an unused if condition.
-    perkGetRank(gDude, PERK_EMPATHY);
+    MpDialogEmpathyRank();
 
     _demo_copy_title(gGameDialogReplyWindow);
 
@@ -2395,7 +2430,7 @@ void _gdProcessUpdate()
 
     int color = COLOR_GREEN | DRAW_TEXT_FLAG_NO_BG;
 
-    bool hasEmpathy = perkGetRank(gDude, PERK_EMPATHY) != 0;
+    bool hasEmpathy = MpDialogEmpathyRank() != 0;
 
     int width = _optionRect.right - _optionRect.left - 4;
 
@@ -2440,7 +2475,7 @@ void _gdProcessUpdate()
             if (index == 0) {
                 // Go on
                 messageListItem.num = 655;
-                if (critterGetStat(gDude, STAT_INTELLIGENCE) < 4) {
+                if (MpDialogGetIntelligence() < 4) {
                     if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
                         // SFALL
                         if (gNumberOptions) {
@@ -3864,6 +3899,61 @@ void gameDialogResetPartyMemberCcMsgIds()
     partyMemberCcMsgIds.clear();
 }
 
+int gameDialogGetReplyWindow()
+{
+    return _gd_replyWin;
+}
+
+int gameDialogGetOptionsWindow()
+{
+    return _gd_optionsWin;
+}
+
+// Co-op: run the vanilla option-proc path for a resolved multiplayer vote.
+// The host's dialogue loop calls this from MpDialogHostPump; returns -1 when
+// the dialogue has no options left (loop must break), like the vanilla key
+// handler.
+int gameDialogChooseOption(int optionIndex)
+{
+    return _gdProcessChoice(optionIndex);
+}
+
+// Co-op: capture the current node (reply + options, already resolved to
+// display text) and hand it to the multiplayer dialogue session. Called after
+// every _gdProcessUpdate() while the host is in an mp session.
+static void mpDialogNodeReadyCapture()
+{
+    if (!gMpActive || !gMpIsHost || !_gdialogActive()) {
+        return;
+    }
+
+    static int msgListIds[DIALOG_OPTION_ENTRIES_CAPACITY];
+    static int msgIds[DIALOG_OPTION_ENTRIES_CAPACITY];
+    static int reactions[DIALOG_OPTION_ENTRIES_CAPACITY];
+    static const char* texts[DIALOG_OPTION_ENTRIES_CAPACITY];
+
+    int count = gGameDialogOptionEntriesLength;
+    if (count > DIALOG_OPTION_ENTRIES_CAPACITY) {
+        count = DIALOG_OPTION_ENTRIES_CAPACITY;
+    }
+    for (int i = 0; i < count; i++) {
+        msgListIds[i] = gDialogOptionEntries[i].messageListId;
+        msgIds[i] = gDialogOptionEntries[i].messageId;
+        reactions[i] = gDialogOptionEntries[i].reaction;
+        texts[i] = gDialogOptionEntries[i].text;
+    }
+
+    MpDialogNodeData node;
+    memset(&node, 0, sizeof(node));
+    node.replyText = gDialogReplyText;
+    node.optionCount = count;
+    node.optionMsgListIds = msgListIds;
+    node.optionMsgIds = msgIds;
+    node.optionReactions = reactions;
+    node.optionTexts = texts;
+    MpDialogHostNodeReady(&node);
+}
+
 // 0x449330
 int _gdCanBarter()
 {
@@ -4472,6 +4562,12 @@ void _gdCustomUpdateSetting(int option, int value)
 // 0x44A52C
 void gameDialogBarterButtonUpMouseUp(int btn, int keyCode)
 {
+    // Co-op: barter runs through the synchronized host-authoritative session.
+    if (gMpActive && gMpIsHost && MpDialogHostActive() && MpDialogHostIsParticipant()) {
+        MpDialogHostRequestBarter();
+        return;
+    }
+
     if (PID_TYPE(gGameDialogSpeaker->pid) != OBJ_TYPE_CRITTER) {
         return;
     }

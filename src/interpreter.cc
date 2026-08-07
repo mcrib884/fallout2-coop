@@ -10,6 +10,7 @@
 #include "db.h"
 #include "debug.h"
 #include "export.h"
+#include "game_dialog.h"
 #include "input.h"
 #include "interpreter_lib.h"
 #include "memory_manager.h"
@@ -2231,12 +2232,22 @@ static void opDtoA(Program* program)
 // 0x46BAC0
 static void opExitProgram(Program* program)
 {
+    // Co-op: a director-host dialogue parks the talk program while the
+    // session lives. The script's trailing exit_proc would flag the program
+    // EXITED, and every later reply-proc call would be refused by the
+    // interpreter. Defer the exit to the dialogue teardown.
+    if (mpDialogIsDirectorReplyProgram(program)) {
+        return;
+    }
     program->flags |= PROGRAM_FLAG_EXITED;
 }
 
 // 0x46BAC8
 static void opStopProgram(Program* program)
 {
+    if (mpDialogIsDirectorReplyProgram(program)) {
+        return;
+    }
     program->flags |= PROGRAM_FLAG_STOPPED;
 }
 
@@ -2637,10 +2648,17 @@ void programInterpret(Program* program, int numInstructions)
     }
 
     if (interpreterBusy) {
+        if (mpDialogIsDirectorReplyProgram(program)) {
+            debugFilePrint("MPDIAG interpret busy (dialogue program)");
+        }
         return;
     }
 
     if (program->exited || (program->flags & PROGRAM_FLAG_CHILD_CALL) != 0 || (program->flags & PROGRAM_FLAG_CHILD_SPAWN) != 0) {
+        if (mpDialogIsDirectorReplyProgram(program)) {
+            debugFilePrint("MPDIAG interpret refuse (dialogue program) exited=%d flags=0x%X",
+                program->exited ? 1 : 0, program->flags);
+        }
         return;
     }
 

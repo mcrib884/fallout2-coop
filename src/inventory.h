@@ -1,6 +1,8 @@
 #ifndef INVENTORY_H
 #define INVENTORY_H
 
+#include <stdint.h>
+
 #include "animation.h"
 #include "obj_types.h"
 #include "proto_types.h"
@@ -67,6 +69,15 @@ void barterProcessUI(int win, Object* barterer, Object* playerTable, Object* bar
 // globals (gPlayerTableObj/gBartererTableObj) from the given tables, then runs
 // the vanilla commit. Returns 0 on success (vanilla message ids 27/28/31/32).
 int MpBarterAttemptTransaction(Object* dude, Object* offerTable, Object* npc, Object* barterTable);
+
+// --- Co-op: vanilla trade screen helpers (barterProcessUI is exported and
+// driven directly by multiplayer_dialog.cc with co-op hooks inside) ---
+
+// Re-renders the trade screen after authoritative tables/state changed.
+void mpBarterTradeRefresh();
+// Same, drawing the given tables explicitly instead of the canonical globals
+// (the globals can be stale while another player is committing).
+void mpBarterTradeRefreshWithTables(Object* leftTable, Object* rightTable);
 int inventorySetTimer(Object* item);
 int inventoryGetWindow();
 void inventoryDisplayStats();

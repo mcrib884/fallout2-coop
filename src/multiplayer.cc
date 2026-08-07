@@ -2092,6 +2092,14 @@ void MpTick()
         return;
     }
 
+    // Co-op dialogue: a director host (not a participant) never enters the
+    // blocking dialogue modal — its session is driven from here each tick.
+    // Must run before MpCombatTick so a pending combat start aborts the
+    // parked dialogue first.
+    if (gMpIsHost) {
+        MpDialogHostDirectorTick();
+    }
+
     // Co-op combat: deferred starts/turns, end-request drain, card refresh.
     MpCombatTick();
 
@@ -3607,6 +3615,38 @@ void MpBroadcastObjectStates()
                 || memcmp(&gMpHostObjectRecords[oldIndex].state, &state, sizeof(state)) != 0;
             MultiplayerPlayer* player = mpHostFindPlayerByObject(obj);
             if (changed && player == nullptr) {
+                // MPDIAG (temporary): watch critter state broadcasts to verify
+                // the dialogue speaker stays in the object stream.
+                if (FID_TYPE(state.fid) == OBJ_TYPE_CRITTER) {
+                    static struct { uint32_t netId; uint32_t ms; uint32_t key; } last[32] = {};
+                    uint32_t nowMs = getTicks();
+                    uint32_t key = state.fid ^ (state.tile << 7) ^ (state.flags << 15) ^ (state.hp << 3);
+                    int found = -1;
+                    int freeSlot = -1;
+                    for (int d = 0; d < 32; d++) {
+                        if (last[d].netId == state.netId) {
+                            found = d;
+                            break;
+                        }
+                        if (freeSlot < 0 && last[d].netId == 0) {
+                            freeSlot = d;
+                        }
+                    }
+                    if (found >= 0) {
+                        if (nowMs - last[found].ms > 500 || key != last[found].key) {
+                            last[found].ms = nowMs;
+                            last[found].key = key;
+                            debugFilePrint("MPDIAG host broadcast netId=%u pid=0x%X tile=%d fid=0x%X flags=0x%X hp=%d",
+                                state.netId, state.pid, state.tile, state.fid, state.flags, state.hp);
+                        }
+                    } else if (freeSlot >= 0) {
+                        last[freeSlot].netId = state.netId;
+                        last[freeSlot].ms = nowMs;
+                        last[freeSlot].key = key;
+                        debugFilePrint("MPDIAG host broadcast netId=%u pid=0x%X tile=%d fid=0x%X flags=0x%X hp=%d (first)",
+                            state.netId, state.pid, state.tile, state.fid, state.flags, state.hp);
+                    }
+                }
                 NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_UNRELIABLE,
                     NET_PKT_OBJECT_STATE_UPDATE, &state, sizeof(state));
             }
@@ -3670,14 +3710,11 @@ void MpBroadcastMapFullSync(ENetPeer* toPeer)
         // ~450 states from the sync and the net-id collision/vanishing-wall
         // failure mode with them. Living beings (critters) are NOT static:
         // the host owns them and streams their states, so they ship in the
-        // sync with their netIds and the client's vanilla copies get replaced.
+        // sync with their netIds and the client's vanilla copies get replaced
+        // (mpClearClientMapObjectsForFullSync destroys the vanilla critters
+        // and expects the sync to recreate them).
         if (gMpMapStaticObjIds.count(obj->id) != 0
             && FID_TYPE(obj->fid) != OBJ_TYPE_CRITTER) {
-            skipStatic++;
-            obj = objectFindNext();
-            continue;
-        }
-        if (gMpMapStaticObjIds.count(obj->id) != 0) {
             skipStatic++;
             obj = objectFindNext();
             continue;
@@ -4263,12 +4300,14 @@ static Object* mpApplyObjectStateInternal(const NetMapFullSyncObjectPayload* sta
             obj != nullptr ? obj->pid : 0);
     }
 
+    const char* mpDiagMode = "registered";
     if (obj == nullptr && player == nullptr && allowMapMatch && hexGridTileIsValid(state->tile)
         && elevationIsValid(state->elevation)) {
         Object* match = objectFindFirstAtLocation(state->elevation, state->tile);
         while (match != nullptr) {
             if (match->pid == state->pid) {
                 obj = match;
+                mpDiagMode = "matched";
                 break;
             }
             match = objectFindNextAtLocation();
@@ -4280,9 +4319,43 @@ static Object* mpApplyObjectStateInternal(const NetMapFullSyncObjectPayload* sta
     // previous object) — duplicate netIds lose the earlier object.
     if (obj == nullptr) {
         obj = mpCreateClientObject(state);
+        mpDiagMode = "created";
     }
     if (obj == nullptr) {
         return nullptr;
+    }
+
+    // MPDIAG (temporary): watch critter state applies to verify the dialogue
+    // speaker keeps a visible mirror on the client.
+    if (player == nullptr && FID_TYPE(state->fid) == OBJ_TYPE_CRITTER) {
+        static struct { uint32_t netId; uint32_t ms; uint32_t key; } last[32] = {};
+        uint32_t nowMs = getTicks();
+        uint32_t key = state->fid ^ (state->tile << 7) ^ (state->flags << 15) ^ (state->hp << 3);
+        int found = -1;
+        int freeSlot = -1;
+        for (int d = 0; d < 32; d++) {
+            if (last[d].netId == state->netId) {
+                found = d;
+                break;
+            }
+            if (freeSlot < 0 && last[d].netId == 0) {
+                freeSlot = d;
+            }
+        }
+        if (found >= 0) {
+            if (nowMs - last[found].ms > 500 || key != last[found].key) {
+                last[found].ms = nowMs;
+                last[found].key = key;
+                debugFilePrint("MPDIAG client apply netId=%u pid=0x%X tile=%d fid=0x%X flags=0x%X hp=%d mode=%s",
+                    state->netId, state->pid, state->tile, state->fid, state->flags, state->hp, mpDiagMode);
+            }
+        } else if (freeSlot >= 0) {
+            last[freeSlot].netId = state->netId;
+            last[freeSlot].ms = nowMs;
+            last[freeSlot].key = key;
+            debugFilePrint("MPDIAG client apply netId=%u pid=0x%X tile=%d fid=0x%X flags=0x%X hp=%d mode=%s (first)",
+                state->netId, state->pid, state->tile, state->fid, state->flags, state->hp, mpDiagMode);
+        }
     }
 
     // Keep the local player's critter pid even if a state arrives with a

@@ -663,14 +663,14 @@ static int _gdProcessInit();
 static void _gdProcessCleanup();
 static int _gdProcessExit();
 static void gameDialogRenderCaps();
-static int gameDialogProcessUI();
+int gameDialogProcessUI();
 static int _gdProcessChoice(int optionIndex);
 static void gameDialogOptionOnMouseEnter(int optionIndex);
 static void gameDialogOptionOnMouseExit(int optionIndex);
 static void gameDialogRenderReply();
 static void _gdProcessUpdate();
-static int _gdCreateHeadWindow();
-static void _gdDestroyHeadWindow();
+int _gdCreateHeadWindow();
+void _gdDestroyHeadWindow();
 static void _gdSetupFidget(int headFid, int reaction);
 static void gameDialogWaitForFidgetToComplete();
 static void _gdPlayTransition(int animation);
@@ -793,7 +793,18 @@ void gameDialogEnter(Object* speaker, int mode)
     if (PID_TYPE(speaker->pid) != OBJ_TYPE_ITEM && SID_TYPE(speaker->sid) != SCRIPT_TYPE_SPATIAL) {
         MessageListItem messageListItem;
 
-        int rc = _action_can_talk_to(gDude, speaker);
+        // Co-op: a dialogue initiated by a remote player must be distance-
+        // checked against THAT player's avatar, not the host's dude — the
+        // host may be far away while the client stands next to the NPC.
+        Object* talker = gDude;
+        if (gMpActive && gMpIsHost) {
+            Object* initiatorAvatar = MpDialogPendingInitiatorAvatar();
+            if (initiatorAvatar != nullptr) {
+                talker = initiatorAvatar;
+            }
+        }
+
+        int rc = _action_can_talk_to(talker, speaker);
         if (rc == -1) {
             // You can't see there.
             messageListItem.num = 660;
@@ -1001,13 +1012,20 @@ int _gdialogInitFromScript(int headFid, int reaction)
     textObjectsReset();
 
     if (PID_TYPE(gGameDialogSpeaker->pid) != OBJ_TYPE_ITEM) {
-        _tile_scroll_to(gGameDialogSpeaker->tile, 2);
+        if (!MpDialogDirectorMode()) {
+            // The director host is not in a dialogue UI: never move its
+            // camera to the speaker (and back) — keep it exactly where the
+            // host is playing.
+            _tile_scroll_to(gGameDialogSpeaker->tile, 2);
+        }
     }
 
     _talk_need_to_center = true;
 
     // CE: Fix Barter button.
-    _gdCreateHeadWindow();
+    if (_gdCreateHeadWindow() == -1) {
+        debugFilePrint("MPDIALOG init: head window creation failed — dialogue will abort");
+    }
     tickersAdd(gameDialogTicker);
     _gdSetupFidget(headFid, reaction);
     _gdialog_state = GAME_DIALOG_ACTIVE;
@@ -1024,6 +1042,36 @@ int _gdialogInitFromScript(int headFid, int reaction)
     _gdDialogWentOff = true;
 
     GameMode::enterGameMode(GameMode::kDialog);
+
+    // Co-op director host: never show the vanilla dialogue windows — the host
+    // keeps playing the world behind the client's dialogue. (The director
+    // flag is known here because a client-initiated talk set the pending
+    // initiator before the talk script ran.)
+    if (MpDialogDirectorMode()) {
+        // DESTROY the vanilla windows rather than hiding them: a hidden
+        // WINDOW_MODAL background still intercepts every pointer hit
+        // (windowGetAtPoint ignores WINDOW_HIDDEN) and stops the
+        // window-manager button scan at the modal boundary — the host's
+        // interface bar and right-click cursor cycle would stay dead for the
+        // whole client dialogue. The exit path tolerates the missing windows
+        // (every teardown is null-guarded).
+        _gdDestroyHeadWindow();
+
+        // Undo every vanilla input-mode side effect above so the world plays
+        // normally: pop the kDialog game-mode bit, restore the 3D mouse
+        // objects (hex cursor, bouncing cursor), re-enable edge scrolling,
+        // the color cycle, the indicator bar, and the camera. The vanilla
+        // exit path later re-runs the same restores — all idempotent.
+        GameMode::exitGameModeQuietly(GameMode::kDialog);
+        gameMouseObjectsShow();
+        _gmouse_enable_scrolling();
+        if (_boxesWereDisabled) {
+            indicatorBarShow();
+            _boxesWereDisabled = 0;
+        }
+        colorCycleEnable();
+        gameDialogRestoreCenterTile();
+    }
 
     // Dialog is a UI screen with buttons that need direct touch-to-click.
     // On iPad with relative mouse mode, taps send zero-delta clicks at the
@@ -1263,6 +1311,8 @@ int gameDialogSetTextReply(Program* program, int messageListId, const char* text
 }
 
 // 0x4456D8
+static void mpDialogNodeReadyCapture(); // defined below (co-op node broadcast)
+
 int _gdialogGo()
 {
     if (gDialogReplyMessageListId == -1) {
@@ -1281,7 +1331,24 @@ int _gdialogGo()
     }
 
     if (rc != -1) {
-        rc = gameDialogProcessUI();
+        debugFilePrint("MPDIALOG gdialogGo entry director=%d replyList=%d entries=%d",
+            MpDialogDirectorMode() ? 1 : 0, gDialogReplyMessageListId, gGameDialogOptionEntriesLength);
+        if (MpDialogDirectorMode()) {
+            // Co-op director host: the host is NOT a participant — capture
+            // the node and return without the blocking modal so the host
+            // keeps playing normally. The session is driven from MpTick.
+            mpDialogNodeReadyCapture();
+            rc = 0;
+        } else if (gGameDialogWindow == -1) {
+            // Crash guard: the modal renders into the main dialog window
+            // (head art, caps blit, red buttons). A failed window creation
+            // must abort the dialogue cleanly instead of dereferencing a
+            // stale window id.
+            debugFilePrint("MPDIALOG guard: modal without main dialog window — aborting dialogue");
+            rc = 0;
+        } else {
+            rc = gameDialogProcessUI();
+        }
     }
 
     gGameDialogOptionEntriesLength = 0;
@@ -2273,6 +2340,120 @@ int _gdProcessChoice(int optionIndex)
     return 0;
 }
 
+// Co-op: director-host choice. The host is not a participant and the vanilla
+// dialogue modal never runs, so this mirrors _gdProcessChoice's data flow
+// without any window work. Returns -1 when the reply proc built no next node
+// (the conversation is over).
+static int mpDialogDirectorProcessChoice(int optionIndex)
+{
+    GameDialogOptionEntry dummy;
+    memset(&dummy, 0, sizeof(dummy));
+
+    GameDialogOptionEntry* dialogOptionEntry = optionIndex != -1
+        ? &(gDialogOptionEntries[optionIndex]) : &dummy;
+    if (dialogOptionEntry->messageListId == -4) {
+        gameDialogSetReviewOptionText(dialogOptionEntry->text);
+    } else {
+        gameDialogSetReviewOptionMessage(dialogOptionEntry->messageListId, dialogOptionEntry->messageId);
+    }
+
+    _can_start_new_fidget = false;
+    gameDialogEndLips();
+
+    int reaction = GAME_DIALOG_REACTION_NEUTRAL;
+    switch (dialogOptionEntry->reaction) {
+    case GAME_DIALOG_REACTION_GOOD:
+        reaction = -1;
+        break;
+    case GAME_DIALOG_REACTION_NEUTRAL:
+        reaction = 0;
+        break;
+    case GAME_DIALOG_REACTION_BAD:
+        reaction = 1;
+        break;
+    default:
+        reaction = GAME_DIALOG_REACTION_NEUTRAL;
+        break;
+    }
+
+    _talk_to_critter_reacts(reaction);
+
+    gGameDialogOptionEntriesLength = 0;
+
+    uint32_t nodeSeqBefore = MpDialogHostNodeSeq();
+    debugFilePrint("MPDIALOG director choice session=%u node=%u opt=%d proc=%d program=%p exited=%d flags=0x%X",
+        MpDialogHostSessionId(), MpDialogHostNodeSeq(), optionIndex,
+        dialogOptionEntry->proc, (void*)gDialogReplyProgram,
+        gDialogReplyProgram != nullptr ? (gDialogReplyProgram->exited ? 1 : 0) : -1,
+        gDialogReplyProgram != nullptr ? gDialogReplyProgram->flags : 0u);
+    if (dialogOptionEntry->proc != 0 && gDialogReplyProgram != nullptr) {
+        // The talk program may carry stale death flags (a previous dialogue's
+        // exit_proc, or an exit that raced the parked session). The director
+        // session owns this program now — clear them so the reply proc runs.
+        gDialogReplyProgram->flags &= ~(PROGRAM_FLAG_EXITED | PROGRAM_FLAG_STOPPED | PROGRAM_FLAG_FATAL_ERROR);
+        programExecuteProcedure(gDialogReplyProgram, dialogOptionEntry->proc);
+    }
+    debugFilePrint("MPDIALOG director choice done before=%u after=%u flags=0x%X postEntries=%d postReplyList=%d ip=%d",
+        nodeSeqBefore, MpDialogHostNodeSeq(),
+        gDialogReplyProgram != nullptr ? gDialogReplyProgram->flags : 0u,
+        gGameDialogOptionEntriesLength, gDialogReplyMessageListId,
+        gDialogReplyProgram != nullptr ? gDialogReplyProgram->instructionPointer : -1);
+
+    // Vanilla convention: reply procs build the next node with gsay_reply +
+    // gsay_option and often do NOT call gsay_end — the modal's _gdProcessChoice
+    // tail captures the node after the proc returns. Director mode has no
+    // modal, so capture it here when the proc built entries without advancing
+    // the node sequence.
+    if (MpDialogHostNodeSeq() == nodeSeqBefore && gGameDialogOptionEntriesLength > 0) {
+        mpDialogNodeReadyCapture();
+    }
+
+    // A reply proc that built no new node ends the conversation.
+    if (MpDialogHostNodeSeq() == nodeSeqBefore) {
+        return -1;
+    }
+    return 0;
+}
+
+int MpDialogDirectorProcessChoice(int optionIndex)
+{
+    return mpDialogDirectorProcessChoice(optionIndex);
+}
+
+bool mpDialogIsDirectorReplyProgram(Program* program)
+{
+    return gMpActive && gMpIsHost && MpDialogDirectorMode()
+        && program != nullptr && program == gDialogReplyProgram;
+}
+
+void MpDialogDirectorFinishDialogue()
+{
+    // Unpark the talk program. A director session parked the script mid-flow
+    // instead of letting it end like vanilla (main flow -> exit -> program
+    // freed, then reloaded fresh on the next talk). A parked program keeps its
+    // stale elevated stack, so the next talk's set_global captures an
+    // out-of-range base pointer and every global write throws std::out_of_range
+    // (host crash). Reset the interpreter state to the fresh-program state the
+    // first talk provably ran from.
+    if (gDialogReplyProgram != nullptr) {
+        Program* program = gDialogReplyProgram;
+        gDialogReplyProgram = nullptr;
+        program->stackValues->clear();
+        program->returnStackValues->clear();
+        program->basePointer = -1;
+        program->framePointer = -1;
+        program->instructionPointer = 0;
+        program->exited = false;
+        program->checkWaitFunc = nullptr;
+        program->flags &= ~(PROGRAM_FLAG_EXITED | PROGRAM_FLAG_STOPPED | PROGRAM_FLAG_FATAL_ERROR
+            | PROGRAM_FLAG_FINISHED | PROGRAM_IS_WAITING | PROGRAM_FLAG_CHILD_CALL | PROGRAM_FLAG_CHILD_SPAWN);
+    }
+    // Full vanilla teardown of the parked dialogue state. Guarded internally
+    // (INACTIVE -> no-op); the MpDialogHostEnd hook inside is a no-op once
+    // the session has already been cleared.
+    _gdialogExitFromScript();
+}
+
 // 0x446A18
 void gameDialogOptionOnMouseEnter(int index)
 {
@@ -2458,6 +2639,13 @@ void _gdProcessUpdate()
             }
         }
 
+        // Co-op: highlight the option the local player chose (stands out from
+        // the empathy coloring). No-op outside an mp session (-1 never
+        // matches an option index).
+        if (index == MpDialogMySelection()) {
+            color = COLOR_LIGHT_YELLOW | DRAW_TEXT_FLAG_NO_BG;
+        }
+
         if (dialogOptionEntry->messageListId >= 0) {
             char* text = _scr_get_msg_str_speech(dialogOptionEntry->messageListId, dialogOptionEntry->messageId, 0);
             if (text == nullptr) {
@@ -2561,6 +2749,15 @@ void _gdProcessUpdate()
 int _gdCreateHeadWindow()
 {
     dialogMode = GAME_DIALOG_MODE_TALK;
+
+    // Co-op director host: the vanilla dialogue windows must NEVER exist.
+    // Creating them (even briefly) blits the dialogue art into the frame
+    // buffer (_gdialog_window_create refreshes the background when
+    // _dialogue_just_started) — a one-frame flash on the host — and the
+    // destroy dance is pointless work.
+    if (MpDialogDirectorMode()) {
+        return 0;
+    }
 
     int windowWidth = GAME_DIALOG_WINDOW_WIDTH;
 
@@ -3923,34 +4120,97 @@ int gameDialogChooseOption(int optionIndex)
 // every _gdProcessUpdate() while the host is in an mp session.
 static void mpDialogNodeReadyCapture()
 {
-    if (!gMpActive || !gMpIsHost || !_gdialogActive()) {
+    if (!gMpActive || !gMpIsHost) {
+        return;
+    }
+    debugFilePrint("MPDIALOG capture entry active=%d director=%d replyList=%d entries=%d",
+        _gdialogActive() ? 1 : 0, MpDialogDirectorMode() ? 1 : 0,
+        gDialogReplyMessageListId, gGameDialogOptionEntriesLength);
+    // Gate on the real dialogue states, not just the session: the FIRST node
+    // of a host's own talk runs before any session exists (the vanilla state
+    // is active then), the director's first capture runs on the pending
+    // initiator before the session starts, and every later capture (vanilla
+    // modal, join modal, parked director) has a live session. Dropping any
+    // of them stalls or kills the synchronized conversation.
+    if (!_gdialogActive() && !MpDialogDirectorMode() && !MpDialogHostActive()) {
+        debugFilePrint("MPDIALOG capture dropped (not active, not director, no session)");
         return;
     }
 
     static int msgListIds[DIALOG_OPTION_ENTRIES_CAPACITY];
     static int msgIds[DIALOG_OPTION_ENTRIES_CAPACITY];
     static int reactions[DIALOG_OPTION_ENTRIES_CAPACITY];
+    static int procs[DIALOG_OPTION_ENTRIES_CAPACITY];
     static const char* texts[DIALOG_OPTION_ENTRIES_CAPACITY];
+    static char resolvedTexts[DIALOG_OPTION_ENTRIES_CAPACITY][900];
+    static char resolvedReply[900];
+
+    // The reply display text is normally resolved by _gdProcessUpdate, which
+    // never runs in director mode. Resolve it here the same way (L2510-2519).
+    const char* replyText = gDialogReplyText;
+    if (gDialogReplyMessageListId > 0 && gDialogReplyText[0] == '\0') {
+        char* resolved = _scr_get_msg_str_speech(gDialogReplyMessageListId, gDialogReplyMessageId, 0);
+        if (resolved != nullptr) {
+            snprintf(resolvedReply, sizeof(resolvedReply), "%s", resolved);
+            replyText = resolvedReply;
+        }
+    }
 
     int count = gGameDialogOptionEntriesLength;
     if (count > DIALOG_OPTION_ENTRIES_CAPACITY) {
         count = DIALOG_OPTION_ENTRIES_CAPACITY;
     }
+    MessageListItem messageListItem;
     for (int i = 0; i < count; i++) {
-        msgListIds[i] = gDialogOptionEntries[i].messageListId;
-        msgIds[i] = gDialogOptionEntries[i].messageId;
-        reactions[i] = gDialogOptionEntries[i].reaction;
-        texts[i] = gDialogOptionEntries[i].text;
+        GameDialogOptionEntry* entry = &gDialogOptionEntries[i];
+        msgListIds[i] = entry->messageListId;
+        msgIds[i] = entry->messageId;
+        reactions[i] = entry->reaction;
+        procs[i] = entry->proc;
+        const char* text = entry->text;
+
+        // Message-based options carry (listId, msgId); the display text is
+        // normally resolved by _gdProcessUpdate, which never runs in director
+        // mode. Resolve it here so participants see real option text
+        // (mirrors L2553-2606).
+        if (msgListIds[i] >= 0) {
+            char* resolved = _scr_get_msg_str_speech(msgListIds[i], msgIds[i], 0);
+            if (resolved != nullptr) {
+                snprintf(resolvedTexts[i], sizeof(resolvedTexts[i]), "%s", resolved);
+                text = resolvedTexts[i];
+            }
+        } else if (msgListIds[i] == -1) {
+            if (i == 0 && MpDialogGetIntelligence() < 4) {
+                messageListItem.num = 655; // "Go on"
+                if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
+                    snprintf(resolvedTexts[i], sizeof(resolvedTexts[i]), "%s", messageListItem.text);
+                    text = resolvedTexts[i];
+                }
+            } else {
+                snprintf(resolvedTexts[i], sizeof(resolvedTexts[i]), " ");
+                text = resolvedTexts[i];
+            }
+        } else if (msgListIds[i] == -2) {
+            messageListItem.num = 650; // "[Done]"
+            if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
+                snprintf(resolvedTexts[i], sizeof(resolvedTexts[i]), "%s", messageListItem.text);
+                text = resolvedTexts[i];
+            }
+        }
+        // -4: text already set in the entry.
+
+        texts[i] = text;
     }
 
     MpDialogNodeData node;
     memset(&node, 0, sizeof(node));
-    node.replyText = gDialogReplyText;
+    node.replyText = replyText;
     node.optionCount = count;
     node.optionMsgListIds = msgListIds;
     node.optionMsgIds = msgIds;
     node.optionReactions = reactions;
     node.optionTexts = texts;
+    node.optionProcs = procs;
     MpDialogHostNodeReady(&node);
 }
 
@@ -4567,6 +4827,12 @@ void gameDialogBarterButtonUpMouseUp(int btn, int keyCode)
         MpDialogHostRequestBarter();
         return;
     }
+    // Co-op client: the vanilla red button sits on the shared dialogue screen;
+    // route it to the host-authoritative barter session.
+    if (gMpActive && gMpIsClient && MpDialogClientSessionActive()) {
+        MpDialogClientRequestBarter();
+        return;
+    }
 
     if (PID_TYPE(gGameDialogSpeaker->pid) != OBJ_TYPE_CRITTER) {
         return;
@@ -4794,6 +5060,15 @@ int _talkToRefreshDialogWindowRect(Rect* rect)
 
     int offset = 640 * rect->top + rect->left;
 
+    // Co-op crash guard: the main dialog window must exist to blit into.
+    // A failed _gdCreateHeadWindow otherwise makes this a null-pointer
+    // memcpy (windowGetBuffer(-1) garbage) — turn it into a logged abort.
+    if (gGameDialogWindow == -1) {
+        debugFilePrint("MPDIALOG guard: caps render without main window (rect %d,%d,%d,%d)",
+            rect->left, rect->top, rect->right, rect->bottom);
+        return -1;
+    }
+
     unsigned char* windowBuffer = windowGetBuffer(gGameDialogWindow);
     blitBufferToBuffer(backgroundFrmImage.getData() + offset,
         rect->right - rect->left,
@@ -4997,6 +5272,335 @@ static void gameDialogHighlightsExit()
 
     _upperHighlightFrmImage.unlock();
     _lowerHighlightFrmImage.unlock();
+}
+
+// ---------------------------------------------------------------------------
+// Co-op client dialogue screen: drive the vanilla dialogue windows from
+// host-fed node state. The client never runs dialogue scripts — the host
+// resolves everything and ships the reply/option text; these helpers render
+// it with the vanilla windows (head portrait, reply box, option buttons).
+// ---------------------------------------------------------------------------
+
+int gameDialogCoopOpen(int headFid, int reaction, Object* speaker)
+{
+    if (speaker == nullptr) {
+        return -1;
+    }
+    if (gGameDialogWindow != -1 || gGameDialogBackgroundWindow != -1) {
+        gameDialogCoopClose();
+    }
+
+    gGameDialogSpeaker = speaker;
+    gGameDialogSpeakerIsPartyMember = objectIsPartyMember(speaker);
+    gGameDialogHeadFid = headFid;
+    gGameDialogReactionOrFidget = reaction;
+    _oldFont = fontGetCurrent();
+    fontSetCurrent(101);
+
+    if (_gdCreateHeadWindow() == -1) {
+        fontSetCurrent(_oldFont);
+        return -1;
+    }
+    if (_gdProcessInit() == -1) {
+        fontSetCurrent(_oldFont);
+        return -1;
+    }
+
+    // Draw the head portrait (static — no fidget ticker on the client) and
+    // push it to the screen (the background window was refreshed at
+    // creation, before the head was drawn).
+    _gdSetupFidget(headFid, reaction);
+    if (gGameDialogBackgroundWindow != -1) {
+        windowRefresh(gGameDialogBackgroundWindow);
+    }
+
+    // The vanilla dialogue screen shows the NPC in its camera window: save
+    // the current camera and scroll to the speaker (restored on close).
+    gGameDialogOldDudeTile = gDude != nullptr ? gDude->tile : -1;
+    gGameDialogOldCenterTile = gGameDialogOldDudeTile;
+    if (speaker != nullptr) {
+        _tile_scroll_to(speaker->tile, 2);
+    }
+
+    return 0;
+}
+
+void gameDialogCoopApplyNode(const char* replyText, const int* reactions, const char* const* texts, int optionCount, const int* procs)
+{
+    if (gGameDialogOptionsWindow == -1) {
+        return;
+    }
+
+    _gdProcessCleanup();
+
+    gDialogReplyMessageListId = -4;
+    gDialogReplyMessageId = -4;
+    if (replyText != nullptr) {
+        strncpy(gDialogReplyText, replyText, sizeof(gDialogReplyText) - 1);
+        gDialogReplyText[sizeof(gDialogReplyText) - 1] = '\0';
+    } else {
+        gDialogReplyText[0] = '\0';
+    }
+
+    int count = optionCount < DIALOG_OPTION_ENTRIES_CAPACITY ? optionCount : DIALOG_OPTION_ENTRIES_CAPACITY;
+    gGameDialogOptionEntriesLength = count;
+    for (int i = 0; i < count; i++) {
+        GameDialogOptionEntry* entry = &gDialogOptionEntries[i];
+        entry->messageListId = -4;
+        entry->messageId = -4;
+        entry->reaction = reactions != nullptr ? reactions[i] : 0;
+        // The script procedure must survive: the vanilla choice path runs
+        // entry->proc to build the next node (a zeroed proc looks like the
+        // end of the conversation).
+        entry->proc = procs != nullptr ? procs[i] : 0;
+        entry->btn = -1;
+        const char* text = (texts != nullptr && texts[i] != nullptr) ? texts[i] : "";
+        if (gNumberOptions) {
+            snprintf(entry->text, sizeof(entry->text), "%d. %s", i + 1, text);
+        } else {
+            snprintf(entry->text, sizeof(entry->text), "\x95 %s", text);
+        }
+    }
+
+    _gdProcessUpdate();
+}
+
+void gameDialogCoopHostJoinShowNode(const char* replyText, const int* reactions, const char* const* texts, int optionCount, const int* procs)
+{
+    // The director capture consumed the script's option entries; re-inject
+    // the session node so the join modal's first _gdProcessUpdate renders it.
+    _gdProcessCleanup();
+
+    gDialogReplyMessageListId = -4;
+    gDialogReplyMessageId = -4;
+    if (replyText != nullptr) {
+        strncpy(gDialogReplyText, replyText, sizeof(gDialogReplyText) - 1);
+        gDialogReplyText[sizeof(gDialogReplyText) - 1] = '\0';
+    } else {
+        gDialogReplyText[0] = '\0';
+    }
+
+    int count = optionCount < DIALOG_OPTION_ENTRIES_CAPACITY ? optionCount : DIALOG_OPTION_ENTRIES_CAPACITY;
+    gGameDialogOptionEntriesLength = count;
+    for (int i = 0; i < count; i++) {
+        GameDialogOptionEntry* entry = &gDialogOptionEntries[i];
+        entry->messageListId = -4;
+        entry->messageId = -4;
+        entry->reaction = reactions != nullptr ? reactions[i] : 0;
+        entry->proc = procs != nullptr ? procs[i] : 0;
+        entry->btn = -1;
+        const char* text = (texts != nullptr && texts[i] != nullptr) ? texts[i] : "";
+        if (gNumberOptions) {
+            snprintf(entry->text, sizeof(entry->text), "%d. %s", i + 1, text);
+        } else {
+            snprintf(entry->text, sizeof(entry->text), "\x95 %s", text);
+        }
+    }
+
+    // Re-render the head portrait (the vanilla windows were destroyed in the
+    // director state) and push it to the screen. On the host the dialogue
+    // ticker is still active, so the fidget animates from here.
+    _gdSetupFidget(gGameDialogHeadFid, gGameDialogReactionOrFidget);
+    if (gGameDialogBackgroundWindow != -1) {
+        windowRefresh(gGameDialogBackgroundWindow);
+    }
+}
+
+void gameDialogCoopClose()
+{
+    if (gGameDialogWindow == -1 && gGameDialogBackgroundWindow == -1
+        && gGameDialogReplyWindow == -1 && gGameDialogOptionsWindow == -1) {
+        return;
+    }
+
+    if (gGameDialogReplyWindow != -1 || gGameDialogOptionsWindow != -1) {
+        _gdProcessExit();
+    }
+    _gdDestroyHeadWindow();
+    fontSetCurrent(_oldFont);
+    // Restore the camera the player had before the dialogue.
+    if (gGameDialogOldCenterTile != -1) {
+        _tile_scroll_to(gGameDialogOldCenterTile, 2);
+    }
+    gGameDialogSpeaker = nullptr;
+    gGameDialogSpeakerIsPartyMember = false;
+}
+
+bool gameDialogCoopIsOpen()
+{
+    return gGameDialogWindow != -1 || gGameDialogBackgroundWindow != -1;
+}
+
+void gameDialogCoopHideVanilla()
+{
+    int windows[4];
+    windows[0] = gGameDialogBackgroundWindow;
+    windows[1] = gGameDialogWindow;
+    windows[2] = gGameDialogReplyWindow;
+    windows[3] = gGameDialogOptionsWindow;
+    for (int i = 0; i < 4; i++) {
+        if (windows[i] != -1) {
+            windowHide(windows[i]);
+        }
+    }
+}
+
+void gameDialogCoopShowVanilla()
+{
+    int windows[4];
+    windows[0] = gGameDialogBackgroundWindow;
+    windows[1] = gGameDialogWindow;
+    windows[2] = gGameDialogReplyWindow;
+    windows[3] = gGameDialogOptionsWindow;
+    for (int i = 0; i < 4; i++) {
+        if (windows[i] != -1) {
+            windowShow(windows[i]);
+        }
+    }
+}
+
+// Hide/show only the reply + options windows — the vanilla barter's gdHide()
+// parity (the background, head and red buttons stay visible over the trade
+// screen).
+void gameDialogCoopHideDialogue()
+{
+    if (gGameDialogReplyWindow != -1) {
+        windowHide(gGameDialogReplyWindow);
+    }
+    if (gGameDialogOptionsWindow != -1) {
+        windowHide(gGameDialogOptionsWindow);
+    }
+}
+
+void gameDialogCoopShowDialogue()
+{
+    if (gGameDialogReplyWindow != -1) {
+        windowShow(gGameDialogReplyWindow);
+    }
+    if (gGameDialogOptionsWindow != -1) {
+        windowShow(gGameDialogOptionsWindow);
+    }
+}
+
+void gameDialogCoopOptionHover(int optionIndex)
+{
+    if (optionIndex >= 0 && optionIndex < gGameDialogOptionEntriesLength) {
+        gameDialogOptionOnMouseEnter(optionIndex);
+    }
+}
+
+void gameDialogCoopOptionHoverExit(int optionIndex)
+{
+    if (optionIndex >= 0 && optionIndex < gGameDialogOptionEntriesLength) {
+        gameDialogOptionOnMouseExit(optionIndex);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Co-op barter window swap: vanilla barter destroys the dialogue window
+// (di_talk.frm) and replaces it with the dedicated barter window
+// (barter.frm / trade.frm). The co-op trade screen needs the same swap, but
+// WITHOUT the vanilla hidden tables — co-op keeps per-barterer tables, and
+// concurrent barterers would clobber the file-static globals.
+// ---------------------------------------------------------------------------
+
+void gameDialogCoopDestroyDialogueWindow()
+{
+    _gdialog_window_destroy();
+}
+
+int gameDialogCoopCreateBarterWindow()
+{
+    FrmImage backgroundFrmImage;
+    gBarterWindowExpanded = gExpandedBarterEnabled
+        && backgroundFrmImage.lock(OBJ_TYPE_INTERFACE, expandedBarterFrmName());
+
+    if (!gBarterWindowExpanded) {
+        int frmId = gGameDialogSpeakerIsPartyMember
+            ? 420 // trade.frm - party member barter/trade interface
+            : 111; // barter.frm - barter window
+        backgroundFrmImage.lock(buildFid(OBJ_TYPE_INTERFACE, frmId, 0, 0, 0));
+    }
+
+    dialogMode = GAME_DIALOG_MODE_BARTER;
+
+    if (!backgroundFrmImage.isLocked()) {
+        return -1;
+    }
+
+    _dialogue_subwin_len = backgroundFrmImage.getHeight();
+
+    int bgOverlapHeight = gBarterWindowExpanded
+        ? _dialogue_subwin_len - kExpandedBarterExtraHeight
+        : _dialogue_subwin_len;
+
+    Rect bgRect;
+    windowGetRect(gGameDialogBackgroundWindow, &bgRect);
+    UniqueWindow win(windowCreate(bgRect.left,
+        bgRect.top + GAME_DIALOG_WINDOW_HEIGHT - bgOverlapHeight,
+        GAME_DIALOG_WINDOW_WIDTH,
+        _dialogue_subwin_len,
+        256,
+        WINDOW_DONT_MOVE_TOP | WINDOW_TRANSPARENT));
+    if (win.get() == -1) return -1;
+
+    unsigned char* windowBuffer = windowGetBuffer(win.get());
+    Buffer2D subWinBuf { windowBuffer, windowGetWidth(win.get()), windowGetHeight(win.get()) };
+    ConstBuffer2D bgBuf { windowGetBuffer(gGameDialogBackgroundWindow), GAME_DIALOG_WINDOW_WIDTH, GAME_DIALOG_WINDOW_HEIGHT };
+    blitBuffer2D(bgBuf, 0, GAME_DIALOG_WINDOW_HEIGHT - bgOverlapHeight, GAME_DIALOG_WINDOW_WIDTH, bgOverlapHeight, subWinBuf);
+    _gdialog_scroll_subwin(win.get(), true, backgroundFrmImage.getData(), windowBuffer, nullptr, bgOverlapHeight);
+
+    // TRADE
+    int tradeBtn = createDialogRedButton(win.get(), 40, 162, nullptr, KEY_LOWERCASE_M);
+    if (tradeBtn == -1) return -1;
+
+    // TALK
+    int talkBtn = createDialogRedButton(win.get(), 583, 161, nullptr, KEY_LOWERCASE_T);
+    if (talkBtn == -1) return -1;
+
+    _barterBackgroundFrmImage = std::move(backgroundFrmImage);
+    _gdialog_buttons[0] = tradeBtn;
+    _gdialog_buttons[1] = talkBtn;
+    gGameDialogWindow = win.release();
+    return 0;
+}
+
+void gameDialogCoopDestroyBarterWindow()
+{
+    if (gGameDialogWindow == -1) {
+        return;
+    }
+
+    for (int index = 0; index < 2; index++) {
+        buttonDestroy(_gdialog_buttons[index]);
+        _gdialog_buttons[index] = -1;
+    }
+
+    if (_barterBackgroundFrmImage.isLocked()) {
+        int bgOverlapHeight = gBarterWindowExpanded
+            ? _dialogue_subwin_len - kExpandedBarterExtraHeight
+            : _dialogue_subwin_len;
+
+        unsigned char* backgroundWindowBuffer = windowGetBuffer(gGameDialogBackgroundWindow)
+            + GAME_DIALOG_WINDOW_WIDTH * (GAME_DIALOG_WINDOW_HEIGHT - bgOverlapHeight);
+
+        unsigned char* windowBuffer = windowGetBuffer(gGameDialogWindow);
+        _gdialog_scroll_subwin(gGameDialogWindow, false, _barterBackgroundFrmImage.getData(), windowBuffer, backgroundWindowBuffer, bgOverlapHeight);
+
+        _barterBackgroundFrmImage.unlock();
+    }
+
+    windowDestroy(gGameDialogWindow);
+    gGameDialogWindow = -1;
+    gBarterWindowExpanded = false;
+}
+
+void gameDialogCoopRecreateDialogueWindow()
+{
+    // Recreates di_talk.frm / di_talkp.frm (re-reads _dialogue_subwin_len from
+    // the frame itself). Only meaningful when a dialogue window existed before
+    // the barter swap — the director host never barters.
+    _gdialog_window_create();
 }
 
 } // namespace fallout

@@ -24,6 +24,7 @@ typedef struct MpDialogNodeData {
     const int* optionMsgIds;
     const int* optionReactions;
     const char* const* optionTexts;
+    const int* optionProcs; // script procedure per option (host join re-injection)
 } MpDialogNodeData;
 
 // --- Lifecycle (multiplayer.cc) ---
@@ -69,12 +70,38 @@ bool MpDialogAllowWorldTick();
 // game_dialog.cc: host is a participant (has the vanilla UI + vote overlay).
 bool MpDialogHostIsParticipant();
 
+// True when the host is a DIRECTOR: a session is active (or about to start)
+// that the host is not part of. The host never enters the blocking dialogue
+// modal in this mode — the session is driven from MpTick instead, so the
+// host keeps playing normally behind the client's dialogue.
+bool MpDialogDirectorMode();
+
+// Avatar of the player who initiated the pending dialogue (host-side).
+// nullptr when no pending initiator, not host, or the player is missing.
+Object* MpDialogPendingInitiatorAvatar();
+
+// Current node sequence of the active host session (used by the director
+// choice path to detect whether a reply proc built a new node).
+uint32_t MpDialogHostNodeSeq();
+
+// Current session id of the active host session (diagnostics).
+uint32_t MpDialogHostSessionId();
+
+// Per-frame driver for a director-host session. Called from MpTick (host
+// branch) — never from the dialogue modal. Handles interruptions, the
+// majority timer, and resolved-choice dispatch without any window work.
+void MpDialogHostDirectorTick();
+
 // game_dialog.cc: the host participant picked an option / left via keys.
 void MpDialogHostLocalChoice(int optionIndex);
 void MpDialogHostLocalLeave();
 
 // game_dialog.cc: host pressed the barter button while in mp dialogue.
 void MpDialogHostRequestBarter();
+
+// The option index the local player currently has selected (host or client),
+// or -1 when none/outside a session. Used to highlight the chosen option.
+int MpDialogMySelection();
 
 // --- Effective stat / perk routing (host, dialogue-gated) ---
 // Requirement: dialogue checks use the highest stat/skill among the players
@@ -113,6 +140,34 @@ void MpDialogClientMaybeShowUI();
 // True while the client dialogue/barter modal is open (blocks vote UI and
 // the deferred-packet drain inside MpTick).
 bool MpDialogAnyModalActive();
+
+// Client-side helpers for game_dialog.cc's vanilla dialogue screen.
+bool MpDialogClientSessionActive();
+// The client pressed the vanilla barter button: start an mp barter session.
+void MpDialogClientRequestBarter();
+
+// --- Vanilla barter loop hooks (inventory.cc barterProcessUI calls these,
+// gated on gMpActive, when the co-op session drives the trade screen) ---
+
+// True while the local player's mp barter session is open.
+bool MpDialogBarterSessionOpen();
+// Per-frame pump inside the vanilla trade loop: network + world, external
+// table refresh, interruption checks. Returns false → the loop must break
+// (session ended/aborted).
+bool MpDialogBarterLoopTick();
+// Key interception before the vanilla T/M handling. Returns true when the key
+// was consumed by the mp session (host: authoritative commit/end; client:
+// request packet). ESC is also consumed so the session ends cleanly.
+bool MpDialogBarterInterceptKey(int keyCode);
+// Called from the vanilla barter move helpers at the exact point where the
+// item would transfer locally (after the vanilla drag/drop UX). Routes the
+// transfer through the host-authoritative session. Returns true when handled
+// (co-op), false when the caller must fall through to the vanilla move.
+bool MpDialogBarterMoveFromVanilla(uint32_t pid, int quantity, int target, bool back);
+// The vanilla trade loop exited — tear down the mp barter session (host:
+// return items, un-suspend the voter, broadcast; client: no-op, the session
+// end is host-driven).
+void MpDialogBarterLoopEnded();
 
 // Host-side packet handlers (multiplayer.cc dispatch).
 void MpDialogHostHandleChoice(const void* data, size_t dataLength, void* peer);

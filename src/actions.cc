@@ -1899,6 +1899,12 @@ int actionTalk(Object* obj, Object* critter)
         if (MpDialogHostTryJoin(critter, gMpSession.localNetId)) {
             return 0;
         }
+        if (MpDialogDirectorMode()) {
+            // A client's dialogue is parked on the host (director mode); one
+            // dialogue at a time — the host's own new talk must wait.
+            debugFilePrint("MPDIALOG host talk blocked (director session active)");
+            return 0;
+        }
         if (!MpDialogHostActive()) {
             MpDialogSetPendingInitiator(gMpSession.localNetId);
         }

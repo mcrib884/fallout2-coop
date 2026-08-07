@@ -373,7 +373,7 @@ static char* _strName = _aCritter;
 // reaction (-1 - Good, 0 - Neutral, 1 - Bad).
 //
 // 0x5970D0 dialogue_mood
-static int gGameDialogReactionOrFidget;
+int gGameDialogReactionOrFidget;
 
 // 0x453FD0 dbg_error
 static void scriptPredefinedError(Program* program, const char* name, int error)
@@ -2041,6 +2041,13 @@ static void opStartGameDialog(Program* program)
 // 0x456F80 op_end_dialogue
 static void opEndGameDialog(Program* program)
 {
+    // Co-op: a director-host dialogue is parked (host is not a participant;
+    // the vanilla modal never runs). The talk proc's trailing end_dialogue
+    // would tear down the parked state immediately — the session ends only
+    // when the director choice path finds no next node.
+    if (MpDialogDirectorMode()) {
+        return;
+    }
     if (_gdialogExitFromScript() != -1) {
         gGameDialogSpeaker = nullptr;
         gGameDialogSid = -1;

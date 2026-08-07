@@ -31,6 +31,7 @@
 #include "kb.h"
 #include "memory.h"
 #include "message.h"
+#include "mouse.h"
 #include "multiplayer.h"
 #include "multiplayer_combat.h"
 #include "multiplayer_profile.h"
@@ -40,11 +41,13 @@
 #include "proto.h"
 #include "proto_types.h"
 #include "random.h"
+#include "reaction.h"
 #include "skill.h"
 #include "stat.h"
 #include "stat_defs.h"
 #include "svga.h"
 #include "text_font.h"
+#include "tile.h"
 #include "time.h"
 #include "window_manager.h"
 
@@ -58,6 +61,7 @@ struct MpDialogOption {
     int16_t msgListId;
     int16_t msgId;
     int8_t reaction;
+    int16_t proc; // script procedure index (host-side, join re-injection)
     char text[NET_DIALOG_OPTION_TEXT_MAX + 1];
 };
 
@@ -100,10 +104,18 @@ struct MpDialogSession {
     int hostVoteWindow;
     MpBarterSession barter[NET_MAX_PLAYERS]; // indexed by netId - 1
     bool hostBarterUiOpen;
+    bool barterDirty; // host's own trade screen needs a re-render
+    bool hostJoinNeedsModal; // host joined mid-session: enter the modal
+    bool joinParkedScript; // the talk script is parked at dialog_go by the join
+    bool voteUiDirty; // option texts need a re-render (chooser names)
     uint8_t pendingInitiator; // consumed at first node
 };
 
 static MpDialogSession gMpDialog = {};
+
+// Builds the current host node's option texts with the chooser names appended
+// (defined below; used by the join modal and the host pump re-render).
+static void mpDialogHostBuildNodeTexts(const char** texts, int* reactions, int* procs);
 
 struct MpDialogClientState {
     bool sessionActive;
@@ -142,16 +154,22 @@ struct MpDialogClientState {
     uint8_t lastOp;
     uint8_t lastOk;
     uint8_t lastMsgId;
-    int barterFocus;   // 0 my, 1 offer, 2 request, 3 npc
-    int barterSelected;
-    int barterScroll[4];
+    int16_t barterMod; // host-computed barter modifier (incl. reaction)
+    // vanilla-style dialogue screen
+    int32_t headFid;
+    int8_t reaction;
+    bool nodeApplied;  // at least one node rendered into the vanilla windows
+    // vanilla trade screen (barter)
+    bool tradeOpen;
+    bool barterDirty;  // trade screen needs a re-render from fresh state
+    Object* offerMirror;   // local mirror of the host-authoritative offer table
+    Object* requestMirror; // local mirror of the host-authoritative request table
 };
 
 static MpDialogClientState gMpDialogClient = {};
 
 static constexpr int MP_DIALOG_WINDOW_W = 620;
 static constexpr int MP_DIALOG_WINDOW_H = 400;
-static constexpr int MP_BARTER_ITEMS_PER_PAGE = 10;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -171,6 +189,14 @@ static Object* mpDialogPlayerAvatar(uint8_t netId)
         return nullptr;
     }
     return gMpSession.players[netId - 1].obj;
+}
+
+Object* MpDialogPendingInitiatorAvatar()
+{
+    if (!gMpActive || !gMpIsHost || gMpDialog.pendingInitiator == 0) {
+        return nullptr;
+    }
+    return mpDialogPlayerAvatar(gMpDialog.pendingInitiator);
 }
 
 static bool mpDialogIsParticipant(uint8_t netId)
@@ -383,6 +409,10 @@ static void mpDialogRecalcVote()
         return;
     }
 
+    // The option texts (chooser names) changed with the vote state; the
+    // host's modal re-renders them on the next pump.
+    gMpDialog.voteUiDirty = true;
+
     int counts[NET_DIALOG_MAX_OPTIONS] = {};
     int activeVoters = 0;
     for (int i = 0; i < gMpDialog.participantCount; i++) {
@@ -500,8 +530,22 @@ static void mpDialogHostClearSession()
 {
     mpDialogHostCloseVoteOverlay();
     mpDialogHostTeardownAllBarter();
+    // The vanilla dialogue state needs its full teardown when the script is
+    // parked at dialog_go: the director case (host not a participant) and the
+    // join-modal case (the host joined mid-session and the script never
+    // resumed). Both leave the reply program's stack elevated — a fresh
+    // program reset is required or the next talk on the same script crashes.
+    bool directorParked = gMpDialog.active && (!gMpDialog.hostParticipant || gMpDialog.joinParkedScript);
     memset(&gMpDialog, 0, sizeof(gMpDialog));
     gMpDialog.hostVoteWindow = -1;
+    if (directorParked) {
+        // The vanilla dialogue state is parked (windows alive or destroyed by
+        // the join-modal exit, _gdialog_state INACTIVE). Run the full vanilla
+        // teardown now. It is guarded internally and its MpDialogHostEnd hook
+        // is a no-op once the session is already cleared here.
+        debugFilePrint("MPDIALOG director finish (parked vanilla state teardown)");
+        MpDialogDirectorFinishDialogue();
+    }
 }
 
 static void mpDialogHostAbort(uint8_t reason)
@@ -517,8 +561,10 @@ static void mpDialogHostAbort(uint8_t reason)
     p.reason = reason;
     NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE, NET_PKT_DIALOG_END, &p, sizeof(p));
 
-    gMpDialog.exitRequested = true;
     mpDialogHostClearSession();
+    // Must survive the memset: the modal's ShouldExit check reads it right
+    // after the pump returns.
+    gMpDialog.exitRequested = true;
 }
 
 void MpDialogHostEnd()
@@ -560,9 +606,169 @@ bool MpDialogHostIsParticipant()
     return gMpActive && gMpIsHost && gMpDialog.active && gMpDialog.hostParticipant;
 }
 
+int MpDialogMySelection()
+{
+    if (!gMpActive) {
+        return -1;
+    }
+    if (gMpIsHost) {
+        if (!gMpDialog.active) {
+            return -1;
+        }
+        return gMpDialog.voters[gMpSession.localNetId - 1].selected;
+    }
+    if (!gMpDialogClient.sessionActive) {
+        return -1;
+    }
+    return gMpDialogClient.selections[gMpSession.localNetId - 1];
+}
+
 bool MpDialogAllowWorldTick()
 {
     return gMpActive && gMpIsHost && gMpDialog.active;
+}
+
+bool MpDialogDirectorMode()
+{
+    if (!gMpActive || !gMpIsHost) {
+        return false;
+    }
+    if (gMpDialog.active) {
+        return !gMpDialog.hostParticipant;
+    }
+    // About to start: a pending initiator that is not the host means a client
+    // started this dialogue — the host will be a director.
+    return gMpDialog.pendingInitiator != 0
+        && gMpDialog.pendingInitiator != gMpSession.localNetId;
+}
+
+uint32_t MpDialogHostNodeSeq()
+{
+    return gMpDialog.nodeSeq;
+}
+
+uint32_t MpDialogHostSessionId()
+{
+    return gMpDialog.sessionId;
+}
+
+// The host joined an active session mid-dialogue: create the vanilla
+// dialogue screen and enter the blocking modal. The talk script is parked
+// (director return) — the modal just overlays the session and pumps MpTick
+// itself via MpDialogHostPump. Returns when the host leaves the vote or the
+// session ends; the director flow resumes either way.
+static void mpDialogHostEnterModal()
+{
+    debugFilePrint("MPDIALOG host join enters modal session=%u node=%u", gMpDialog.sessionId, gMpDialog.nodeSeq);
+
+    // The talk script stays parked at dialog_go while this modal runs; the
+    // session teardown must reset the parked program when it ends.
+    gMpDialog.joinParkedScript = true;
+
+    if (gameDialogGetWindow() == -1) {
+        if (_gdCreateHeadWindow() == -1) {
+            debugFilePrint("MPDIALOG host join modal setup failed (head window)");
+            return;
+        }
+    }
+    // The director capture consumed the parked script's option entries:
+    // inject the session node so the modal's first frame shows the options,
+    // and re-render the head portrait in the camera window. The script
+    // procedures ride along so resolved choices still run their reply procs.
+    const char* optionTexts[NET_DIALOG_MAX_OPTIONS];
+    int reactions[NET_DIALOG_MAX_OPTIONS];
+    int procs[NET_DIALOG_MAX_OPTIONS];
+    mpDialogHostBuildNodeTexts(optionTexts, reactions, procs);
+    gameDialogCoopHostJoinShowNode(gMpDialog.replyText, reactions, optionTexts, gMpDialog.optionCount, procs);
+    if (gMpDialog.speaker != nullptr) {
+        _tile_scroll_to(gMpDialog.speaker->tile, 2);
+    }
+
+    gameDialogProcessUI();
+
+    // The modal ended: either the session ended (the vanilla teardown already
+    // destroyed everything) or the host left the vote (ESC/0) — back to the
+    // director: destroy the vanilla windows so the host plays the world
+    // again. The session itself continues with the remaining participants.
+    if (gameDialogGetWindow() != -1) {
+        _gdDestroyHeadWindow();
+    }
+    debugFilePrint("MPDIALOG host join modal closed session=%u active=%d", gMpDialog.sessionId, gMpDialog.active ? 1 : 0);
+}
+
+void MpDialogHostDirectorTick()
+{
+    if (!gMpActive || !gMpIsHost || !gMpDialog.active) {
+        return;
+    }
+
+    // The host joined an active session: enter the blocking vanilla modal
+    // right now (the script is parked; the modal drives itself).
+    if (gMpDialog.hostJoinNeedsModal) {
+        gMpDialog.hostJoinNeedsModal = false;
+        mpDialogHostEnterModal();
+        // The modal may have ended the session (terminal option, all-left,
+        // combat/abort): broadcast the END now — the participant check below
+        // must not swallow the pending close, or the clients hang forever on
+        // the dead node.
+        if (gMpDialog.exitRequested) {
+            MpDialogHostEnd();
+        }
+        return;
+    }
+
+    if (gMpDialog.hostParticipant) {
+        return;
+    }
+
+    // Interruptions first (mirrors the modal pump; MpCombatTick runs right
+    // after this in MpTick and may start combat).
+    if (MpCombatIsActive() || gMpCombat.pendingStart) {
+        mpDialogHostAbort(NET_DIALOG_END_COMBAT);
+        return;
+    }
+    if (gMpDialog.speaker != nullptr && critterIsDead(gMpDialog.speaker)) {
+        mpDialogHostAbort(NET_DIALOG_END_NPC_DEAD);
+        return;
+    }
+    if (gVoteSession.state == VOTE_STATE_PASSED) {
+        mpDialogHostAbort(NET_DIALOG_END_MAP_CHANGE);
+        return;
+    }
+
+    // Majority timer expiry.
+    if (gMpDialog.timerActive && gMpDialog.majorityOption >= 0) {
+        if (getTicksSince(gMpDialog.timerStart) >= gMpDialog.timerMs) {
+            debugFilePrint("MPDIALOG timer expired session=%u node=%u option=%d",
+                gMpDialog.sessionId, gMpDialog.nodeSeq, gMpDialog.majorityOption);
+            mpDialogResolve(gMpDialog.majorityOption);
+        }
+    }
+
+    // Pending resolution -> run the director choice path (no window work;
+    // the vanilla dialogue state is parked).
+    if (gMpDialog.resolvedOption != -1) {
+        int optionIndex = gMpDialog.resolvedOption;
+        gMpDialog.resolvedOption = -1;
+        if (optionIndex >= 0 && optionIndex < gMpDialog.optionCount) {
+            if (MpDialogDirectorProcessChoice(optionIndex) == -1) {
+                MpDialogHostEnd();
+            }
+        } else {
+            MpDialogHostEnd();
+        }
+    }
+
+    if (!gMpDialog.active) {
+        return;
+    }
+
+    // A leave/abort already asked for the session to close (e.g. all
+    // participants left): end it through the normal path so the parked
+    // vanilla dialogue state gets its teardown.
+    if (gMpDialog.exitRequested) {
+        MpDialogHostEnd();
+    }
 }
 
 static void mpDialogHostSetParticipantUi()
@@ -599,9 +805,13 @@ static void mpDialogHostSendStateToPeer(uint8_t netId)
         return;
     }
 
-    // Serialize the node body.
+    // Serialize the node body (version 2 adds the head portrait data).
     std::string body;
-    body.push_back((char)1); // version
+    body.push_back((char)2); // version
+    int32_t headFid = gGameDialogHeadFid;
+    int8_t reaction = (int8_t)gGameDialogReactionOrFidget;
+    body.append(reinterpret_cast<const char*>(&headFid), sizeof(headFid));
+    body.push_back((char)reaction);
     uint16_t replyLen = (uint16_t)strlen(gMpDialog.replyText);
     body.append(reinterpret_cast<const char*>(&replyLen), sizeof(replyLen));
     body.append(gMpDialog.replyText, replyLen);
@@ -648,11 +858,16 @@ void MpDialogHostNodeReady(const MpDialogNodeData* node)
     // Copy the node content (file-statics in game_dialog.cc are captured here).
     uint32_t hash = mpDialogNodeHash(node);
     if (gMpDialog.active && hash == gMpDialog.lastNodeHash) {
-        return; // same node (re-entrant _gdProcessUpdate); nothing new
+        debugFilePrint("MPDIALOG node dedup (same hash) session=%u node=%u",
+            gMpDialog.sessionId, gMpDialog.nodeSeq); // same node (re-entrant _gdProcessUpdate); nothing new
+        return;
     }
 
     bool firstNode = !gMpDialog.active;
     if (firstNode) {
+        // The memset below must not eat the pending initiator: read it first,
+        // then restore it after the session is zeroed.
+        uint8_t pendingInitiator = gMpDialog.pendingInitiator;
         memset(&gMpDialog, 0, sizeof(gMpDialog));
         gMpDialog.hostVoteWindow = -1;
         gMpDialog.active = true;
@@ -662,7 +877,7 @@ void MpDialogHostNodeReady(const MpDialogNodeData* node)
         }
         gMpDialog.speaker = gGameDialogSpeaker;
         gMpDialog.speakerNetId = gMpDialog.speaker != nullptr ? MpGetObjNetId(gMpDialog.speaker) : 0;
-        gMpDialog.initiatorNetId = gMpDialog.pendingInitiator;
+        gMpDialog.initiatorNetId = pendingInitiator;
         gMpDialog.pendingInitiator = 0;
 
         if (gMpDialog.initiatorNetId != 0 && mpDialogPlayerConnected(gMpDialog.initiatorNetId)) {
@@ -713,6 +928,7 @@ void MpDialogHostNodeReady(const MpDialogNodeData* node)
         out->msgListId = (int16_t)node->optionMsgListIds[i];
         out->msgId = (int16_t)node->optionMsgIds[i];
         out->reaction = (int8_t)node->optionReactions[i];
+        out->proc = node->optionProcs != nullptr ? (int16_t)node->optionProcs[i] : 0;
         // Strip the vanilla "1. "/bullet prefix; every client re-numbers.
         mpDialogStripOptionPrefix(node->optionTexts[i], out->text, sizeof(out->text));
     }
@@ -797,6 +1013,7 @@ bool MpDialogHostTryJoin(Object* speaker, uint8_t netId)
 
         if (netId == gMpSession.localNetId) {
             gMpDialog.hostParticipant = true;
+            gMpDialog.hostJoinNeedsModal = true;
             mpDialogHostSetParticipantUi();
         }
         mpDialogRecalcVote();
@@ -1090,6 +1307,12 @@ static Object* mpDialogContainerCreate()
 {
     Object* obj = nullptr;
     objectCreateWithFidPid(&obj, -1, PROTO_ID_JESSE_CONTAINER);
+    if (obj != nullptr) {
+        // Hidden + no-save like the vanilla barter tables (game_dialog.cc
+        // L3472-3480): keeps them out of the object-state broadcast and the
+        // world renderer entirely.
+        obj->flags |= (OBJECT_HIDDEN | OBJECT_NO_SAVE);
+    }
     return obj;
 }
 
@@ -1138,6 +1361,22 @@ static int mpDialogCountContainerItems(Object* container)
     return std::min(container->data.inventory.length, NET_BARTER_MAX_ITEMS);
 }
 
+// Host-computed barter modifier (dialogue modifier + NPC reaction modifier).
+// Defined before the state builder, which ships it to the barterers.
+static int mpDialogHostBarterModifier()
+{
+    int mod = gameDialogGetBarterModifier();
+    if (gMpDialog.speaker != nullptr) {
+        int translated = reactionTranslateValue(reactionGetValue(gMpDialog.speaker));
+        if (translated == NPC_REACTION_BAD) {
+            mod += 25;
+        } else if (translated == NPC_REACTION_GOOD) {
+            mod -= 15;
+        }
+    }
+    return mod;
+}
+
 // Fills the item entry list of a container (equipped items excluded for NPCs).
 static int mpDialogCollectItems(Object* container, bool excludeEquipped, NetBarterItem* out, int maxOut)
 {
@@ -1172,6 +1411,7 @@ static size_t mpDialogBuildBarterState(uint8_t netId, uint8_t lastOp, uint8_t la
     p->lastOp = lastOp;
     p->lastOk = lastOk;
     p->lastMsgId = lastMsgId;
+    p->barterMod = (int16_t)mpDialogHostBarterModifier();
 
     NetBarterItem* cursor = reinterpret_cast<NetBarterItem*>(buffer + sizeof(NetBarterStatePayload));
     int remaining = MP_BARTER_STATE_ENTRY_BUDGET;
@@ -1216,11 +1456,14 @@ static void mpDialogSendBarterState(uint8_t netId, uint8_t lastOp, uint8_t lastO
 // Broadcasts fresh state to every active barterer (NPC changed).
 static void mpDialogBroadcastBarterStateToBarterers()
 {
+    int count = 0;
     for (int i = 0; i < NET_MAX_PLAYERS; i++) {
         if (gMpDialog.barter[i].active) {
             mpDialogSendBarterState(i + 1, 0, 0, 0);
+            count++;
         }
     }
+    debugFilePrint("MPBARTER broadcast barterers=%d", count);
 }
 
 static bool mpDialogBarterStart(uint8_t netId)
@@ -1314,6 +1557,7 @@ static void mpDialogBarterMove(uint8_t netId, uint8_t target, uint32_t pid, int3
     if (target == 2) {
         mpDialogBroadcastBarterStateToBarterers();
     }
+    gMpDialog.barterDirty = true;
 }
 
 static void mpDialogBarterCommit(uint8_t netId)
@@ -1335,6 +1579,132 @@ static void mpDialogBarterCommit(uint8_t netId)
     debugFilePrint("MPBARTER commit session=%u netId=%u rc=%d", gMpDialog.sessionId, netId, rc);
     mpDialogSendBarterState(netId, NET_BARTER_OP_COMMIT, rc == 0 ? 1 : 0, msgId);
     mpDialogBroadcastBarterStateToBarterers();
+    gMpDialog.barterDirty = true;
+}
+
+// ---------------------------------------------------------------------------
+// Vanilla trade loop hooks (called from inventory.cc barterProcessUI, gated
+// on gMpActive). The co-op barter drives the REAL vanilla trade screen: the
+// hooks pump the network, intercept M/T/ESC and slot clicks so they route
+// through the host-authoritative session, and tear the session down when the
+// loop exits.
+// ---------------------------------------------------------------------------
+
+static void mpDialogClientSendBarter(uint8_t op, uint8_t target, uint32_t pid, int32_t qty); // fwd
+
+bool MpDialogBarterSessionOpen()
+{
+    if (!gMpActive) {
+        return false;
+    }
+    if (gMpIsHost) {
+        return gMpDialog.active && gMpDialog.barter[gMpSession.localNetId - 1].active;
+    }
+    return gMpDialogClient.barterActive;
+}
+
+bool MpDialogBarterLoopTick()
+{
+    if (!gMpActive) {
+        return true;
+    }
+
+    if (gMpIsHost) {
+        // Interruptions first: never pump when combat is about to start.
+        if (MpCombatIsActive() || gMpCombat.pendingStart) {
+            mpDialogHostAbort(NET_DIALOG_END_COMBAT);
+            return false;
+        }
+        if (gMpDialog.speaker != nullptr && critterIsDead(gMpDialog.speaker)) {
+            mpDialogHostAbort(NET_DIALOG_END_NPC_DEAD);
+            return false;
+        }
+    }
+
+    MpTick();
+
+    if (gMpIsHost) {
+        if (!gMpDialog.active || !gMpDialog.barter[gMpSession.localNetId - 1].active) {
+            return false;
+        }
+        if (gMpDialog.barterDirty) {
+            gMpDialog.barterDirty = false;
+            MpBarterSession* b = &gMpDialog.barter[gMpSession.localNetId - 1];
+            // Draw the session's own tables explicitly: another player's
+            // commit can leave the canonical table globals pointing at their
+            // (now empty) tables.
+            mpBarterTradeRefreshWithTables(b->offerTable, b->requestTable);
+        }
+    } else {
+        if (!gMpDialogClient.barterActive) {
+            return false;
+        }
+        if (gMpDialogClient.barterDirty) {
+            gMpDialogClient.barterDirty = false;
+            debugFilePrint("MPBARTER client tick refresh npc=%d offer=%d req=%d",
+                gMpDialogClient.npcItemCount, gMpDialogClient.offerCount, gMpDialogClient.requestCount);
+            mpBarterTradeRefreshWithTables(gMpDialogClient.offerMirror, gMpDialogClient.requestMirror);
+        }
+    }
+    return true;
+}
+
+bool MpDialogBarterInterceptKey(int keyCode)
+{
+    if (!MpDialogBarterSessionOpen()) {
+        return false;
+    }
+    if (keyCode == KEY_LOWERCASE_M) {
+        if (gMpIsHost) {
+            MpBarterSession* b = &gMpDialog.barter[gMpSession.localNetId - 1];
+            // Vanilla parity: M on empty tables does nothing.
+            if (mpDialogCountContainerItems(b->offerTable) > 0 || mpDialogCountContainerItems(b->requestTable) > 0) {
+                mpDialogBarterCommit(gMpSession.localNetId);
+            }
+        } else {
+            mpDialogClientSendBarter(NET_BARTER_OP_COMMIT, 0, 0, 0);
+        }
+        return true;
+    }
+    if (keyCode == KEY_LOWERCASE_T || keyCode == KEY_ESCAPE) {
+        if (gMpIsHost) {
+            mpDialogBarterEnd(gMpSession.localNetId);
+        } else {
+            mpDialogClientSendBarter(NET_BARTER_OP_END, 0, 0, 0);
+            gMpDialogClient.barterActive = false;
+        }
+        return true;
+    }
+    return false;
+}
+
+bool MpDialogBarterMoveFromVanilla(uint32_t pid, int quantity, int target, bool back)
+{
+    if (quantity <= 0) {
+        return true; // nothing to move — swallow
+    }
+    if (!MpDialogBarterSessionOpen()) {
+        return false; // no active mp session — let the vanilla move run
+    }
+    if (gMpIsHost) {
+        mpDialogBarterMove(gMpSession.localNetId, (uint8_t)target, pid, back ? -quantity : quantity);
+    } else {
+        mpDialogClientSendBarter(NET_BARTER_OP_MOVE, (uint8_t)target, pid, back ? -quantity : quantity);
+    }
+    return true;
+}
+
+void MpDialogBarterLoopEnded()
+{
+    if (!gMpActive) {
+        return;
+    }
+    if (gMpIsHost) {
+        // Idempotent: no-op when the session already ended via T/ESC/abort.
+        mpDialogBarterEnd(gMpSession.localNetId);
+    }
+    // Client: the session end is host-driven (BARTER_STATE END clears
+    // barterActive); nothing to do here.
 }
 
 void MpDialogHostHandleBarterCmd(const void* data, size_t dataLength, void* peer)
@@ -1432,13 +1802,10 @@ static void mpDialogHostDrawOverlay()
     for (int i = 0; i < gMpDialog.participantCount && i < 6; i++) {
         uint8_t netId = gMpDialog.participants[i];
         const char* name = gMpSession.players[netId - 1].name;
-        int sel = gMpDialog.voters[netId - 1].selected;
         if (gMpDialog.voters[netId - 1].suspended) {
-            snprintf(line, sizeof(line), "%s: barter", name);
-        } else if (sel >= 0) {
-            snprintf(line, sizeof(line), "%s: [%d]", name, sel + 1);
+            snprintf(line, sizeof(line), "%s (barter)", name);
         } else {
-            snprintf(line, sizeof(line), "%s: -", name);
+            snprintf(line, sizeof(line), "%s", name);
         }
         if (netId == gMpDialog.initiatorNetId) {
             strncat(line, " *", sizeof(line) - strlen(line) - 1);
@@ -1462,268 +1829,56 @@ static void mpDialogHostDrawOverlay()
 }
 
 // ---------------------------------------------------------------------------
-// Host: barter modal (text UI, shared layout with the client modal)
+// Host: barter modal (vanilla trade screen)
 // ---------------------------------------------------------------------------
 
-static const char* mpDialogBarterPaneTitle(int focus)
-{
-    switch (focus) {
-    case 0:
-        return "MY ITEMS";
-    case 1:
-        return "OFFER";
-    case 2:
-        return "REQUEST";
-    default:
-        return "NPC ITEMS";
-    }
-}
-
-static const int MP_BARTER_PANE_X[4] = { 8, 160, 312, 464 };
-static const int MP_BARTER_PANE_W = 148;
-
-// Host-side item accessors (real objects).
-static int mpDialogHostPaneCount(int pane)
-{
-    switch (pane) {
-    case 0: {
-        Object* avatar = mpDialogPlayerAvatar(gMpSession.localNetId);
-        return avatar != nullptr ? avatar->data.inventory.length : 0;
-    }
-    case 1:
-        return mpDialogCountContainerItems(gMpDialog.barter[gMpSession.localNetId - 1].offerTable);
-    case 2:
-        return mpDialogCountContainerItems(gMpDialog.barter[gMpSession.localNetId - 1].requestTable);
-    default:
-        return mpDialogCountNpcItems();
-    }
-}
-
-static void mpDialogHostPaneEntry(int pane, int index, char* out, size_t outSize)
-{
-    Object* avatar = mpDialogPlayerAvatar(gMpSession.localNetId);
-    switch (pane) {
-    case 0: {
-        if (avatar == nullptr || index >= avatar->data.inventory.length) {
-            out[0] = '\0';
-            return;
-        }
-        InventoryItem* entry = &avatar->data.inventory.items[index];
-        snprintf(out, outSize, "%s x%d", itemGetName(entry->item), entry->quantity);
-        break;
-    }
-    case 1:
-    case 2: {
-        Object* table = pane == 1
-            ? gMpDialog.barter[gMpSession.localNetId - 1].offerTable
-            : gMpDialog.barter[gMpSession.localNetId - 1].requestTable;
-        if (table == nullptr || index >= table->data.inventory.length) {
-            out[0] = '\0';
-            return;
-        }
-        InventoryItem* entry = &table->data.inventory.items[index];
-        snprintf(out, outSize, "%s x%d", itemGetName(entry->item), entry->quantity);
-        break;
-    }
-    default: {
-        if (gMpDialog.speaker == nullptr || index >= gMpDialog.speaker->data.inventory.length) {
-            out[0] = '\0';
-            return;
-        }
-        InventoryItem* entry = &gMpDialog.speaker->data.inventory.items[index];
-        if (mpDialogItemIsEquipped(entry->item)) {
-            out[0] = '\0';
-            return;
-        }
-        snprintf(out, outSize, "%s x%d", itemGetName(entry->item), entry->quantity);
-        break;
-    }
-    }
-}
-
-static void mpDialogHostBarterMoveSelected(int focus, int selectedIndex)
-{
-    uint8_t local = gMpSession.localNetId;
-    Object* avatar = mpDialogPlayerAvatar(local);
-    if (avatar == nullptr) {
-        return;
-    }
-    MpBarterSession* b = &gMpDialog.barter[local - 1];
-
-    switch (focus) {
-    case 0: { // MY -> OFFER
-        if (selectedIndex >= avatar->data.inventory.length) {
-            return;
-        }
-        Object* item = avatar->data.inventory.items[selectedIndex].item;
-        int qty = avatar->data.inventory.items[selectedIndex].quantity;
-        itemMoveForce(avatar, b->offerTable, item, qty);
-        mpDialogSendBarterState(local, NET_BARTER_OP_MOVE, 1, 0);
-        break;
-    }
-    case 1: { // OFFER -> MY
-        if (b->offerTable == nullptr || selectedIndex >= b->offerTable->data.inventory.length) {
-            return;
-        }
-        Object* item = b->offerTable->data.inventory.items[selectedIndex].item;
-        int qty = b->offerTable->data.inventory.items[selectedIndex].quantity;
-        itemMoveForce(b->offerTable, avatar, item, qty);
-        mpDialogSendBarterState(local, NET_BARTER_OP_MOVE, 1, 0);
-        break;
-    }
-    case 2: { // REQUEST -> NPC
-        if (b->requestTable == nullptr || selectedIndex >= b->requestTable->data.inventory.length) {
-            return;
-        }
-        Object* item = b->requestTable->data.inventory.items[selectedIndex].item;
-        int qty = b->requestTable->data.inventory.items[selectedIndex].quantity;
-        itemMoveForce(b->requestTable, gMpDialog.speaker, item, qty);
-        mpDialogSendBarterState(local, NET_BARTER_OP_MOVE, 1, 0);
-        mpDialogBroadcastBarterStateToBarterers();
-        break;
-    }
-    default: { // NPC -> REQUEST
-        if (gMpDialog.speaker == nullptr || selectedIndex >= gMpDialog.speaker->data.inventory.length) {
-            return;
-        }
-        InventoryItem* entry = &gMpDialog.speaker->data.inventory.items[selectedIndex];
-        if (mpDialogItemIsEquipped(entry->item)) {
-            return;
-        }
-        itemMoveForce(gMpDialog.speaker, b->requestTable, entry->item, entry->quantity);
-        mpDialogSendBarterState(local, NET_BARTER_OP_MOVE, 1, 0);
-        mpDialogBroadcastBarterStateToBarterers();
-        break;
-    }
-    }
-}
-
-// Blocking host barter modal (nested inside the dialogue pump).
+// Blocking host barter modal (nested inside the dialogue pump). Drives the
+// REAL vanilla trade loop (barterProcessUI) with the authoritative tables;
+// the co-op hooks inside it pump the network, route M/T/ESC and slot clicks
+// through the session, and tear the session down on exit.
 static void mpDialogHostRunBarter()
 {
     uint8_t local = gMpSession.localNetId;
     MpBarterSession* b = &gMpDialog.barter[local - 1];
-    if (!b->active) {
+    if (!b->active || gMpDialog.speaker == nullptr || b->offerTable == nullptr || b->requestTable == nullptr) {
         gMpDialog.hostBarterUiOpen = false;
         return;
     }
 
-    constexpr int W = MP_DIALOG_WINDOW_W;
-    constexpr int H = 300;
-    int x = (screenGetWidth() - W) / 2;
-    int y = (screenGetHeight() - H) / 2 - 30;
-    int win = windowCreate(x, y, W, H, COLOR_BLACK, WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
-    if (win == -1) {
+    ScopedGameMode gm(GameMode::kBarter);
+    gameDialogCoopHideDialogue();
+
+    // Vanilla parity: swap the dialogue window for the dedicated barter
+    // window (barter.frm / trade.frm) — the trade panes are positioned for it.
+    gameDialogCoopDestroyDialogueWindow();
+    if (gameDialogCoopCreateBarterWindow() == -1) {
+        gameDialogCoopRecreateDialogueWindow();
+        gameDialogCoopShowDialogue();
         gMpDialog.hostBarterUiOpen = false;
         return;
     }
-    windowDrawBorder(win);
 
-    int focus = 0;
-    int selected = -1;
-    int scroll[4] = { 0, 0, 0, 0 };
-
-    bool running = true;
-    while (running) {
-        sharedFpsLimiter.mark();
-        int keyCode = inputGetInput();
-
-        if (keyCode == KEY_TAB) {
-            focus = (focus + 1) % 4;
-            selected = -1;
-        } else if (keyCode == KEY_ESCAPE || keyCode == KEY_LOWERCASE_T) {
-            running = false;
-        } else if (keyCode == KEY_ARROW_UP || keyCode == KEY_PAGE_UP) {
-            if (selected > 0) {
-                selected--;
-            } else if (scroll[focus] > 0) {
-                scroll[focus]--;
-            }
-        } else if (keyCode == KEY_ARROW_DOWN || keyCode == KEY_PAGE_DOWN) {
-            if (selected < MP_BARTER_ITEMS_PER_PAGE - 1) {
-                int count = mpDialogHostPaneCount(focus);
-                if (scroll[focus] + selected + 1 < count) {
-                    selected++;
-                }
-            } else if (scroll[focus] + MP_BARTER_ITEMS_PER_PAGE < mpDialogHostPaneCount(focus)) {
-                scroll[focus]++;
-            }
-        } else if (keyCode >= 49 && keyCode <= 57) {
-            selected = keyCode - 49;
-        } else if (keyCode == KEY_0) {
-            selected = 9;
-        } else if (keyCode == KEY_RETURN || keyCode == KEY_SPACE) {
-            if (selected >= 0) {
-                int absolute = scroll[focus] + selected;
-                if (absolute < mpDialogHostPaneCount(focus)) {
-                    mpDialogHostBarterMoveSelected(focus, absolute);
-                }
-            }
-        } else if (keyCode == KEY_LOWERCASE_M) {
-            if (mpDialogCountContainerItems(b->offerTable) > 0 || mpDialogCountContainerItems(b->requestTable) > 0) {
-                int rc = MpBarterAttemptTransaction(mpDialogPlayerAvatar(local), b->offerTable, gMpDialog.speaker, b->requestTable);
-                uint8_t msgId = rc == 0 ? 27 : 28;
-                debugFilePrint("MPBARTER commit (host) session=%u rc=%d", gMpDialog.sessionId, rc);
-                mpDialogSendBarterState(local, NET_BARTER_OP_COMMIT, rc == 0 ? 1 : 0, msgId);
-                mpDialogBroadcastBarterStateToBarterers();
-            }
-        }
-
-        // Draw.
-        windowFill(win, 1, 1, W - 2, H - 2, COLOR_BLACK);
-        int drawY = 6;
-        char line[192];
-        for (int pane = 0; pane < 4; pane++) {
-            const char* title = mpDialogBarterPaneTitle(pane);
-            windowDrawText(win, title, 0, MP_BARTER_PANE_X[pane], drawY, pane == focus ? COLOR_LIGHT_YELLOW : COLOR_WHITE);
-        }
-        drawY += 16;
-        for (int pane = 0; pane < 4; pane++) {
-            int lineY = drawY;
-            int count = mpDialogHostPaneCount(pane);
-            for (int i = 0; i < MP_BARTER_ITEMS_PER_PAGE; i++) {
-                int index = scroll[pane] + i;
-                if (index >= count) {
-                    break;
-                }
-                mpDialogHostPaneEntry(pane, index, line, sizeof(line));
-                char marker[2] = { ' ', '\0' };
-                if (pane == focus && i == selected) {
-                    marker[0] = '>';
-                }
-                snprintf(line + strlen(line), sizeof(line) - strlen(line), "%s", marker);
-                windowDrawText(win, line, 0, MP_BARTER_PANE_X[pane], lineY, COLOR_WHITE);
-                lineY += 12;
-                if (lineY > H - 30) {
-                    break;
-                }
-            }
-        }
-        snprintf(line, sizeof(line), "TAB focus  |  1-9/0 select  |  ENTER move  |  M trade  |  T/ESC end");
-        windowDrawText(win, line, 0, (W - fontGetStringWidth(line)) / 2, H - 20, COLOR_WHITE);
-
-        windowRefresh(win);
-        renderPresent();
-        sharedFpsLimiter.throttle();
-
-        // Combat or an interruption may be pending: abort the whole dialogue
-        // (and this barter) so MpTick never starts combat under the modal.
-        if (MpCombatIsActive() || gMpCombat.pendingStart) {
-            mpDialogHostAbort(NET_DIALOG_END_COMBAT);
-            running = false;
-            break;
-        }
-
-        // Keep the network alive and process other players' packets.
-        MpTick();
-        if (!gMpDialog.active) {
-            running = false;
-        }
+    // The vote overlay must not sit on top of the trade screen.
+    if (gMpDialog.hostVoteWindow != -1) {
+        windowHide(gMpDialog.hostVoteWindow);
     }
 
-    windowDestroy(win);
-    mpDialogBarterEnd(local);
+    debugFilePrint("MPBARTER trade screen open (host) session=%u", gMpDialog.sessionId);
+
+    // Base modifier only: the vanilla trade loop adds the speaker's reaction
+    // modifier itself (vanilla parity). The full modifier (base + reaction)
+    // is what the client receives in the state packet.
+    barterProcessUI(gameDialogGetWindow(), gMpDialog.speaker, b->offerTable, b->requestTable,
+        gameDialogGetBarterModifier());
+
+    if (gMpDialog.hostVoteWindow != -1) {
+        windowShow(gMpDialog.hostVoteWindow);
+    }
+    gameDialogCoopDestroyBarterWindow();
+    gameDialogCoopRecreateDialogueWindow();
+    gameDialogCoopShowDialogue();
     gMpDialog.hostBarterUiOpen = false;
+    debugFilePrint("MPBARTER trade screen closed (host) session=%u", gMpDialog.sessionId);
 }
 
 // ---------------------------------------------------------------------------
@@ -1779,7 +1934,9 @@ void MpDialogHostPump()
         int optionIndex = gMpDialog.resolvedOption;
         gMpDialog.resolvedOption = -1;
         if (optionIndex >= 0 && optionIndex < gMpDialog.optionCount) {
-            if (gameDialogChooseOption(optionIndex) == -1) {
+            int rc = gameDialogChooseOption(optionIndex);
+            debugFilePrint("MPDIALOG pump resolve session=%u option=%d rc=%d", gMpDialog.sessionId, optionIndex, rc);
+            if (rc == -1) {
                 gMpDialog.exitRequested = true;
             }
         } else {
@@ -1791,12 +1948,27 @@ void MpDialogHostPump()
         return;
     }
 
+    // Vote state changed: re-render the option texts (chooser names) and the
+    // local selection highlight.
+    if (gMpDialog.voteUiDirty && gMpDialog.hostParticipant) {
+        gMpDialog.voteUiDirty = false;
+        const char* texts[NET_DIALOG_MAX_OPTIONS];
+        int reactions[NET_DIALOG_MAX_OPTIONS];
+        int procs[NET_DIALOG_MAX_OPTIONS];
+        mpDialogHostBuildNodeTexts(texts, reactions, procs);
+        gameDialogCoopApplyNode(gMpDialog.replyText, reactions, texts, gMpDialog.optionCount, procs);
+    }
+
     mpDialogHostDrawOverlay();
 }
 
 bool MpDialogHostShouldExit()
 {
-    return gMpDialog.exitRequested;
+    // The modal closes when the session asked to end OR when the host stopped
+    // being a participant (ESC/0 mid-session): the director flow resumes and
+    // the session continues for the remaining participants.
+    return gMpDialog.exitRequested
+        || (gMpDialog.active && !gMpDialog.hostParticipant);
 }
 
 // ---------------------------------------------------------------------------
@@ -2025,11 +2197,173 @@ static void mpDialogClientReset()
     gMpDialogClient.window = -1;
 }
 
+// Clear a container (into a scratch box) and repopulate it from a state list.
+static void mpDialogClientBarterClear(Object* container)
+{
+    if (container == nullptr || container->data.inventory.length == 0) {
+        return;
+    }
+    Object* scratch = nullptr;
+    if (objectCreateWithFidPid(&scratch, -1, PROTO_ID_JESSE_CONTAINER) == -1) {
+        return;
+    }
+    itemMoveAll(container, scratch);
+    objectDestroy(scratch, nullptr);
+}
+
+static void mpDialogClientBarterPopulate(Object* container, const NetBarterItem* items, int count)
+{
+    if (container == nullptr) {
+        return;
+    }
+    mpDialogClientBarterClear(container);
+    for (int i = 0; i < count; i++) {
+        Object* item = nullptr;
+        if (objectCreateWithPid(&item, (int)items[i].pid) == -1) {
+            continue;
+        }
+        itemAdd(container, item, items[i].qty);
+    }
+}
+
+static Object* mpDialogClientBarterMirrorCreate()
+{
+    Object* obj = nullptr;
+    if (objectCreateWithFidPid(&obj, -1, PROTO_ID_JESSE_CONTAINER) == -1) {
+        return nullptr;
+    }
+    obj->flags |= (OBJECT_HIDDEN | OBJECT_NO_SAVE);
+    return obj;
+}
+
+// Rebuild the client's mirror tables from the authoritative BARTER_STATE.
+static void mpDialogClientBarterRebuildMirrors()
+{
+    Object* mirror = gMpDialogClient.speakerObjNetId != 0 ? MpFindObjByNetId(gMpDialogClient.speakerObjNetId) : nullptr;
+    if (mirror != nullptr) {
+        mpDialogClientBarterPopulate(mirror, gMpDialogClient.npcItems, gMpDialogClient.npcItemCount);
+    }
+    mpDialogClientBarterPopulate(gMpDialogClient.offerMirror, gMpDialogClient.offers, gMpDialogClient.offerCount);
+    mpDialogClientBarterPopulate(gMpDialogClient.requestMirror, gMpDialogClient.requests, gMpDialogClient.requestCount);
+}
+
+// ---------------------------------------------------------------------------
+// Client-side inventory reconciliation.
+//
+// The client's local barter moves are routed through the host (the vanilla
+// itemMoveForce is skipped), so the client's own gDude inventory NEVER
+// changes during a trade. The host is authoritative: it moves the real items
+// between the avatar, the offer table, the NPC and the request table, then
+// ships the resulting state. These helpers replay the authoritative outcome
+// onto the client's local inventory so nothing lingers or clones.
+// ---------------------------------------------------------------------------
+
+static void mpDialogClientRemoveFromDude(uint32_t pid, int qty)
+{
+    if (gDude == nullptr || qty <= 0) {
+        return;
+    }
+    Object* scratch = nullptr;
+    if (objectCreateWithFidPid(&scratch, -1, PROTO_ID_JESSE_CONTAINER) == -1) {
+        return;
+    }
+    Object* item = mpDialogFindItemByPid(gDude, pid);
+    if (item != nullptr) {
+        int have = itemGetQuantity(gDude, item);
+        if (qty > have) {
+            qty = have;
+        }
+        if (qty > 0) {
+            itemMoveForce(gDude, scratch, item, qty);
+        }
+    }
+    objectDestroy(scratch, nullptr);
+}
+
+static void mpDialogClientAddToDude(uint32_t pid, int qty)
+{
+    if (gDude == nullptr || qty <= 0) {
+        return;
+    }
+    Object* item = nullptr;
+    if (objectCreateWithPid(&item, (int)pid) == -1) {
+        return;
+    }
+    itemAdd(gDude, item, qty);
+}
+
+// A confirmed offer-table move changed the authoritative state: items added
+// to the offer left the player's inventory; items removed from the offer
+// returned to the player.
+static void mpDialogClientReconcileOfferDelta(const NetBarterItem* oldOffers, int oldCount,
+    const NetBarterItem* newOffers, int newCount)
+{
+    for (int i = 0; i < newCount; i++) {
+        int oldQty = 0;
+        for (int j = 0; j < oldCount; j++) {
+            if (oldOffers[j].pid == newOffers[i].pid) {
+                oldQty = oldOffers[j].qty;
+                break;
+            }
+        }
+        int delta = newOffers[i].qty - oldQty;
+        if (delta > 0) {
+            mpDialogClientRemoveFromDude(newOffers[i].pid, delta);
+        } else if (delta < 0) {
+            mpDialogClientAddToDude(newOffers[i].pid, -delta);
+        }
+    }
+    for (int j = 0; j < oldCount; j++) {
+        bool stillThere = false;
+        for (int i = 0; i < newCount; i++) {
+            if (newOffers[i].pid == oldOffers[j].pid) {
+                stillThere = true;
+                break;
+            }
+        }
+        if (!stillThere) {
+            mpDialogClientAddToDude(oldOffers[j].pid, oldOffers[j].qty);
+        }
+    }
+}
+
+// A successful commit moved the sold items (the pre-commit offer table) to
+// the NPC and the bought items (the pre-commit request table) to the player.
+// Replay both onto the local inventory.
+static void mpDialogClientReconcileCommit(const NetBarterItem* sold, int soldCount,
+    const NetBarterItem* bought, int boughtCount)
+{
+    for (int i = 0; i < soldCount; i++) {
+        mpDialogClientRemoveFromDude(sold[i].pid, sold[i].qty);
+    }
+    for (int i = 0; i < boughtCount; i++) {
+        mpDialogClientAddToDude(bought[i].pid, bought[i].qty);
+    }
+}
+
 static void mpDialogClientCloseWindow()
 {
+    if (gMpDialogClient.tradeOpen) {
+        // The vanilla trade loop is still driving input; it cannot be
+        // interrupted from here — the session end path (host END packet or
+        // local END) clears tradeOpen in mpDialogClientUpdateBarterUi.
+        // Destroy the mirrors defensively so nothing leaks.
+        gMpDialogClient.tradeOpen = false;
+    }
+    if (gMpDialogClient.offerMirror != nullptr) {
+        objectDestroy(gMpDialogClient.offerMirror, nullptr);
+        gMpDialogClient.offerMirror = nullptr;
+    }
+    if (gMpDialogClient.requestMirror != nullptr) {
+        objectDestroy(gMpDialogClient.requestMirror, nullptr);
+        gMpDialogClient.requestMirror = nullptr;
+    }
     if (gMpDialogClient.window != -1) {
         windowDestroy(gMpDialogClient.window);
         gMpDialogClient.window = -1;
+    }
+    if (gameDialogCoopIsOpen()) {
+        gameDialogCoopClose();
     }
     gMpDialogClient.modalOpen = false;
     gMpDialogClient.uiPending = false;
@@ -2045,6 +2379,106 @@ static bool mpDialogClientIsParticipant()
     return false;
 }
 
+// Append the chooser names to an option text: "Option text (Name1, Name2)".
+// `selections` is indexed by netId - 1 (int8_t, -1 = none).
+static void mpDialogFormatOptionWithChoosers(char* out, size_t outSize, const char* baseText,
+    const uint8_t* participants, int participantCount, const int8_t* selections, int optionIndex)
+{
+    snprintf(out, outSize, "%s", baseText);
+    char names[256] = "";
+    size_t written = 0;
+    for (int i = 0; i < participantCount; i++) {
+        uint8_t netId = participants[i];
+        if (netId < 1 || netId > NET_MAX_PLAYERS) {
+            continue;
+        }
+        if (selections[netId - 1] != optionIndex) {
+            continue;
+        }
+        const char* name = gMpSession.players[netId - 1].name;
+        if (name == nullptr || name[0] == '\0') {
+            // The client's own slot name is never filled locally; fall back to
+            // the local avatar's name so the client sees its own chooser entry.
+            if (netId == gMpSession.localNetId) {
+                name = critterGetName(gDude);
+            }
+        }
+        if (name == nullptr || name[0] == '\0') {
+            continue;
+        }
+        size_t nameLen = strlen(name);
+        if (written + nameLen + (written > 0 ? 2 : 0) >= sizeof(names)) {
+            break;
+        }
+        if (written > 0) {
+            names[written++] = ',';
+            names[written++] = ' ';
+        }
+        memcpy(names + written, name, nameLen);
+        written += nameLen;
+        names[written] = '\0';
+    }
+    size_t used = strlen(out);
+    size_t room = outSize - used - 1;
+    if (written > 0 && room > written + 3) {
+        out[used++] = ' ';
+        out[used++] = '(';
+        memcpy(out + used, names, written);
+        used += written;
+        out[used++] = ')';
+        out[used] = '\0';
+        room = outSize - used - 1;
+    }
+
+    // Always mark the local player's own selection with a visible "*" — the
+    // option color highlight is nice to have, this is the guaranteed signal.
+    bool localChose = gMpSession.localNetId >= 1
+        && gMpSession.localNetId <= NET_MAX_PLAYERS
+        && selections[gMpSession.localNetId - 1] == optionIndex;
+    if (localChose && room >= 3) {
+        out[used++] = ' ';
+        out[used++] = '*';
+        out[used] = '\0';
+    }
+}
+
+// Build the current node's option texts with the chooser names appended, for
+// rendering into the vanilla dialogue windows (host side).
+static void mpDialogHostBuildNodeTexts(const char** texts, int* reactions, int* procs)
+{
+    static char formatted[NET_DIALOG_MAX_OPTIONS][NET_DIALOG_OPTION_TEXT_MAX + 64];
+    int8_t selections[NET_MAX_PLAYERS];
+    for (int i = 0; i < NET_MAX_PLAYERS; i++) {
+        selections[i] = gMpDialog.voters[i].selected;
+    }
+    for (int i = 0; i < gMpDialog.optionCount; i++) {
+        mpDialogFormatOptionWithChoosers(formatted[i], sizeof(formatted[i]), gMpDialog.options[i].text,
+            gMpDialog.participants, gMpDialog.participantCount, selections, i);
+        texts[i] = formatted[i];
+        reactions[i] = gMpDialog.options[i].reaction;
+        procs[i] = gMpDialog.options[i].proc;
+    }
+}
+
+// Push the stored client node into the vanilla dialogue windows.
+static void mpDialogClientApplyNodeToVanilla()
+{
+    if (gMpDialogClient.optionCount <= 0) {
+        return;
+    }
+    const char* texts[NET_DIALOG_MAX_OPTIONS];
+    int reactions[NET_DIALOG_MAX_OPTIONS];
+    static char formatted[NET_DIALOG_MAX_OPTIONS][NET_DIALOG_OPTION_TEXT_MAX + 64];
+    for (int i = 0; i < gMpDialogClient.optionCount; i++) {
+        mpDialogFormatOptionWithChoosers(formatted[i], sizeof(formatted[i]), gMpDialogClient.options[i].text,
+            gMpDialogClient.participants, gMpDialogClient.participantCount, gMpDialogClient.selections, i);
+        texts[i] = formatted[i];
+        reactions[i] = gMpDialogClient.options[i].reaction;
+    }
+    // The client never runs reply procs — pass nullptr.
+    gameDialogCoopApplyNode(gMpDialogClient.replyText, reactions, texts, gMpDialogClient.optionCount, nullptr);
+}
+
 static void mpDialogClientApplyNodeBody(const std::string& body)
 {
     size_t offset = 0;
@@ -2054,6 +2488,16 @@ static void mpDialogClientApplyNodeBody(const std::string& body)
         }
         *out = (uint8_t)body[offset];
         offset += 1;
+        return true;
+    };
+    auto read32 = [&body, &offset](int* out) {
+        if (offset + 4 > body.size()) {
+            return false;
+        }
+        int32_t v;
+        memcpy(&v, body.data() + offset, sizeof(v));
+        *out = v;
+        offset += 4;
         return true;
     };
     auto read16 = [&body, &offset](int* out) {
@@ -2077,10 +2521,20 @@ static void mpDialogClientApplyNodeBody(const std::string& body)
     };
 
     int version;
-    if (!read8(&version) || version != 1) {
+    if (!read8(&version) || version != 2) {
         debugFilePrint("MPDIALOG client state rejected (bad version)");
         return;
     }
+    int headFid;
+    if (!read32(&headFid)) {
+        return;
+    }
+    int reaction;
+    if (!read8(&reaction)) {
+        return;
+    }
+    gMpDialogClient.headFid = headFid;
+    gMpDialogClient.reaction = (int8_t)reaction;
     int replyLen;
     if (!read16(&replyLen) || !readStr(gMpDialogClient.replyText, sizeof(gMpDialogClient.replyText), replyLen)) {
         return;
@@ -2106,6 +2560,13 @@ static void mpDialogClientApplyNodeBody(const std::string& body)
     gMpDialogClient.timerActive = false;
     for (int i = 0; i < NET_MAX_PLAYERS; i++) {
         gMpDialogClient.selections[i] = -1;
+    }
+    gMpDialogClient.nodeApplied = true;
+    // Live-render into the vanilla windows when they are up and the player is
+    // not bartering (during barter the screen is hidden; it is re-applied on
+    // barter end).
+    if (!gMpDialogClient.barterActive && gameDialogCoopIsOpen()) {
+        mpDialogClientApplyNodeToVanilla();
     }
     debugFilePrint("MPDIALOG client node session=%u node=%u options=%d", gMpDialogClient.sessionId, gMpDialogClient.nodeSeq, gMpDialogClient.optionCount);
 }
@@ -2224,6 +2685,11 @@ void MpDialogOnClientPacket(uint8_t packetType, const void* data, size_t dataLen
             gMpDialogClient.suspended[e->netId - 1] = (e->flags & 1) != 0;
         }
         debugFilePrint("MPDIALOG client vote session=%u node=%u resolved=%d timer=%d", p->sessionId, p->nodeSeq, p->resolvedOption, p->timerActive);
+        // The chooser names and the local highlight changed: re-render the
+        // option texts (no-op while bartering — the trade screen hides them).
+        if (!gMpDialogClient.barterActive && gameDialogCoopIsOpen() && gMpDialogClient.nodeApplied) {
+            mpDialogClientApplyNodeToVanilla();
+        }
         break;
     }
     case NET_PKT_DIALOG_TRANSCRIPT: {
@@ -2324,6 +2790,17 @@ void MpDialogOnClientPacket(uint8_t packetType, const void* data, size_t dataLen
             || p->requestCount > NET_BARTER_MAX_ITEMS) {
             return;
         }
+        // Snapshot the pre-state offer/request tables: a confirmed move or
+        // commit needs them to replay the authoritative outcome onto the
+        // local inventory (the local vanilla moves are routed through the
+        // host and never touch gDude).
+        NetBarterItem oldOffers[NET_BARTER_MAX_ITEMS];
+        NetBarterItem oldRequests[NET_BARTER_MAX_ITEMS];
+        int oldOfferCount = gMpDialogClient.offerCount;
+        int oldRequestCount = gMpDialogClient.requestCount;
+        memcpy(oldOffers, gMpDialogClient.offers, sizeof(oldOffers));
+        memcpy(oldRequests, gMpDialogClient.requests, sizeof(oldRequests));
+
         gMpDialogClient.npcItemCount = std::min((int)p->npcItemCount, NET_BARTER_MAX_ITEMS);
         memcpy(gMpDialogClient.npcItems, items, gMpDialogClient.npcItemCount * sizeof(NetBarterItem));
         items += p->npcItemCount;
@@ -2336,14 +2813,24 @@ void MpDialogOnClientPacket(uint8_t packetType, const void* data, size_t dataLen
         gMpDialogClient.lastOp = p->lastOp;
         gMpDialogClient.lastOk = p->lastOk;
         gMpDialogClient.lastMsgId = p->lastMsgId;
+        gMpDialogClient.barterMod = p->barterMod;
+
+        // Replay the authoritative outcome onto the local inventory.
+        if (gMpDialogClient.tradeOpen && p->lastOk == 1) {
+            if (p->lastOp == NET_BARTER_OP_COMMIT) {
+                mpDialogClientReconcileCommit(oldOffers, oldOfferCount, oldRequests, oldRequestCount);
+                debugFilePrint("MPBARTER client commit reconcile sold=%d bought=%d", oldOfferCount, oldRequestCount);
+            } else if (p->lastOp == NET_BARTER_OP_MOVE) {
+                mpDialogClientReconcileOfferDelta(oldOffers, oldOfferCount,
+                    gMpDialogClient.offers, gMpDialogClient.offerCount);
+            }
+        }
 
         if (p->lastOp == NET_BARTER_OP_START && p->lastOk == 1) {
             gMpDialogClient.barterActive = true;
             debugFilePrint("MPDIALOG client barter open session=%u", p->sessionId);
         } else if (p->lastOp == NET_BARTER_OP_END) {
             gMpDialogClient.barterActive = false;
-            gMpDialogClient.barterFocus = 0;
-            gMpDialogClient.barterSelected = -1;
             debugFilePrint("MPDIALOG client barter closed session=%u", p->sessionId);
         }
         if (p->lastMsgId != 0) {
@@ -2351,6 +2838,17 @@ void MpDialogOnClientPacket(uint8_t packetType, const void* data, size_t dataLen
             if (msg[0] != '\0') {
                 displayMonitorAddMessage(msg);
             }
+        }
+
+        // Live-rebuild the trade-screen mirrors when the vanilla trade
+        // screen is open; the vanilla loop's per-frame tick re-renders.
+        debugFilePrint("MPBARTER client state op=%u ok=%u msg=%u npc=%u offer=%u req=%u tradeOpen=%d",
+            p->lastOp, p->lastOk, p->lastMsgId, gMpDialogClient.npcItemCount,
+            gMpDialogClient.offerCount, gMpDialogClient.requestCount, (int)gMpDialogClient.tradeOpen);
+        if (gMpDialogClient.tradeOpen) {
+            mpDialogClientBarterRebuildMirrors();
+            gMpDialogClient.barterDirty = true;
+            debugFilePrint("MPBARTER client mirrors rebuilt (dirty)");
         }
         break;
     }
@@ -2404,349 +2902,178 @@ static void mpDialogClientSendBarter(uint8_t op, uint8_t target, uint32_t pid, i
     NetSendPacket(gMpSession.hostPeer, NET_CHANNEL_RELIABLE, NET_PKT_BARTER_CMD, &p, sizeof(p));
 }
 
-// Client-side pane item counts for the barter layout.
-static int mpDialogClientPaneCount(int pane)
-{
-    switch (pane) {
-    case 0:
-        return gDude->data.inventory.length;
-    case 1:
-        return gMpDialogClient.offerCount;
-    case 2:
-        return gMpDialogClient.requestCount;
-    default:
-        return gMpDialogClient.npcItemCount;
-    }
-}
-
-// Greedy word wrap into at most maxLines lines.
-static int mpDialogWrapText(const char* in, int maxWidth, char* out, size_t outSize, int maxLines)
-{
-    char line[512];
-    int lineCount = 0;
-    size_t written = 0;
-    const char* start = in;
-    while (*start != '\0' && lineCount < maxLines) {
-        // Find the longest prefix that fits.
-        int len = 0;
-        int lastSpace = -1;
-        while (start[len] != '\0') {
-            if (start[len] == ' ') {
-                lastSpace = len;
-            }
-            char tmp[512];
-            strncpy(tmp, start, len + 1);
-            tmp[len + 1] = '\0';
-            if (fontGetStringWidth(tmp) > maxWidth) {
-                break;
-            }
-            len++;
-        }
-        if (len == 0) {
-            len = 1;
-        }
-        int end = len;
-        if (start[end] != '\0' && lastSpace > 0 && lastSpace < len) {
-            end = lastSpace;
-        }
-        snprintf(line, sizeof(line), "%.*s", end, start);
-        size_t lineLen = strlen(line);
-        if (written + lineLen + 1 < outSize) {
-            if (written > 0) {
-                out[written++] = '\n';
-            }
-            memcpy(out + written, line, lineLen);
-            written += lineLen;
-        }
-        start += end;
-        while (*start == ' ') {
-            start++;
-        }
-        lineCount++;
-    }
-    out[written] = '\0';
-    return lineCount;
-}
-
 // Draws a pane of pid-based entries (client offer/request/npc lists).
-static void mpDialogDrawPidPane(int win, int x, int y, const NetBarterItem* items, int count, int scroll, int focus, int selected)
-{
-    for (int i = 0; i < MP_BARTER_ITEMS_PER_PAGE; i++) {
-        int index = scroll + i;
-        if (index >= count) {
-            break;
-        }
-        const char* name = protoGetName((int)items[index].pid);
-        if (name == nullptr) {
-            name = "?";
-        }
-        char line[128];
-        snprintf(line, sizeof(line), "%s x%d", name, items[index].qty);
-        if (focus == 2 || focus == 3) {
-            snprintf(line + strlen(line), sizeof(line) - strlen(line), " (%d)", items[index].unitValue);
-        }
-        if (focus && i == selected) {
-            snprintf(line + strlen(line), sizeof(line) - strlen(line), " >");
-        }
-        windowDrawText(win, line, 0, x, y + i * 12, COLOR_WHITE);
-    }
-}
-
 static void mpDialogDrawClientWindow()
 {
+    // Barter: the vanilla trade screen renders itself (mirrors + refresh);
+    // nothing to draw here. Dialogue: the participant panel.
+    if (gMpDialogClient.barterActive) {
+        return;
+    }
+
+    // ---- Participant panel (top-right, like the host's overlay). ----
+    // The vanilla dialogue windows render the actual dialogue screen.
     int win = gMpDialogClient.window;
     if (win == -1) {
         return;
     }
 
-    constexpr int W = MP_DIALOG_WINDOW_W;
-    constexpr int H = MP_DIALOG_WINDOW_H;
-    windowFill(win, 1, 1, W - 2, H - 2, COLOR_BLACK);
-
     char line[512];
 
-    if (gMpDialogClient.barterActive) {
-        // ---- Barter layout ----
-        int drawY = 6;
-        for (int pane = 0; pane < 4; pane++) {
-            windowDrawText(win, mpDialogBarterPaneTitle(pane), 0, MP_BARTER_PANE_X[pane], drawY,
-                pane == gMpDialogClient.barterFocus ? COLOR_LIGHT_YELLOW : COLOR_WHITE);
-        }
-        drawY += 16;
+    constexpr int W = 240;
+    constexpr int H = 150;
+    windowFill(win, 1, 1, W - 2, H - 2, COLOR_BLACK);
 
-        // MY items (real client inventory).
-        int lineY = drawY;
-        Inventory* inventory = &gDude->data.inventory;
-        int scroll = gMpDialogClient.barterScroll[0];
-        for (int i = 0; i < MP_BARTER_ITEMS_PER_PAGE; i++) {
-            int index = scroll + i;
-            if (index >= inventory->length) {
-                break;
-            }
-            InventoryItem* entry = &inventory->items[index];
-            snprintf(line, sizeof(line), "%s x%d", itemGetName(entry->item), entry->quantity);
-            if (gMpDialogClient.barterFocus == 0 && i == gMpDialogClient.barterSelected) {
-                snprintf(line + strlen(line), sizeof(line) - strlen(line), " >");
-            }
-            windowDrawText(win, line, 0, MP_BARTER_PANE_X[0], lineY, COLOR_WHITE);
-            lineY += 12;
-        }
+    int y = 4;
+    const char* title = "DIALOGUE";
+    windowDrawText(win, title, 0, (W - fontGetStringWidth(title)) / 2, y, COLOR_WHITE);
+    y += 14;
 
-        mpDialogDrawPidPane(win, MP_BARTER_PANE_X[1], drawY, gMpDialogClient.offers, gMpDialogClient.offerCount,
-            gMpDialogClient.barterScroll[1], 1, gMpDialogClient.barterSelected);
-        mpDialogDrawPidPane(win, MP_BARTER_PANE_X[2], drawY, gMpDialogClient.requests, gMpDialogClient.requestCount,
-            gMpDialogClient.barterScroll[2], 2, gMpDialogClient.barterSelected);
-        mpDialogDrawPidPane(win, MP_BARTER_PANE_X[3], drawY, gMpDialogClient.npcItems, gMpDialogClient.npcItemCount,
-            gMpDialogClient.barterScroll[3], 3, gMpDialogClient.barterSelected);
-
-        // Totals.
-        int offerValue = 0;
-        int requestValue = 0;
-        for (int i = 0; i < gMpDialogClient.offerCount; i++) {
-            offerValue += gMpDialogClient.offers[i].unitValue * gMpDialogClient.offers[i].qty;
+    for (int i = 0; i < gMpDialogClient.participantCount && i < 6; i++) {
+        uint8_t netId = gMpDialogClient.participants[i];
+        if (netId < 1 || netId > NET_MAX_PLAYERS) {
+            continue;
         }
-        for (int i = 0; i < gMpDialogClient.requestCount; i++) {
-            requestValue += gMpDialogClient.requests[i].unitValue * gMpDialogClient.requests[i].qty;
-        }
-        snprintf(line, sizeof(line), "Offer: %d caps    Request: %d caps", offerValue, requestValue);
-        windowDrawText(win, line, 0, 8, H - 36, COLOR_WHITE);
-        snprintf(line, sizeof(line), "TAB focus | 1-9/0 select | ENTER move | M trade | T/ESC end");
-        windowDrawText(win, line, 0, (W - fontGetStringWidth(line)) / 2, H - 20, COLOR_WHITE);
-    } else {
-        // ---- Dialogue layout ----
-        const char* speakerName = "NPC";
-        Object* mirror = gMpDialogClient.speakerObjNetId != 0 ? MpFindObjByNetId(gMpDialogClient.speakerObjNetId) : nullptr;
-        if (mirror != nullptr) {
-            speakerName = critterGetName(mirror);
-            if (speakerName == nullptr || speakerName[0] == '\0') {
-                speakerName = "NPC";
-            }
-        }
-        snprintf(line, sizeof(line), "DIALOGUE WITH %s", speakerName);
-        windowDrawText(win, line, 0, (W - fontGetStringWidth(line)) / 2, 4, COLOR_WHITE);
-
-        // Reply text (wrapped).
-        char wrapped[512];
-        int lines = mpDialogWrapText(gMpDialogClient.replyText, 360, wrapped, sizeof(wrapped), 6);
-        int drawY = 22;
-        char* lineStart = wrapped;
-        for (int i = 0; i < lines; i++) {
-            char* newline = strchr(lineStart, '\n');
-            if (newline != nullptr) {
-                *newline = '\0';
-            }
-            windowDrawText(win, lineStart, 0, 8, drawY, COLOR_WHITE);
-            drawY += 14;
-            if (newline != nullptr) {
-                lineStart = newline + 1;
-            } else {
-                break;
-            }
-        }
-        drawY += 8;
-
-        // Options (paged, 9 per page).
-        int pageSize = 9;
-        int pageCount = (gMpDialogClient.optionCount + pageSize - 1) / pageSize;
-        if (gMpDialogClient.pageIndex >= pageCount) {
-            gMpDialogClient.pageIndex = 0;
-        }
-        for (int i = 0; i < pageSize; i++) {
-            int index = gMpDialogClient.pageIndex * pageSize + i;
-            if (index >= gMpDialogClient.optionCount) {
-                break;
-            }
-            int8_t selection = gMpDialogClient.selections[gMpSession.localNetId - 1];
-            char marker = ' ';
-            if (selection == index) {
-                marker = '*';
-            }
-            snprintf(line, sizeof(line), "%d. %s %c", i + 1, gMpDialogClient.options[index].text, marker);
-            windowDrawText(win, line, 0, 8, drawY, COLOR_WHITE);
-            drawY += 14;
-        }
-        if (pageCount > 1) {
-            snprintf(line, sizeof(line), "[Page %d/%d - arrows]", gMpDialogClient.pageIndex + 1, pageCount);
-            windowDrawText(win, line, 0, 8, drawY, COLOR_LIGHT_YELLOW);
-            drawY += 14;
-        }
-        drawY += 4;
-
-        // Participants + votes (right column).
-        int colX = 420;
-        windowDrawText(win, "PARTICIPANTS", 0, colX, 22, COLOR_WHITE);
-        int colY = 36;
-        for (int i = 0; i < gMpDialogClient.participantCount && colY < H - 40; i++) {
-            uint8_t netId = gMpDialogClient.participants[i];
-            if (netId < 1 || netId > NET_MAX_PLAYERS) {
-                continue;
-            }
             const char* name = gMpSession.players[netId - 1].name;
             if (gMpDialogClient.suspended[netId - 1]) {
-                snprintf(line, sizeof(line), "%s: barter", name);
-            } else if (gMpDialogClient.selections[netId - 1] >= 0) {
-                snprintf(line, sizeof(line), "%s: [%d]", name, gMpDialogClient.selections[netId - 1] + 1);
+                snprintf(line, sizeof(line), "%s (barter)", name);
             } else {
-                snprintf(line, sizeof(line), "%s: -", name);
+                snprintf(line, sizeof(line), "%s", name);
             }
             if (netId == gMpDialogClient.initiatorNetId) {
                 strncat(line, " *", sizeof(line) - strlen(line) - 1);
             }
-            windowDrawText(win, line, 0, colX, colY, COLOR_WHITE);
-            colY += 13;
-        }
-        if (gMpDialogClient.timerActive) {
-            uint32_t remaining = gMpDialogClient.timerEndTick > getTicks() ? gMpDialogClient.timerEndTick - getTicks() : 0;
-            snprintf(line, sizeof(line), "Majority in %d s", (int)(remaining / 1000) + 1);
-            windowDrawText(win, line, 0, colX, colY, COLOR_LIGHT_YELLOW);
-        }
-
-        snprintf(line, sizeof(line), "1-9 choose | 0/ESC leave | B barter | arrows page");
-        windowDrawText(win, line, 0, (W - fontGetStringWidth(line)) / 2, H - 20, COLOR_WHITE);
+            windowDrawText(win, line, 0, 8, y, COLOR_WHITE);
+            y += 13;
     }
+
+    if (gMpDialogClient.timerActive) {
+        uint32_t remaining = gMpDialogClient.timerEndTick > getTicks() ? gMpDialogClient.timerEndTick - getTicks() : 0;
+        snprintf(line, sizeof(line), "Majority in %d s", (int)(remaining / 1000) + 1);
+        windowDrawText(win, line, 0, 8, y, COLOR_LIGHT_YELLOW);
+        y += 13;
+    }
+
+    snprintf(line, sizeof(line), "1-9 choose | 0/ESC leave | B barter");
+    windowDrawText(win, line, 0, 8, H - 16, COLOR_WHITE);
 
     windowRefresh(win);
 }
 
-static void mpDialogClientHandleBarterKey(int keyCode)
+// Open/close the vanilla trade screen around the vanilla dialogue screen.
+// While open, the REAL vanilla trade loop (barterProcessUI) drives input;
+// its co-op hooks pump the network, route M/T/ESC and slot clicks through
+// the host, and rebuild the mirrors as authoritative state arrives.
+static void mpDialogClientUpdateBarterUi()
 {
-    bool sent = false;
-    switch (keyCode) {
-    case KEY_TAB:
-        gMpDialogClient.barterFocus = (gMpDialogClient.barterFocus + 1) % 4;
-        gMpDialogClient.barterSelected = -1;
-        break;
-    case KEY_ESCAPE:
-    case KEY_LOWERCASE_T:
-        mpDialogClientSendBarter(NET_BARTER_OP_END, 0, 0, 0);
-        gMpDialogClient.barterActive = false;
-        gMpDialogClient.barterFocus = 0;
-        gMpDialogClient.barterSelected = -1;
-        break;
-    case KEY_ARROW_UP:
-    case KEY_PAGE_UP:
-        if (gMpDialogClient.barterSelected > 0) {
-            gMpDialogClient.barterSelected--;
-        } else if (gMpDialogClient.barterScroll[gMpDialogClient.barterFocus] > 0) {
-            gMpDialogClient.barterScroll[gMpDialogClient.barterFocus]--;
+    if (gMpDialogClient.barterActive && !gMpDialogClient.tradeOpen) {
+        Object* mirror = gMpDialogClient.speakerObjNetId != 0 ? MpFindObjByNetId(gMpDialogClient.speakerObjNetId) : nullptr;
+        if (mirror == nullptr) {
+            debugFilePrint("MPDIALOG client trade open abort: no speaker mirror");
+            mpDialogClientSendBarter(NET_BARTER_OP_END, 0, 0, 0);
+            gMpDialogClient.barterActive = false;
+            return;
         }
-        break;
-    case KEY_ARROW_DOWN:
-    case KEY_PAGE_DOWN: {
-        int count = mpDialogClientPaneCount(gMpDialogClient.barterFocus);
-        if (gMpDialogClient.barterSelected < MP_BARTER_ITEMS_PER_PAGE - 1) {
-            if (gMpDialogClient.barterScroll[gMpDialogClient.barterFocus] + gMpDialogClient.barterSelected + 1 < count) {
-                gMpDialogClient.barterSelected++;
+        gMpDialogClient.offerMirror = mpDialogClientBarterMirrorCreate();
+        gMpDialogClient.requestMirror = mpDialogClientBarterMirrorCreate();
+        if (gMpDialogClient.offerMirror == nullptr || gMpDialogClient.requestMirror == nullptr) {
+            if (gMpDialogClient.offerMirror != nullptr) {
+                objectDestroy(gMpDialogClient.offerMirror, nullptr);
             }
-        } else if (gMpDialogClient.barterScroll[gMpDialogClient.barterFocus] + MP_BARTER_ITEMS_PER_PAGE < count) {
-            gMpDialogClient.barterScroll[gMpDialogClient.barterFocus]++;
+            if (gMpDialogClient.requestMirror != nullptr) {
+                objectDestroy(gMpDialogClient.requestMirror, nullptr);
+            }
+            gMpDialogClient.offerMirror = nullptr;
+            gMpDialogClient.requestMirror = nullptr;
+            mpDialogClientSendBarter(NET_BARTER_OP_END, 0, 0, 0);
+            gMpDialogClient.barterActive = false;
+            return;
         }
-        break;
-    }
-    case KEY_RETURN:
-    case KEY_SPACE:
-        if (gMpDialogClient.barterSelected >= 0) {
-            int absolute = gMpDialogClient.barterScroll[gMpDialogClient.barterFocus] + gMpDialogClient.barterSelected;
-            int focus = gMpDialogClient.barterFocus;
-            if (focus == 0) {
-                if (absolute < gDude->data.inventory.length) {
-                    uint32_t pid = (uint32_t)gDude->data.inventory.items[absolute].item->pid;
-                    int qty = gDude->data.inventory.items[absolute].quantity;
-                    mpDialogClientSendBarter(NET_BARTER_OP_MOVE, 1, pid, qty);
-                    sent = true;
-                }
-            } else if (focus == 1) {
-                if (absolute < gMpDialogClient.offerCount) {
-                    mpDialogClientSendBarter(NET_BARTER_OP_MOVE, 1, gMpDialogClient.offers[absolute].pid, -gMpDialogClient.offers[absolute].qty);
-                    sent = true;
-                }
-            } else if (focus == 2) {
-                if (absolute < gMpDialogClient.requestCount) {
-                    mpDialogClientSendBarter(NET_BARTER_OP_MOVE, 2, gMpDialogClient.requests[absolute].pid, -gMpDialogClient.requests[absolute].qty);
-                    sent = true;
-                }
-            } else {
-                if (absolute < gMpDialogClient.npcItemCount) {
-                    mpDialogClientSendBarter(NET_BARTER_OP_MOVE, 2, gMpDialogClient.npcItems[absolute].pid, gMpDialogClient.npcItems[absolute].qty);
-                    sent = true;
-                }
-            }
-            if (sent) {
-                // Pessimistic local echo: mark the move as pending by clearing
-                // the selection; the authoritative state refresh follows.
-                gMpDialogClient.barterSelected = -1;
-            }
+        mpDialogClientBarterRebuildMirrors();
+        gameDialogCoopHideDialogue();
+        // Vanilla parity: swap the dialogue window for the barter window.
+        gameDialogCoopDestroyDialogueWindow();
+        if (gameDialogCoopCreateBarterWindow() == -1) {
+            gameDialogCoopRecreateDialogueWindow();
+            gameDialogCoopShowDialogue();
+            objectDestroy(gMpDialogClient.offerMirror, nullptr);
+            objectDestroy(gMpDialogClient.requestMirror, nullptr);
+            gMpDialogClient.offerMirror = nullptr;
+            gMpDialogClient.requestMirror = nullptr;
+            mpDialogClientSendBarter(NET_BARTER_OP_END, 0, 0, 0);
+            gMpDialogClient.barterActive = false;
+            debugFilePrint("MPDIALOG client barter window create failed");
+            return;
         }
-        break;
-    case KEY_LOWERCASE_M:
-        mpDialogClientSendBarter(NET_BARTER_OP_COMMIT, 0, 0, 0);
-        break;
-    default:
-        break;
+        // The participant panel must not sit on top of the trade screen.
+        if (gMpDialogClient.window != -1) {
+            windowHide(gMpDialogClient.window);
+        }
+        gMpDialogClient.tradeOpen = true;
+        debugFilePrint("MPDIALOG client trade screen open session=%u", gMpDialogClient.sessionId);
+
+        // Blocking: the vanilla trade loop (co-op hooks inside). Returns when
+        // the session ended (T/ESC, host END, abort).
+        barterProcessUI(gameDialogGetWindow(), mirror, gMpDialogClient.offerMirror,
+            gMpDialogClient.requestMirror, gMpDialogClient.barterMod);
+
+        gMpDialogClient.tradeOpen = false;
+        if (gMpDialogClient.offerMirror != nullptr) {
+            objectDestroy(gMpDialogClient.offerMirror, nullptr);
+            gMpDialogClient.offerMirror = nullptr;
+        }
+        if (gMpDialogClient.requestMirror != nullptr) {
+            objectDestroy(gMpDialogClient.requestMirror, nullptr);
+            gMpDialogClient.requestMirror = nullptr;
+        }
+        gameDialogCoopDestroyBarterWindow();
+        gameDialogCoopRecreateDialogueWindow();
+        gameDialogCoopShowDialogue();
+        if (gMpDialogClient.window != -1) {
+            windowShow(gMpDialogClient.window);
+        }
+        // The dialogue may have advanced while bartering: re-render the
+        // current node into the restored vanilla windows.
+        if (gMpDialogClient.nodeApplied) {
+            mpDialogClientApplyNodeToVanilla();
+        }
+        debugFilePrint("MPDIALOG client trade screen closed session=%u", gMpDialogClient.sessionId);
     }
 }
 
-// Blocking client modal (vote-modal pattern). Runs from MpTick top level.
 static void mpDialogClientRunModal()
 {
     gMpDialogClient.modalOpen = true;
     gMpDialogClient.uiPending = false;
-    gMpDialogClient.pageIndex = 0;
-    gMpDialogClient.barterFocus = 0;
-    gMpDialogClient.barterSelected = -1;
     gMpModalActive = true;
 
-    constexpr int W = MP_DIALOG_WINDOW_W;
-    constexpr int H = MP_DIALOG_WINDOW_H;
-    int x = (screenGetWidth() - W) / 2;
-    int y = (screenGetHeight() - H) / 2 - 30;
-    int win = windowCreate(x, y, W, H, COLOR_BLACK, WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
-    if (win == -1) {
+    // Open the vanilla-style dialogue screen (head + reply + options).
+    Object* mirror = gMpDialogClient.speakerObjNetId != 0 ? MpFindObjByNetId(gMpDialogClient.speakerObjNetId) : nullptr;
+    if (mirror == nullptr) {
+        debugFilePrint("MPDIALOG client modal abort: no speaker mirror netId=%u", gMpDialogClient.speakerObjNetId);
         gMpDialogClient.modalOpen = false;
+        gMpModalActive = false;
         return;
     }
-    windowDrawBorder(win);
-    gMpDialogClient.window = win;
+    gameDialogCoopOpen(gMpDialogClient.headFid, gMpDialogClient.reaction, mirror);
+    if (gMpDialogClient.nodeApplied) {
+        mpDialogClientApplyNodeToVanilla();
+    }
+
+    // Participant panel (top-right, matching the host overlay).
+    constexpr int PW = 240;
+    constexpr int PH = 150;
+    int px = screenGetWidth() - PW - 8;
+    int py = 8;
+    int panel = windowCreate(px, py, PW, PH, COLOR_BLACK, WINDOW_MOVE_ON_TOP);
+    if (panel == -1) {
+        gameDialogCoopClose();
+        gMpDialogClient.modalOpen = false;
+        gMpModalActive = false;
+        return;
+    }
+    windowDrawBorder(panel);
+    gMpDialogClient.window = panel;
 
     debugFilePrint("MPDIALOG client modal open session=%u", gMpDialogClient.sessionId);
 
@@ -2754,28 +3081,27 @@ static void mpDialogClientRunModal()
         sharedFpsLimiter.mark();
         int keyCode = inputGetInput();
 
-        if (gMpDialogClient.barterActive) {
-            mpDialogClientHandleBarterKey(keyCode);
-        } else {
-            if (keyCode >= 49 && keyCode <= 57) {
-                int index = gMpDialogClient.pageIndex * 9 + (keyCode - 49);
+        // While bartering, the vanilla trade loop (inside
+        // mpDialogClientUpdateBarterUi) owns all input.
+        if (!gMpDialogClient.barterActive) {
+            if (keyCode >= 1200 && keyCode <= 1250) {
+                // Vanilla option-button hover highlight.
+                gameDialogCoopOptionHover(keyCode - 1200);
+            } else if (keyCode >= 1300 && keyCode <= 1330) {
+                gameDialogCoopOptionHoverExit(keyCode - 1300);
+            } else if (keyCode >= 49 && keyCode <= 57) {
+                int index = keyCode - 49;
                 if (index < gMpDialogClient.optionCount) {
                     mpDialogClientSendChoice(index);
                 }
             } else if (keyCode == KEY_0 || keyCode == KEY_ESCAPE) {
                 mpDialogClientSendLeave();
                 gMpDialogClient.modalOpen = false;
+                break;
             } else if (keyCode == KEY_LOWERCASE_B) {
-                mpDialogClientSendBarter(NET_BARTER_OP_START, 0, 0, 0);
-            } else if (keyCode == KEY_ARROW_UP) {
-                if (gMpDialogClient.pageIndex > 0) {
-                    gMpDialogClient.pageIndex--;
-                }
-            } else if (keyCode == KEY_ARROW_DOWN) {
-                int pageCount = (gMpDialogClient.optionCount + 8) / 9;
-                if (gMpDialogClient.pageIndex + 1 < pageCount) {
-                    gMpDialogClient.pageIndex++;
-                }
+                MpDialogClientRequestBarter();
+            } else if (keyCode == KEY_CTRL_Q || keyCode == KEY_CTRL_X || keyCode == KEY_F10) {
+                showQuitConfirmationDialog();
             }
         }
 
@@ -2785,6 +3111,7 @@ static void mpDialogClientRunModal()
             break;
         }
 
+        mpDialogClientUpdateBarterUi();
         mpDialogDrawClientWindow();
         renderPresent();
         sharedFpsLimiter.throttle();
@@ -2795,12 +3122,30 @@ static void mpDialogClientRunModal()
     debugFilePrint("MPDIALOG client modal closed");
 }
 
+bool MpDialogClientSessionActive()
+{
+    return gMpDialogClient.sessionActive;
+}
+
+void MpDialogClientRequestBarter()
+{
+    if (!gMpDialogClient.sessionActive || gMpDialogClient.barterActive) {
+        return;
+    }
+    mpDialogClientSendBarter(NET_BARTER_OP_START, 0, 0, 0);
+}
+
 void MpDialogClientMaybeShowUI()
 {
     if (!gMpActive || !gMpIsClient) {
         return;
     }
     if (!gMpDialogClient.uiPending || gMpDialogClient.modalOpen || gMpDialogClient.window != -1) {
+        return;
+    }
+    // Wait for the first node: the head portrait and reply text come with the
+    // first STATE packet, and the modal is built around them.
+    if (!gMpDialogClient.nodeApplied) {
         return;
     }
     // Never stack on a vote modal (a vote window being up blocks this).

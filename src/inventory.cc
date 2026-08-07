@@ -37,6 +37,7 @@
 #include "mouse.h"
 #include "multiplayer.h"
 #include "multiplayer_combat.h"
+#include "multiplayer_dialog.h"
 #include "object.h"
 #include "party_member.h"
 #include "perk.h"
@@ -5303,13 +5304,15 @@ static std::pair<int, int> barterComputeTablesValue(Object* dude, Object* npc, b
 
     const int valueMinusCaps = rawValue - caps;
     double perkBonus = 0.0;
-    if (dude == gDude) {
-        if (perkHasRank(gDude, PERK_MASTER_TRADER)) {
-            perkBonus = 25.0;
-        }
+    // Co-op: every barterer haggles with their own stats. In single-player
+    // dude is always gDude, so the vanilla behavior is unchanged.
+    if (perkHasRank(dude, PERK_MASTER_TRADER)) {
+        perkBonus = 25.0;
     }
 
-    const int partyBarter = partyGetBestSkillValue(SKILL_BARTER);
+    const int partyBarter = dude == gDude
+        ? partyGetBestSkillValue(SKILL_BARTER)
+        : skillGetValue(dude, SKILL_BARTER);
     const int npcBarter = skillGetValue(npc, SKILL_BARTER);
 
     // TODO: Check in debugger, complex math, probably uses floats, not doubles.
@@ -5407,9 +5410,17 @@ static int barterAttemptTransaction(Object* dude, Object* offerTable, Object* np
 // through this wrapper. Runs entirely on the host; clients never commit.
 int MpBarterAttemptTransaction(Object* dude, Object* offerTable, Object* npc, Object* barterTable)
 {
+    // The table globals drive the display AND the value math of every
+    // concurrent barterer's trade screen. This wrapper also runs for other
+    // players' commits, so preserve what the current trade screen set up.
+    Object* savedPlayerTable = gPlayerTableObj;
+    Object* savedBartererTable = gBartererTableObj;
     gPlayerTableObj = offerTable;
     gBartererTableObj = barterTable;
-    return barterAttemptTransaction(dude, offerTable, npc, barterTable);
+    int rc = barterAttemptTransaction(dude, offerTable, npc, barterTable);
+    gPlayerTableObj = savedPlayerTable;
+    gBartererTableObj = savedBartererTable;
+    return rc;
 }
 
 static int barterGetMovedQuantity(Object* item, int maxQuantity, bool fromPlayer, bool fromInventory, bool immediate)
@@ -5464,6 +5475,10 @@ static void _drag_item_loop(Object* item, bool immediate)
         sharedFpsLimiter.mark();
 
         inputGetInput();
+        // Co-op: keep the network alive while the item is being dragged.
+        if (gMpActive) {
+            MpTick();
+        }
 
         renderPresent();
         sharedFpsLimiter.throttle();
@@ -5512,7 +5527,11 @@ static void barterMoveToTable(Object* item, int quantity, int slotIndex, int ind
         if (immediate || mouseHitTestInWindow(gInventoryWindow, INVENTORY_TRADE_INNER_LEFT_SCROLLER_TRACKING_X, INVENTORY_TRADE_INNER_LEFT_SCROLLER_TRACKING_Y, INVENTORY_TRADE_INNER_LEFT_SCROLLER_TRACKING_MAX_X, INVENTORY_SLOT_HEIGHT * gInventorySlotsCount + INVENTORY_TRADE_INNER_LEFT_SCROLLER_TRACKING_Y)) {
             int quantityToMove = barterGetMovedQuantity(item, quantity, true, true, immediate);
             if (quantityToMove != -1) {
-                if (itemMoveForce(_inven_dude, sourceTable, item, quantityToMove) == -1) {
+                // Co-op: the drag/drop UX above is vanilla; only the final
+                // transfer routes through the host-authoritative session.
+                if (gMpActive && MpDialogBarterMoveFromVanilla((uint32_t)item->pid, quantityToMove, 1, false)) {
+                    // handled by the co-op session
+                } else if (itemMoveForce(_inven_dude, sourceTable, item, quantityToMove) == -1) {
                     inventoryDisplayMessage(26); // There is no space left for that item.
                 }
             }
@@ -5521,7 +5540,11 @@ static void barterMoveToTable(Object* item, int quantity, int slotIndex, int ind
         if (immediate || mouseHitTestInWindow(gInventoryWindow, INVENTORY_TRADE_INNER_RIGHT_SCROLLER_TRACKING_X, INVENTORY_TRADE_INNER_RIGHT_SCROLLER_TRACKING_Y, INVENTORY_TRADE_INNER_RIGHT_SCROLLER_TRACKING_MAX_X, INVENTORY_SLOT_HEIGHT * gInventorySlotsCount + INVENTORY_TRADE_INNER_RIGHT_SCROLLER_TRACKING_Y)) {
             int quantityToMove = barterGetMovedQuantity(item, quantity, false, true, immediate);
             if (quantityToMove != -1) {
-                if (itemMoveForce(npc, sourceTable, item, quantityToMove) == -1) {
+                // Co-op: drag/drop UX is vanilla; the transfer routes through
+                // the host-authoritative session.
+                if (gMpActive && MpDialogBarterMoveFromVanilla((uint32_t)item->pid, quantityToMove, 2, false)) {
+                    // handled by the co-op session
+                } else if (itemMoveForce(npc, sourceTable, item, quantityToMove) == -1) {
                     inventoryDisplayMessage(25); // You cannot pick that up. You are at your maximum weight capacity.
                 }
             }
@@ -5568,7 +5591,11 @@ static void barterMoveFromTable(Object* item, int quantity, int slotIndex, Objec
         if (immediate || mouseHitTestInWindow(gInventoryWindow, INVENTORY_TRADE_LEFT_SCROLLER_TRACKING_X, INVENTORY_TRADE_LEFT_SCROLLER_TRACKING_Y, INVENTORY_TRADE_LEFT_SCROLLER_TRACKING_MAX_X, INVENTORY_SLOT_HEIGHT * gInventorySlotsCount + INVENTORY_TRADE_LEFT_SCROLLER_TRACKING_Y)) {
             int quantityToMove = barterGetMovedQuantity(item, quantity, true, false, immediate);
             if (quantityToMove != -1) {
-                if (itemMoveForce(sourceTable, _inven_dude, item, quantityToMove) == -1) {
+                // Co-op: drag/drop UX is vanilla; the transfer routes through
+                // the host-authoritative session (back to the player).
+                if (gMpActive && MpDialogBarterMoveFromVanilla((uint32_t)item->pid, quantityToMove, 1, true)) {
+                    // handled by the co-op session
+                } else if (itemMoveForce(sourceTable, _inven_dude, item, quantityToMove) == -1) {
                     inventoryDisplayMessage(26); // There is no space left for that item.
                 }
             }
@@ -5577,7 +5604,11 @@ static void barterMoveFromTable(Object* item, int quantity, int slotIndex, Objec
         if (immediate || mouseHitTestInWindow(gInventoryWindow, INVENTORY_TRADE_RIGHT_SCROLLER_TRACKING_X, INVENTORY_TRADE_RIGHT_SCROLLER_TRACKING_Y, INVENTORY_TRADE_RIGHT_SCROLLER_TRACKING_MAX_X, INVENTORY_SLOT_HEIGHT * gInventorySlotsCount + INVENTORY_TRADE_RIGHT_SCROLLER_TRACKING_Y)) {
             int quantityToMove = barterGetMovedQuantity(item, quantity, false, false, immediate);
             if (quantityToMove != -1) {
-                if (itemMoveForce(sourceTable, npc, item, quantityToMove) == -1) {
+                // Co-op: drag/drop UX is vanilla; the transfer routes through
+                // the host-authoritative session (back to the npc).
+                if (gMpActive && MpDialogBarterMoveFromVanilla((uint32_t)item->pid, quantityToMove, 2, true)) {
+                    // handled by the co-op session
+                } else if (itemMoveForce(sourceTable, npc, item, quantityToMove) == -1) {
                     inventoryDisplayMessage(25); // You cannot pick that up. You are at your maximum weight capacity.
                 }
             }
@@ -5784,8 +5815,21 @@ void barterProcessUI(int win, Object* barterer, Object* playerTable, Object* bar
             break;
         }
 
+        // Co-op: pump the network/world every frame and re-render when the
+        // authoritative state changed (own moves, other barterers, commits).
+        // Breaks when the mp barter session ended (abort, disconnect, leave).
+        if (gMpActive && !MpDialogBarterLoopTick()) {
+            break;
+        }
+
         keyCode = inputGetInput();
         int mouseEvent = mouseGetEvent();
+
+        // Co-op: M/T/ESC route through the host-authoritative session (the
+        // vanilla handlers would commit locally and desync the tables).
+        if (gMpActive && MpDialogBarterInterceptKey(keyCode)) {
+            keyCode = -1;
+        }
         InventoryScrollerDisplayContext inventoryScrollerContext { INVENTORY_WINDOW_TYPE_TRADE, nullptr };
         InventoryScrollerDisplayContext targetScrollerContext { INVENTORY_WINDOW_TYPE_TRADE, _target_pud };
         InventoryScrollerBarterContext barterScrollerContext { win, playerTable, bartererTable };
@@ -6014,6 +6058,77 @@ void barterProcessUI(int win, Object* barterer, Object* playerTable, Object* bar
 
     // NOTE: Uninline.
     inventoryCommonFree();
+
+    // Co-op: the vanilla trade loop ended (T/ESC/M-less exit, auto-end, mp
+    // session death) — tear down the mp barter session (host: return items,
+    // un-suspend the voter, broadcast; client: local flags).
+    if (gMpActive) {
+        MpDialogBarterLoopEnded();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Co-op barter: the mp session drives the REAL vanilla trade loop
+// (barterProcessUI with co-op hooks). This helper bridges the authoritative
+// state into the vanilla rendering: mpBarterTradeRefresh() re-renders after
+// authoritative state changed.
+// ---------------------------------------------------------------------------
+
+static void mpBarterClampOffsets()
+{
+    int slots = gInventorySlotsCount;
+    auto clamp = [slots](int* offset, int length) {
+        int maxOffset = length > slots ? length - slots : 0;
+        if (*offset > maxOffset) {
+            *offset = maxOffset;
+        }
+        if (*offset < 0) {
+            *offset = 0;
+        }
+    };
+    clamp(&_stack_offset[_curr_stack], _pud->length);
+    clamp(&gPlayerTableOffset, gPlayerTableInventory->length);
+    clamp(&gBartererTableOffset, gBartererTableInventory->length);
+    clamp(&_target_stack_offset[_target_curr_stack], _target_pud->length);
+}
+
+void mpBarterTradeRefreshWithTables(Object* leftTable, Object* rightTable)
+{
+    int win = gInventoryBarterBackgroundWindow;
+    if (win == -1) {
+        return;
+    }
+    debugFilePrint("MPBARTER refresh player=%d target=%d offer=%d req=%d",
+        _pud->length, _target_pud->length,
+        leftTable != nullptr ? leftTable->data.inventory.length : -1,
+        rightTable != nullptr ? rightTable->data.inventory.length : -1);
+    // Clamp the table scrolls against the drawn tables (the globals can be
+    // stale while another player is committing).
+    if (leftTable != nullptr) {
+        if (gPlayerTableOffset < 0) {
+            gPlayerTableOffset = 0;
+        }
+        if (gPlayerTableOffset > leftTable->data.inventory.length) {
+            gPlayerTableOffset = leftTable->data.inventory.length;
+        }
+    }
+    if (rightTable != nullptr) {
+        if (gBartererTableOffset < 0) {
+            gBartererTableOffset = 0;
+        }
+        if (gBartererTableOffset > rightTable->data.inventory.length) {
+            gBartererTableOffset = rightTable->data.inventory.length;
+        }
+    }
+    mpBarterClampOffsets();
+    _display_target_inventory(_target_stack_offset[_target_curr_stack], -1, _target_pud, INVENTORY_WINDOW_TYPE_TRADE);
+    _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_TRADE);
+    barterDisplayTables(win, leftTable, rightTable, -1);
+}
+
+void mpBarterTradeRefresh()
+{
+    mpBarterTradeRefreshWithTables(gPlayerTableObj, gBartererTableObj);
 }
 
 // 0x47620C

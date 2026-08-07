@@ -540,6 +540,7 @@ typedef struct NetBarterStatePayload {
     uint8_t lastOp;    // echoed NetBarterOpcode (0 = none)
     uint8_t lastOk;    // 1 = last op applied
     uint8_t lastMsgId; // vanilla barter message id (27/28/31/32/...), 0 = none
+    int16_t barterMod; // host-computed barter modifier (incl. reaction)
     uint16_t npcItemCount;
     uint16_t offerCount;   // this barterer's offer as the host sees it
     uint16_t requestCount; // this barterer's request as the host sees it

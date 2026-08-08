@@ -87,6 +87,15 @@ bool MpCombatMonitorSuppressed();
 void MpCombatSendStartRequest(Object* defender); // defender = the attacked target (may be null)
 void MpCombatSendEndRequest();
 void MpCombatSendMoveIntent(int tile, int elevation, bool isRun);
+// True while the client has a combat move intent whose authoritative outcome
+// has not yet been applied. The state sync must not snap the local dude back
+// to the avatar's pre-move tile while a resolution is outstanding (the host
+// processes combat cmds through a queue, so the heartbeat can lag the click).
+// Fills *outIntentTile when returning true.
+bool MpCombatHasPendingMoveIntent(int* outIntentTile);
+// The intent's outcome has been applied (move-result snap, or the avatar
+// arrived at the intent tile); clear the in-flight state.
+void MpCombatClearMoveIntent();
 void MpCombatSendAttackIntent(Object* target, HitMode hitMode, HitLocation hitLocation);
 void MpCombatSendInventoryApCost(int cost);
 // Blocking client turn: the co-op input loop with network pump. Returns -1

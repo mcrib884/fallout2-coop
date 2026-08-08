@@ -24,8 +24,12 @@ bool _can_see(Object* source, Object* target);
 bool _action_explode_running();
 // Plays the damage feedback (flinch anim, pain sound, blood, death/fall
 // anims) for a resolved attack. Co-op: the client replays the host's
-// authoritative outcome with this.
-void showDamageToObject(Object* defender, int damage, int flags, Object* weapon, bool hitFromFront, int knockbackDistance, int knockbackRotation, AnimationType attackerAnimation, Object* attacker, int delay);
+// authoritative outcome with this (playSounds=false — the acting client
+// already heard the predicted hit/death sounds at swing time).
+void showDamageToObject(Object* defender, int damage, int flags, Object* weapon, bool hitFromFront, int knockbackDistance, int knockbackRotation, AnimationType attackerAnimation, Object* attacker, int delay, bool playSounds = true);
+// Picks the death animation for the defender (exposed for the co-op local
+// hit/death sound prediction on the acting client).
+AnimationType pickDeathAnim(Object* attacker, Object* defender, Object* weapon, int damage, AnimationType attackerAnimation, bool hitFromFront);
 int actionExplode(int tile, int elevation, int minDamage, int maxDamage, Object* sourceObj, bool animate);
 int actionTalk(Object* obj, Object* critter);
 void actionDamage(int tile, int elevation, int minDamage, int maxDamage, DamageType damageType, bool animated, bool bypassArmor);

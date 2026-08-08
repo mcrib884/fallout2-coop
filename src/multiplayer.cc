@@ -6,6 +6,7 @@
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
+#include <algorithm>
 
 #include "animation.h"
 #include "actions.h"
@@ -689,6 +690,33 @@ static void mpHostAcceptProfile(MultiplayerPlayer* player, ENetPeer* peer,
     // hook), so the client's quest mirror stays live for its own saves.
     mpHostSendGvarSnapshot(peer, player->netId);
 
+    // A client that joins while combat is already running never saw the
+    // STARTED broadcast (it predates the connection). Enter it into the
+    // mirror immediately, then tell it whose turn it is — without the turn
+    // info, a client whose turn is live on the host would never send
+    // TURN_END and the host's remote-turn loop would stall forever.
+    if (gMpCombat.inCombat) {
+        NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_COMBAT_STARTED, nullptr, 0);
+        NetCombatTurnStartPayload turnPayload;
+        memset(&turnPayload, 0, sizeof(turnPayload));
+        turnPayload.netId = gMpCombat.whoseTurn;
+        if (gMpCombat.whoseTurn != 0) {
+            MultiplayerPlayer* turnPlayer = &gMpSession.players[gMpCombat.whoseTurn - 1];
+            if (turnPlayer->obj != nullptr) {
+                turnPayload.ap = (uint16_t)std::clamp(
+                    turnPlayer->obj->data.critter.combat.ap, 0, 65535);
+                turnPayload.maxAp = (uint16_t)std::clamp(
+                    critterGetStat(turnPlayer->obj, STAT_MAXIMUM_ACTION_POINTS), 0, 65535);
+            }
+        }
+        // targetNetId stays 0: the acting-NPC netId is not tracked host-side;
+        // the next NPC TURN_START broadcast restores the red outline.
+        NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_COMBAT_TURN_START,
+            &turnPayload, sizeof(turnPayload));
+        debugFilePrint("MP: join mid-combat start sent netId=%u turn=%u",
+            player->netId, gMpCombat.whoseTurn);
+    }
+
     win_timed_msg("Player joined", COLOR_GREEN);
     debugFilePrint("MP: host accept profile done netId=%u name='%s' objNet=%u players=%d",
         player->netId, player->name, player->objNetId, gMpSession.numPlayers);
@@ -873,7 +901,20 @@ static void mpBuildMapSyncPayload(NetMapSyncPayload* payload)
 
     memset(payload, 0, sizeof(*payload));
     payload->mapId = gMapHeader.index;
-    memcpy(payload->mapName, gMapHeader.name, sizeof(payload->mapName));
+    // gMapHeader.name can carry the file extension (a host that loaded its
+    // save with a map .SAV present stores "MAP.SAV" — vanilla behavior). The
+    // joining client must resolve the bare name against its own map files,
+    // so strip the extension before it goes on the wire.
+    {
+        char nameBuf[NET_MAP_NAME_LENGTH];
+        strncpy(nameBuf, gMapHeader.name, sizeof(nameBuf) - 1);
+        nameBuf[sizeof(nameBuf) - 1] = '\0';
+        char* dot = strrchr(nameBuf, '.');
+        if (dot != nullptr) {
+            *dot = '\0';
+        }
+        memcpy(payload->mapName, nameBuf, sizeof(payload->mapName));
+    }
     payload->enteringTile = gMapHeader.enteringTile;
     payload->enteringElevation = gMapHeader.enteringElevation;
     payload->enteringRotation = gMapHeader.enteringRotation;
@@ -967,6 +1008,14 @@ static int mpClientLoadMap(const NetMapSyncPayload* payload)
     // which is why only the client's inventory vanished).
     mpSetDudeInventoryProtected(true);
     int rc = mapLoadByName(mapName);
+    if (rc == -1 && strstr(mapName, ".MAP") == nullptr && strstr(mapName, ".SAV") == nullptr) {
+        // Bare map name: resolve it against the .MAP file (loose or in the
+        // data archive) — the map loader only finds the file with the full
+        // extension.
+        char extName[NET_MAP_NAME_LENGTH + 8];
+        snprintf(extName, sizeof(extName), "%s.MAP", mapName);
+        rc = mapLoadByName(extName);
+    }
     mpSetDudeInventoryProtected(false);
     debugFilePrint("MPDBG after map load: rc=%d dude=%p pid=0x%X pt=%d tile=%d elev=%d hidden=%d st=%d carry=%d weight=%d",
         rc, (void*)gDude,
@@ -3849,6 +3898,34 @@ void MpResetObjectSyncBaseline()
     }
 }
 
+// Co-op: immediately re-broadcast a single object's state to every client.
+// Script-driven hostility flips (set_team) change the critter's team without
+// touching its transform, so the periodic sweep would only catch them on its
+// own cadence — and the client mirrors must re-tint the crosshair hover and
+// the acting-critter outline at once.
+void MpBroadcastObjectStateFor(Object* obj)
+{
+    if (!gMpIsHost || gMpSession.enetHost == nullptr || obj == nullptr) {
+        return;
+    }
+    if (mpHostFindPlayerByObject(obj) != nullptr) {
+        return; // players ride the player-state channel
+    }
+    NetMapFullSyncObjectPayload state;
+    if (!mpBuildObjectState(obj, &state)) {
+        return;
+    }
+    NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE,
+        NET_PKT_OBJECT_STATE_UPDATE, &state, sizeof(state));
+    debugFilePrint("MP: object state forced netId=%u pid=0x%X tile=%d team=%d",
+        state.netId, state.pid, state.tile, state.combatTeam);
+    // Keep the sweep's record in sync so it does not re-send the same state.
+    int oldIndex = mpHostFindObjectRecord(state.netId);
+    if (oldIndex >= 0) {
+        gMpHostObjectRecords[oldIndex].state = state;
+    }
+}
+
 void MpBroadcastObjectStates()
 {
     if (!gMpIsHost || gMpSession.enetHost == nullptr) {
@@ -4612,8 +4689,8 @@ static Object* mpApplyObjectStateInternal(const NetMapFullSyncObjectPayload* sta
             if (nowMs - last[found].ms > 500 || key != last[found].key) {
                 last[found].ms = nowMs;
                 last[found].key = key;
-                debugFilePrint("MPDIAG client apply netId=%u pid=0x%X tile=%d fid=0x%X flags=0x%X hp=%d mode=%s",
-                    state->netId, state->pid, state->tile, state->fid, state->flags, state->hp, mpDiagMode);
+                debugFilePrint("MPDIAG client apply netId=%u pid=0x%X tile=%d fid=0x%X flags=0x%X hp=%d team=%d mode=%s",
+                    state->netId, state->pid, state->tile, state->fid, state->flags, state->hp, state->combatTeam, mpDiagMode);
             }
         } else if (freeSlot >= 0) {
             last[freeSlot].netId = state->netId;
@@ -4709,6 +4786,16 @@ void MpApplyPlayerState(const NetPlayerStateUpdatePayload* s)
     p->obj = obj;
 
     bool localMovementIsActive = isLocalPlayer && animationIsBusy(obj) != 0;
+    // While a combat move intent is in flight, the host's avatar may not have
+    // moved yet (its combat cmd queue lags the click by up to ~2s), so the
+    // periodic state heartbeat still carries the PRE-move tile. Snapping then
+    // would undo the optimistic walk and leave the local dude one or two hexes
+    // off the real position — clicks that should be in range read out of
+    // range. Yield until the avatar actually reaches the intent tile (or the
+    // authoritative move-result packet resolves otherwise).
+    int moveIntentTile = -1;
+    const bool moveIntentInFlight = isLocalPlayer && MpCombatHasPendingMoveIntent(&moveIntentTile);
+    const bool moveIntentBlocksSnap = moveIntentInFlight && s->tile != moveIntentTile;
     // The very first state must snap the local player into place (the map
     // reload may have left him at the map's entering tile, off-screen from
     // the host's camera). Later updates yield to local prediction. A frozen
@@ -4716,7 +4803,8 @@ void MpApplyPlayerState(const NetPlayerStateUpdatePayload* s)
     // stopped the critter on the exit grid and drives its position
     // authoritatively; yielding would let the local walk continue past the
     // zone on the client's own screen.
-    if (!localMovementIsActive || !p->hasLastState || gMpSession.initiatorFrozen) {
+    if ((!localMovementIsActive || !p->hasLastState || gMpSession.initiatorFrozen)
+        && !moveIntentBlocksSnap) {
         // Co-op diagnostic (throttled): a local-player transform snap. Shows
         // how far the client's dude is being pulled by the authoritative
         // state (expected to be sub-tile; large snaps indicate the avatar
@@ -4732,6 +4820,11 @@ void MpApplyPlayerState(const NetPlayerStateUpdatePayload* s)
         }
         mpApplyObjectTransform(obj, s->tile, s->x, s->y, s->rotation, s->fid, s->frame, s->elevation, 0, false);
         p->hasLastState = true;
+        // The avatar reached the clicked destination: the intent's outcome is
+        // fully applied — a later resolution must not snap anything.
+        if (moveIntentInFlight && s->tile == moveIntentTile) {
+            MpCombatClearMoveIntent();
+        }
     }
     if (!isLocalPlayer) {
         // The host's FID model index is process-local (custom models may
@@ -4831,6 +4924,57 @@ void MpApplyLocalDudeSnap(int tile, int elevation)
     }
     mpApplyObjectTransform(dude, tile, dude->x, dude->y, dude->rotation,
         dude->fid, 0, elevation, 0, false);
+}
+
+// Co-op: keep a critter's FID weapon slot in sync with the weapon actually in
+// its hands. Vanilla sets the slot through inven_wield when the local player
+// equips — but a co-op inventory apply rebuilds the item graph directly, so
+// an equipped weapon arriving through the profile channel (or restored by a
+// savegame load) never reaches the sprite. Deriving it here (left hand
+// preferred, right hand fallback, mirroring the vanilla wield rules) keeps
+// the sprite correct after any apply, join, or load.
+void MpSyncCritterWeaponFid(Object* critter)
+{
+    if (critter == nullptr || PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
+        return;
+    }
+
+    Object* weapon = nullptr;
+    Inventory* inventory = &critter->data.inventory;
+    for (int index = 0; index < inventory->length; index++) {
+        Object* item = inventory->items[index].item;
+        if (item == nullptr) {
+            continue;
+        }
+        if ((item->flags & OBJECT_IN_LEFT_HAND) != 0) {
+            weapon = item;
+            break;
+        }
+        if (weapon == nullptr && (item->flags & OBJECT_IN_RIGHT_HAND) != 0) {
+            weapon = item;
+        }
+    }
+
+    WeaponAnimation weaponAnimationCode = WEAPON_ANIMATION_NONE;
+    if (weapon != nullptr && itemGetType(weapon) == ITEM_TYPE_WEAPON) {
+        weaponAnimationCode = weaponGetAnimationCode(weapon);
+    }
+    if (weaponAnimationFromFid(critter->fid) == weaponAnimationCode) {
+        return;
+    }
+
+    int fid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF,
+        animationTypeFromFid(critter->fid), weaponAnimationCode,
+        critter->rotation + 1);
+    if (fid != critter->fid) {
+        Rect rect;
+        if (objectSetFid(critter, fid, &rect) == 0) {
+            tileWindowRefreshRect(&rect, critter->elevation);
+        }
+        debugFilePrint("MP: weapon fid synced pid=0x%X anim=%d weapon=%d",
+            critter->pid, (int)animationTypeFromFid(critter->fid),
+            (int)weaponAnimationCode);
+    }
 }
 
 void MpApplyPlayerJoined(const NetPlayerJoinedPayload* payload)

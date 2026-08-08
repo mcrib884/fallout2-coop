@@ -1583,10 +1583,18 @@ int _map_save_in_game(bool isLeavingMap)
     // player critters carry synthetic protos that the vanilla teardown path
     // would free out from under the session (stale MAPS\*.SAV files, dangling
     // synthetic pids, proto double-frees in MpProfileDestroyRuntime). Run the
-    // world-prep steps (queue, party, exit script, roof) but skip the .SAV
-    // write and the object/proto teardown — mapLoad performs the teardown
-    // itself, and both machines must always load the fresh .MAP so host and
-    // client can never diverge.
+    // world-prep steps (queue, party, exit script, roof) but skip the
+    // object/proto teardown — mapLoad performs the teardown itself, and both
+    // machines must always load the fresh .MAP so host and client can never
+    // diverge.
+    //
+    // The .SAV write itself is role-split: the HOST's save is the world's
+    // save (character + world + position), so it writes the current map's
+    // layer — the reload then restores the session's world state (killed
+    // critters stay dead). A CLIENT's save never touches the map layer: the
+    // MAPS\*.SAV files keep their singleplayer data, and maps that only
+    // existed inside a session simply have no layer (the savegame loader
+    // falls back to the fresh .MAP for those).
     bool coOpActive = gMpActive;
 
     if (gMapHeader.name[0] == '\0') {
@@ -1614,8 +1622,8 @@ int _map_save_in_game(bool isLeavingMap)
         _obj_reset_roof();
     }
 
-    if (coOpActive) {
-        debugFilePrint("MAP: save in game skipped in co-op");
+    if (coOpActive && gMpIsClient) {
+        debugFilePrint("MAP: save in game skipped in co-op (client)");
         return 0;
     }
 
@@ -1646,9 +1654,14 @@ int _map_save_in_game(bool isLeavingMap)
 
         if (isLeavingMap) {
             gMapHeader.name[0] = '\0';
-            _obj_remove_all();
-            _proto_remove_all();
-            _square_reset();
+            if (!coOpActive) {
+                // In co-op the teardown stays mapLoad's job — freeing objects
+                // and protos here would cut the session's synthetic players
+                // out from under the network state.
+                _obj_remove_all();
+                _proto_remove_all();
+                _square_reset();
+            }
             gameTimeScheduleUpdateEvent();
         }
     }

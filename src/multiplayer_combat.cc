@@ -16,13 +16,13 @@
 //     vanilla enemy check -> DENIED or ENDED broadcast
 
 #include "multiplayer_combat.h"
-
 #include <algorithm>
 #include <string.h>
 #include <vector>
 
 #include "animation.h"
 #include "color.h"
+#include "combat.h"
 #include "critter.h"
 #include "debug.h"
 #include "display_monitor.h"
@@ -764,11 +764,13 @@ void MpCombatOnStartedPacket()
     gameUiDisable(1);
     gameMouseSetCursor(MOUSE_CURSOR_WAIT_WATCH);
     interfaceBarEndButtonsShow(true);
-    // The host's combat HUD is fully drawn the moment its first turn starts
-    // (the initiator acts immediately); the client's AP panel only rendered
-    // at its own turn, so spectators saw a non-combat HUD until the fight
-    // ended. Render it here — the mirrored AP refreshes via the state sync.
-    interfaceRenderActionPoints(gDude != nullptr ? gDude->data.critter.combat.ap : 0, _combat_free_move);
+    // Render the AP panel in the vanilla wait posture (full red = no action
+    // points available) instead of the live synced value: the mirrored AP
+    // rides the round-start refresh and would paint a full GREEN bar while
+    // the player simply waits (the b11 render gate then keeps it green until
+    // his own turn). The red wait look is what vanilla shows a spectator;
+    // MpCombatClientTurnLoop paints the real bar at his TURN_START.
+    interfaceRenderActionPoints(-1, -1);
     mpCombatCreateCards();
     debugFilePrint("MPCOMBAT: client mirror entered");
 }
@@ -871,6 +873,7 @@ void MpCombatOnEndedPacket()
     }
     MpCombatForceExit();
     debugFilePrint("MPCOMBAT: client mirror exited (ENDED)");
+    MpCombatClearMoveIntent();
 }
 
 // ---------------------------------------------------------------------------
@@ -892,6 +895,14 @@ int MpCombatClientTurnLoop()
     inputEventQueueReset();
     _combat_free_move = 2 * perkGetRank(dude, PERK_BONUS_MOVE);
     interfaceRenderActionPoints(gMpCombat.turnAp, _combat_free_move);
+    // Seed the local AP mirror from the AUTHORITATIVE turn-start AP. The
+    // mirror is otherwise fed by the state-sync channel, which lags the host
+    // by the command-queue round trip — a stale sync could show 0 AP and
+    // soft-exit the loop (sending TURN_END) while the host still counts this
+    // as the player's turn; every attack click then dies silently in the
+    // vanilla not-player-turn gate. Seeding makes the exit fire on real
+    // spends; later sync corrections only nudge the value.
+    dude->data.critter.combat.ap = gMpCombat.turnAp;
     gameUiEnable();
     // The mirror keeps the wait cursor from combat begin; the player's own
     // turn must show the normal move cursor or clicks feel dead. The vanilla
@@ -1029,6 +1040,20 @@ void MpCombatSendEndRequest()
 static int gMpLastMoveIntentTile = -1;
 static int gMpLastMoveIntentElevation = -1;
 
+bool MpCombatHasPendingMoveIntent(int* outIntentTile)
+{
+    if (outIntentTile != nullptr) {
+        *outIntentTile = gMpLastMoveIntentTile;
+    }
+    return gMpLastMoveIntentTile >= 0;
+}
+
+void MpCombatClearMoveIntent()
+{
+    gMpLastMoveIntentTile = -1;
+    gMpLastMoveIntentElevation = -1;
+}
+
 void MpCombatSendMoveIntent(int tile, int elevation, bool isRun)
 {
     if (!gMpIsClient || !gMpActive || !gMpCombat.inCombat || !gMpCombat.turnActive) {
@@ -1134,6 +1159,10 @@ void MpCombatForceExit()
         gDude->data.critter.combat.ap = critterGetStat(gDude, STAT_MAXIMUM_ACTION_POINTS);
         gCombatState &= ~(COMBAT_STATE_IN_COMBAT | COMBAT_STATE_PLAYER_TURN | COMBAT_STATE_EXIT_REQUESTED);
         gCombatState |= COMBAT_STATE_PLAYER_TURN;
+        // The vanilla combat end clears the critter outlines (_combat_over);
+        // the mirror exits via this path instead, so clear them here or the
+        // hover/combat highlights survive the ENDED packet.
+        _combat_outline_off();
         interfaceRenderActionPoints(0, 0);
         gameUiEnable();
         // gameUiEnable restores the interface but never the 2D cursor, and
@@ -1220,14 +1249,17 @@ void MpCombatOnMoveResult(const NetCombatMoveResultPayload* payload)
         return;
     }
     if (dude->tile == (int)payload->tile && dude->elevation == payload->elevation) {
+        MpCombatClearMoveIntent(); // resolved elsewhere; nothing to snap
         return; // already there
     }
     if (animationIsBusy(dude) != 0) {
         reg_anim_clear(dude);
     }
+    const int oldIntent = gMpLastMoveIntentTile;
     MpApplyLocalDudeSnap((int)payload->tile, payload->elevation);
+    MpCombatClearMoveIntent();
     debugFilePrint("MPCOMBAT: move result snap tile=%d elev=%d (intent was %d)",
-        (int)payload->tile, payload->elevation, gMpLastMoveIntentTile);
+        (int)payload->tile, payload->elevation, oldIntent);
 }
 
 // Client: a relayed script float_msg (combat chatter). Scripts only run on

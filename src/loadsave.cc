@@ -2234,6 +2234,13 @@ static int lsgLoadGameInSlot(int slot)
     sfallOnAfterGameStarted();
     gGameLoaded = true;
 
+    // The dude's weapon slot never went through inven_wield when a co-op
+    // session save is restored (the equipped gear was applied by the profile
+    // channel, not by wielding). Re-derive it from the hands so the sprite
+    // shows the equipped weapon. Safe for singleplayer saves too — vanilla
+    // would have produced the same FID.
+    MpSyncCritterWeaponFid(gDude);
+
     return 0;
 }
 
@@ -3160,8 +3167,17 @@ static int _SlotMap2Game(File* stream)
         ? &(_LSData[_slot_cursor])
         : &_LSDataCoopSlot;
     if (mapLoadSaved(slotData->fileName) == -1) {
-        debugFilePrint("LOADSAVE: returning 13");
-        return -1;
+        // The map's .SAV may be missing — a co-op session save on a map whose
+        // layer was never serialized (older builds skipped the co-op .SAV
+        // write entirely). Fall back to the fresh .MAP so the character and
+        // quest state in the save still load.
+        char fallbackMapName[COMPAT_MAX_PATH];
+        _strmfe(fallbackMapName, slotData->fileName, "MAP");
+        if (mapLoadByName(fallbackMapName) == -1) {
+            debugFilePrint("LOADSAVE: returning 13");
+            return -1;
+        }
+        debugFilePrint("LOADSAVE: map .SAV missing, loaded fresh map '%s'", fallbackMapName);
     }
 
     return 0;

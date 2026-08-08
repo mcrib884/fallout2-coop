@@ -165,12 +165,19 @@ void MpGetClientMapEnteringPosition(int* tile, int* elevation, int* rotation);
 // Snap the local dude to an authoritative tile (combat move resolutions that
 // diverge from the optimistic walk). Stops the running walk first.
 void MpApplyLocalDudeSnap(int tile, int elevation);
+// Derive the weapon slot of a critter's FID from the weapon in its hands
+// (left preferred, right fallback). Run after any co-op inventory apply or
+// savegame load — the vanilla inven_wield path never runs for synced gear.
+void MpSyncCritterWeaponFid(Object* critter);
 void MpApplyMapFullSync(const void* data, size_t dataLength);
 void MpApplyMapTileSync(const void* data, size_t dataLength);
 void MpApplyMapChanged(const NetMapSyncPayload* payload);
 void MpApplyPlayerJoined(const NetPlayerJoinedPayload* payload);
 void MpApplyPlayerLeft(const NetPlayerLeftPayload* payload);
 void MpApplyObjectState(const NetMapFullSyncObjectPayload* payload);
+// Co-op: immediately re-broadcast one object's authoritative state to every
+// client (used by host-side single-field flips like script set_team).
+void MpBroadcastObjectStateFor(Object* obj);
 void MpApplyObjectRemoved(uint32_t netId);
 
 // netId mapping

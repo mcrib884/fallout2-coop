@@ -5194,7 +5194,8 @@ void MpReplayLocalAttackResult(int damage, int attackerFlags, int defenderFlags)
         ? animationTypeFromFid(_main_ctd.attacker->fid)
         : critterGetAnimationForHitMode(_main_ctd.attacker, _main_ctd.hitMode);
     showDamageToObject(_main_ctd.defender, damage, flags, _main_ctd.weapon,
-        hitFromFront, 0, knockbackRotation, attackerAnimForShow, _main_ctd.attacker, 0);
+        hitFromFront, 0, knockbackRotation, attackerAnimForShow, _main_ctd.attacker, 0,
+        /*playSounds=*/false);
 }
 
 // 0x424BAC
@@ -5218,6 +5219,32 @@ void _apply_damage(Attack* attack, bool animated)
     // host's broadcast monitor messages and the player/object state channel
     // carry the real outcome.
     if (gMpActive && gMpIsClient && MpCombatIsActive() && attack->attacker == gDude) {
+        // The authoritative feedback (MpReplayLocalAttackResult) arrives a
+        // command-queue round trip late — its sounds would land after the
+        // swing or after combat. Play the predicted hit/death sounds NOW,
+        // tied to the swing; the replay keeps only the visuals and numbers.
+        if (attack->defender != nullptr && (attack->defenderFlags & DAM_HIT) != 0
+            && !critterIsProne(attack->defender)) {
+            const char* sfxName = nullptr;
+            if ((attack->defenderFlags & DAM_DEAD) != 0) {
+                bool hitFromFront = _is_hit_from_front(attack->attacker, attack->defender);
+                AnimationType attackerAnim = critterGetAnimationForHitMode(
+                    attack->attacker, attack->hitMode);
+                AnimationType deathAnim = pickDeathAnim(attack->attacker, attack->defender,
+                    attack->weapon, attack->defenderDamage, attackerAnim, hitFromFront);
+                sfxName = sfxBuildCharName(attack->defender, deathAnim, CHARACTER_SOUND_EFFECT_DIE);
+            } else {
+                AnimationType painAnim = _is_hit_from_front(attack->attacker, attack->defender)
+                    ? ANIM_HIT_FROM_FRONT
+                    : ANIM_HIT_FROM_BACK;
+                sfxName = sfxBuildCharName(attack->defender, painAnim, CHARACTER_SOUND_EFFECT_UNUSED);
+            }
+            if (sfxName != nullptr) {
+                reg_anim_begin(ANIMATION_REQUEST_RESERVED);
+                animationRegisterPlaySoundEffect(attack->defender, sfxName, 0);
+                reg_anim_end();
+            }
+        }
         return;
     }
 
@@ -6300,7 +6327,13 @@ bool _combat_to_hit(Object* target, int* accuracy)
     HitMode hitMode;
     bool aiming;
     if (interfaceGetCurrentHitMode(&hitMode, &aiming) == -1) {
-        return false;
+        // Same derivation as _combat_attack_this: the crosshair can be armed
+        // by the mode cycle without an interface hit mode; the hover readout
+        // must not silently fail for an empty hand (HIT_MODE_PUNCH).
+        if (!interface_get_current_attack_mode(&hitMode)) {
+            return false;
+        }
+        aiming = false;
     }
 
     if (_combat_check_bad_shot(gDude, target, hitMode, aiming) != COMBAT_BAD_SHOT_OK) {
@@ -6320,13 +6353,31 @@ void _combat_attack_this(Object* target)
     }
 
     if ((gCombatState & COMBAT_STATE_PLAYER_TURN) == 0) {
+        // Co-op client diagnostic: a click outside the player's own turn is
+        // silent by vanilla design. The client's local turn loop soft-exits
+        // on its AP mirror; when the mirror lags the host, clicks die here.
+        if (gMpActive && gMpIsClient) {
+            debugFilePrint("MPCOMBAT: attack click ignored (not player turn) state=0x%X target=0x%X",
+                gCombatState, target != nullptr ? target->pid : 0);
+        }
         return;
     }
 
     HitMode hitMode;
     bool aiming;
     if (interfaceGetCurrentHitMode(&hitMode, &aiming) == -1) {
-        return;
+        // The right-click mode cycle arms the crosshair cursor without
+        // setting an interface hit mode (only the weapon button / A key
+        // does). Derive the attack mode from the current hand's item state;
+        // an empty hand yields HIT_MODE_PUNCH, so unarmed attacks work the
+        // same whether the crosshair was armed by key or by cycling.
+        if (!interface_get_current_attack_mode(&hitMode)) {
+            if (gMpActive && gMpIsClient) {
+                debugFilePrint("MPCOMBAT: attack click ignored (no hit mode) target=0x%X", target->pid);
+            }
+            return;
+        }
+        aiming = false;
     }
 
     MessageListItem messageListItem;
@@ -6362,6 +6413,10 @@ void _combat_attack_this(Object* target)
         }
         return;
     case COMBAT_BAD_SHOT_ALREADY_DEAD:
+        // Vanilla-silent; log client-side so a dead-target click is provable.
+        if (gMpActive && gMpIsClient) {
+            debugFilePrint("MPCOMBAT: attack click ignored (target already dead) target=0x%X", target->pid);
+        }
         return;
     case COMBAT_BAD_SHOT_AIM_BLOCKED:
         messageListItem.num = 104; // Your aim is blocked.

@@ -1780,6 +1780,9 @@ bool MpProfileApplyRuntimeUpdate(uint8_t netId, const MpPlayerProfile& profile,
     debugFilePrint("MPROF: apply runtime update done netId=%u name='%s' gen=%u items=%zu sections=%08X",
         netId, it->second.profile.name, it->second.profile.generation,
         it->second.profile.rootInventory.size(), changedSections);
+    // The avatar's inventory was rebuilt from the profile — the weapon slot of
+    // its FID never went through inven_wield, so re-derive it from the hands.
+    MpSyncCritterWeaponFid(it->second.object);
     return true;
 }
 
@@ -1925,6 +1928,9 @@ bool MpProfileApplyLocal(const MpPlayerProfile& profile, bool applyPcStats,
                 return false;
             }
         }
+        // The inventory was rebuilt from the profile — the FID's weapon slot
+        // never went through inven_wield, so re-derive it from the hands.
+        MpSyncCritterWeaponFid(gDude);
     }
     debugFilePrint("MPROF: apply local done name='%s' items=%zu hp=%d",
         profile.name, profile.inventory.size(), profile.hp);

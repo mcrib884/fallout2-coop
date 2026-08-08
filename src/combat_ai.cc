@@ -3268,6 +3268,14 @@ int critterSetTeam(Object* obj, int team)
 
     obj->data.critter.combat.team = team;
 
+    // Co-op: client mirrors carry the last synced team. A script-driven
+    // hostility flip (set_team) must reach them immediately, or the crosshair
+    // hover and the acting-critter outline read the stale team and never
+    // treat the critter as an enemy.
+    if (gMpActive && gMpIsHost) {
+        MpBroadcastObjectStateFor(obj);
+    }
+
     if (obj->data.critter.combat.whoHitMeCid == -1) {
         critterSetWhoHitMe(obj, nullptr);
         debugPrint("\nError: CombatData found with invalid who_hit_me!");

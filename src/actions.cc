@@ -81,10 +81,10 @@ static const AnimationType gMaximumBloodDeathAnimations[DAMAGE_TYPE_COUNT] = {
 // Ignored parameters are marked with underscores.
 static int actionKnockdown(Object* obj, AnimationType* anim, int maxDistance, int rotation, int delay);
 static AnimationType actionBlood(Object* obj, AnimationType anim, int delay);
-static AnimationType pickDeathAnim(Object* attacker, Object* defender, Object* weapon, int damage, AnimationType attackerAnimation, bool hitFromFront);
+AnimationType pickDeathAnim(Object* attacker, Object* defender, Object* weapon, int damage, AnimationType attackerAnimation, bool hitFromFront);
 static AnimationType checkDeathAnim(Object* obj, AnimationType anim, int minViolenceLevel, bool hitFromFront);
 static int _internal_destroy(Object* _, Object* toDestroy);
-void showDamageToObject(Object* defender, int damage, int flags, Object* weapon, bool hitFromFront, int knockbackDistance, int knockbackRotation, AnimationType attackerAnimation, Object* attacker, int delay);
+void showDamageToObject(Object* defender, int damage, int flags, Object* weapon, bool hitFromFront, int knockbackDistance, int knockbackRotation, AnimationType attackerAnimation, Object* attacker, int delay, bool playSounds);
 static int _show_death(Object* obj, AnimationType anim);
 static int showDamageToExtras(Attack* attack);
 static void showDamage(Attack* attack, AnimationType attackerAnimation, int delay);
@@ -311,7 +311,7 @@ int _internal_destroy(Object* _, Object* toDestroy)
 // TODO: Check very carefully, lots of conditions and jumps.
 //
 // 0x4108D0 show_damage_to_object
-void showDamageToObject(Object* defender, int damage, int flags, Object* weapon, bool hitFromFront, int knockbackDistance, int knockbackRotation, AnimationType attackerAnimation, Object* attacker, int delay)
+void showDamageToObject(Object* defender, int damage, int flags, Object* weapon, bool hitFromFront, int knockbackDistance, int knockbackRotation, AnimationType attackerAnimation, Object* attacker, int delay, bool playSounds)
 {
     int fid;
     const char* sfx_name;
@@ -331,8 +331,10 @@ void showDamageToObject(Object* defender, int damage, int flags, Object* weapon,
                     actionKnockdown(defender, &anim, knockbackDistance, knockbackRotation, delay);
                     anim = actionBlood(defender, anim, -1);
                 } else {
-                    sfx_name = sfxBuildCharName(defender, anim, CHARACTER_SOUND_EFFECT_DIE);
-                    animationRegisterPlaySoundEffect(defender, sfx_name, delay);
+                    if (playSounds) {
+                        sfx_name = sfxBuildCharName(defender, anim, CHARACTER_SOUND_EFFECT_DIE);
+                        animationRegisterPlaySoundEffect(defender, sfx_name, delay);
+                    }
 
                     anim = pickFallAnim(defender, anim);
                     animationRegisterAnimate(defender, anim, 0);
@@ -344,8 +346,10 @@ void showDamageToObject(Object* defender, int damage, int flags, Object* weapon,
             } else {
                 fid = buildFid(OBJ_TYPE_CRITTER, defender->fid & 0xFFF, ANIM_FIRE_DANCE, weaponAnimationFromFid(defender->fid), defender->rotation + 1);
                 if (artExists(fid)) {
-                    sfx_name = sfxBuildCharName(defender, anim, CHARACTER_SOUND_EFFECT_UNUSED);
-                    animationRegisterPlaySoundEffect(defender, sfx_name, delay);
+                    if (playSounds) {
+                        sfx_name = sfxBuildCharName(defender, anim, CHARACTER_SOUND_EFFECT_UNUSED);
+                        animationRegisterPlaySoundEffect(defender, sfx_name, delay);
+                    }
 
                     // SFALL
                     if (explosionEmitsLight()) {
@@ -405,15 +409,19 @@ void showDamageToObject(Object* defender, int damage, int flags, Object* weapon,
                 }
 
                 anim = ANIM_BURNED_TO_NOTHING;
-                sfx_name = sfxBuildCharName(defender, anim, CHARACTER_SOUND_EFFECT_UNUSED);
-                animationRegisterPlaySoundEffect(defender, sfx_name, -1);
+                if (playSounds) {
+                    sfx_name = sfxBuildCharName(defender, anim, CHARACTER_SOUND_EFFECT_UNUSED);
+                    animationRegisterPlaySoundEffect(defender, sfx_name, -1);
+                }
                 animationRegisterAnimate(defender, anim, 0);
             }
         } else {
             if ((flags & (DAM_KNOCKED_OUT | DAM_KNOCKED_DOWN)) != 0) {
                 anim = hitFromFront ? ANIM_FALL_BACK : ANIM_FALL_FRONT;
-                sfx_name = sfxBuildCharName(defender, anim, CHARACTER_SOUND_EFFECT_UNUSED);
-                animationRegisterPlaySoundEffect(defender, sfx_name, delay);
+                if (playSounds) {
+                    sfx_name = sfxBuildCharName(defender, anim, CHARACTER_SOUND_EFFECT_UNUSED);
+                    animationRegisterPlaySoundEffect(defender, sfx_name, delay);
+                }
                 if (knockbackDistance != 0) {
                     actionKnockdown(defender, &anim, knockbackDistance, knockbackRotation, 0);
                 } else {
@@ -441,8 +449,10 @@ void showDamageToObject(Object* defender, int damage, int flags, Object* weapon,
                         anim = ANIM_HIT_FROM_BACK;
                     }
 
-                    sfx_name = sfxBuildCharName(defender, anim, CHARACTER_SOUND_EFFECT_UNUSED);
-                    animationRegisterPlaySoundEffect(defender, sfx_name, delay);
+                    if (playSounds) {
+                        sfx_name = sfxBuildCharName(defender, anim, CHARACTER_SOUND_EFFECT_UNUSED);
+                        animationRegisterPlaySoundEffect(defender, sfx_name, delay);
+                    }
 
                     animationRegisterAnimate(defender, anim, 0);
                 }
@@ -464,7 +474,9 @@ void showDamageToObject(Object* defender, int damage, int flags, Object* weapon,
             animationRegisterAnimateAndHide(weapon, ANIM_STAND, 0);
 
             sfx_name = sfxBuildWeaponName(WEAPON_SOUND_EFFECT_HIT, weapon, HIT_MODE_RIGHT_WEAPON_PRIMARY, defender);
-            animationRegisterPlaySoundEffect(weapon, sfx_name, 0);
+            if (playSounds) {
+                animationRegisterPlaySoundEffect(weapon, sfx_name, 0);
+            }
 
             animationRegisterHideObjectForced(weapon);
         } else if ((flags & DAM_DESTROY) != 0) {

@@ -155,14 +155,8 @@ int showOptions()
             case KEY_UPPERCASE_S:
             case KEY_LOWERCASE_S:
             case OPTIONS_MENU_BUTTON_SAVE:
-                // A co-op save would serialize the session's synthetic player
-                // protos and ghost avatars; loading it later (or mid-session)
-                // restores unresolvable objects. Not allowed while a session
-                // is active.
-                if (gMpActive) {
-                    win_timed_msg("Saving is unavailable during a co-op session", COLOR_RED);
-                    break;
-                }
+                // Co-op: the host saves a vanilla full save; the client's
+                // save is redirected to its join slot inside lsgSaveGame.
                 if (lsgSaveGame(LOAD_SAVE_MODE_NORMAL) == 1) {
                     rc = 1;
                 }
@@ -170,10 +164,9 @@ int showOptions()
             case KEY_UPPERCASE_L:
             case KEY_LOWERCASE_L:
             case OPTIONS_MENU_BUTTON_LOAD:
-                // Loading mid-session replaces the local map/dude out from
-                // under the network state — the session cannot recover.
                 if (gMpActive) {
-                    win_timed_msg("Loading is unavailable during a co-op session", COLOR_RED);
+                    // Co-op: loading is unavailable during a co-op session.
+                    debugPrint("\n ** Loading is unavailable during a co-op session! **\n");
                     break;
                 }
                 if (lsgLoadGame(LOAD_SAVE_MODE_NORMAL) == 1) {

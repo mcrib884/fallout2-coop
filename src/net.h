@@ -81,6 +81,8 @@ enum NetPacketType {
     NET_PKT_LOOT_STATE = 51,      // host -> looter: authoritative loot state (open/move/takeall/end)
     NET_PKT_COMBAT_MOVE_RESULT = 52, // host -> acting client: authoritative resolved move tile
     NET_PKT_FLOAT_MESSAGE = 53,   // host -> clients: script float_msg relay (combat chatter)
+    NET_PKT_GVAR_SNAPSHOT = 54,   // host -> joining client: full gvar table (quest state)
+    NET_PKT_GVAR_CHANGE = 55,     // host -> clients: one live gvar write
 };
 
 enum NetUnreliablePacketType {
@@ -631,6 +633,24 @@ typedef struct NetFloatMessagePayload {
     int32_t outline;      // explicit style when type == NET_FLOAT_AI/DIALOG_STYLE
     char text[160];       // the message text
 } NetFloatMessagePayload;
+
+// Quest state relay: the gvar table is the single quest persistence in FO2
+// (script local vars of the dude do not survive vanilla saves at all), so the
+// host's table IS the co-op quest state. The joiner receives the full table
+// (FO2 ships 10000 gvars; the relay cap covers any modded table) and every
+// subsequent write rides NET_PKT_GVAR_CHANGE. A full snapshot is one ~64KB
+// reliable packet — well inside ENet's fragmentation limits.
+#define NET_GVAR_MAX_VALUES (16384)
+typedef struct NetGvarSnapshotPayload {
+    uint32_t count;    // entries that follow (clamped to NET_GVAR_MAX_VALUES)
+    int32_t values[NET_GVAR_MAX_VALUES];
+} NetGvarSnapshotPayload;
+
+// Host -> clients: a single gvar write (hooked at gameSetGlobalVar).
+typedef struct NetGvarChangePayload {
+    int32_t index;
+    int32_t value;
+} NetGvarChangePayload;
 #pragma pack(pop)
 
 // --- Transport API ---

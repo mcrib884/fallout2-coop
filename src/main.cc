@@ -182,7 +182,14 @@ mp_run_new_game:
                     if (pendingHostStart == 1) {
                         // Fresh character: persist it as the session's base
                         // save before hosting (co-op framework: always host
-                        // from a save).
+                        // from a save). The session slot is the next empty
+                        // player slot, so every in-session host save lands
+                        // among the player's own slots.
+                        gMpSessionSlot = lsgFindNextEmptySlot();
+                        if (gMpSessionSlot < 0) {
+                            gMpSessionSlot = lsgGetCoopSaveSlot();
+                        }
+                        debugFilePrint("MAIN: new-game host session slot=%d", gMpSessionSlot);
                         int coopSaveRc = lsgQuickSaveGameCoop();
                         debugFilePrint("MAIN: new-game coop save rc=%d", coopSaveRc);
                         if (MpHostStart(gMapHeader.index) != 0) {
@@ -191,9 +198,15 @@ mp_run_new_game:
                     }
                     if (pendingClientStart == 1) {
                         // Fresh character: persist it as the session's base
-                        // save before joining.
+                        // save before joining. The session slot is the next
+                        // empty player slot — every client save during the
+                        // session lands there, visible and reloadable.
+                        gMpSessionSlot = lsgFindNextEmptySlot();
+                        if (gMpSessionSlot < 0) {
+                            gMpSessionSlot = lsgGetCoopSaveSlot();
+                        }
                         int coopSaveRc = lsgQuickSaveGameCoop();
-                        debugFilePrint("MAIN: new-game coop save rc=%d", coopSaveRc);
+                        debugFilePrint("MAIN: new-game coop save rc=%d sessionSlot=%d", coopSaveRc, gMpSessionSlot);
                         if (MpClientConnect(pendingClientAddress, NET_DEFAULT_PORT) != 0) {
                             win_timed_msg("Could not join co-op session", COLOR_RED);
                         }
@@ -259,13 +272,24 @@ mp_run_load_game:
                         debugFilePrint("MAIN: save load complete pendingHostStart=%d map=%d",
                             pendingHostStart, gMapHeader.index);
                         if (pendingHostStart == 2) {
+                            // The session slot is the save this game came
+                            // from — every in-session host save writes back
+                            // into that same SP slot.
+                            gMpSessionSlot = lsgGetLastLoadedSlot();
+                            debugFilePrint("MAIN: load-host session slot=%d", gMpSessionSlot);
                             if (MpHostStart(gMapHeader.index) != 0) {
                                 win_timed_msg("Could not start co-op hosting", COLOR_RED);
                             }
                         }
-                        if (pendingClientStart == 2
-                            && MpClientConnect(pendingClientAddress, NET_DEFAULT_PORT) != 0) {
-                            win_timed_msg("Could not join co-op session", COLOR_RED);
+                        if (pendingClientStart == 2) {
+                            // Joined by loading the client's own save: every
+                            // client save during the session writes back into
+                            // that same SP slot.
+                            gMpSessionSlot = lsgGetLastLoadedSlot();
+                            debugFilePrint("MAIN: load-client session slot=%d", gMpSessionSlot);
+                            if (MpClientConnect(pendingClientAddress, NET_DEFAULT_PORT) != 0) {
+                                win_timed_msg("Could not join co-op session", COLOR_RED);
+                            }
                         }
                         mainLoop();
                         paletteFadeTo(gPaletteWhite);

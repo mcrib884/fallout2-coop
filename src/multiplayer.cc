@@ -30,6 +30,7 @@
 #include "multiplayer_dialog.h"
 #include "multiplayer_loot.h"
 #include "multiplayer_profile.h"
+#include "random.h"
 #include "object.h"
 #include "palette.h"
 #include "svga.h"
@@ -52,6 +53,33 @@ MultiplayerSession gMpSession = {};
 bool gMpIsHost = false;
 bool gMpIsClient = false;
 bool gMpActive = false;
+// The slot the client session was built from (see multiplayer.h). Set by the
+// join paths before MpClientConnect; the connect fallback covers stragglers.
+int gMpSessionSlot = -1;
+// The current map's NATURAL entering position, captured on the client right
+// after the map file load. The co-op map metadata overwrites
+// gMapHeader.entering* with the host's position; client saves must carry the
+// natural entrance instead of any session position.
+static int gMpClientMapEnteringTile = -1;
+static int gMpClientMapEnteringElevation = -1;
+static int gMpClientMapEnteringRotation = -1;
+
+// The client's map-entrance snapshot (see the statics above). Used by the
+// save redirect so a client save never carries a co-op session position.
+void MpGetClientMapEnteringPosition(int* tile, int* elevation, int* rotation)
+{
+    if (tile != nullptr) {
+        *tile = gMpClientMapEnteringTile;
+    }
+    if (elevation != nullptr) {
+        *elevation = gMpClientMapEnteringElevation;
+    }
+    if (rotation != nullptr) {
+        *rotation = gMpClientMapEnteringRotation;
+    }
+}
+
+static int mpRandomSpawnAnchor(int preferredTile, int elevation);
 bool gMpSuppressExitGridCheck = false;
 // Set while the synchronized dialogue modal is open on a client: MpTick
 // skips the deferred-packet drain so session-changing packets never apply
@@ -469,6 +497,28 @@ static void mpApplyReceivedProfile(uint8_t netId, uint32_t objNetId,
     mpClientTryFinishMapSync();
 }
 
+// Sends the host's full gvar table to one peer (join seeding, resync after a
+// client load). The client's quest mirror then stays live via GVAR_CHANGE.
+static void mpHostSendGvarSnapshot(ENetPeer* peer, uint32_t netId)
+{
+    if (peer == nullptr || gGameGlobalVars == nullptr || gGameGlobalVarsLength <= 0) {
+        return;
+    }
+    const int valueCount = (gGameGlobalVarsLength < NET_GVAR_MAX_VALUES)
+        ? gGameGlobalVarsLength : NET_GVAR_MAX_VALUES;
+    const int payloadSize = (int)sizeof(NetGvarSnapshotPayload);
+    NetGvarSnapshotPayload* snapshot = (NetGvarSnapshotPayload*)malloc(payloadSize);
+    if (snapshot == nullptr) {
+        return;
+    }
+    snapshot->count = (uint32_t)valueCount;
+    memcpy(snapshot->values, gGameGlobalVars, valueCount * sizeof(int32_t));
+    NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_GVAR_SNAPSHOT, snapshot, payloadSize);
+    free(snapshot);
+    debugFilePrint("MP: gvar snapshot sent netId=%u count=%d (local=%d)",
+        netId, valueCount, gGameGlobalVarsLength);
+}
+
 static void mpHostAcceptProfile(MultiplayerPlayer* player, ENetPeer* peer,
     const MpPlayerProfile& profile, uint32_t streamId, uint32_t changedSections)
 {
@@ -528,12 +578,16 @@ static void mpHostAcceptProfile(MultiplayerPlayer* player, ENetPeer* peer,
     // state update from snapping the client's character to a spawn tile.
     // Fall back to a spot near the host only when the profile position is
     // unusable.
-    int32_t tile = hexGridTileIsValid(profile.tile)
-        ? profile.tile
-        : (hexGridTileIsValid(gDude->tile) ? gDude->tile : gMapHeader.enteringTile);
-    int32_t elevation = elevationIsValid(profile.elevation)
-        ? profile.elevation
-        : (gMapHeader.enteringElevation >= 0 ? gMapHeader.enteringElevation : gDude->elevation);
+    // Co-op: spawn the joiner around the HOST critter (small random radius),
+    // not at the profile's own SP position — the session world may be a
+    // different map entirely, and the profile tile could land the avatar
+    // anywhere. The client follows via the player-state sync.
+    int32_t tile = hexGridTileIsValid(gDude->tile)
+        ? mpRandomSpawnAnchor(gDude->tile, gDude->elevation)
+        : (hexGridTileIsValid(gMapHeader.enteringTile) ? gMapHeader.enteringTile : gDude->tile);
+    int32_t elevation = gDude != nullptr && elevationIsValid(gDude->elevation)
+        ? gDude->elevation
+        : (gMapHeader.enteringElevation >= 0 ? gMapHeader.enteringElevation : 0);
     int32_t rotation = profile.rotation >= 0 && profile.rotation < ROTATION_COUNT
         ? profile.rotation
         : (gMapHeader.enteringRotation >= 0 ? gMapHeader.enteringRotation : ROTATION_NE);
@@ -629,6 +683,12 @@ static void mpHostAcceptProfile(MultiplayerPlayer* player, ENetPeer* peer,
     }
 
     MpBroadcastMapFullSync(peer);
+
+    // Quest state: seed the joiner with the host's full gvar table. Every
+    // write after this point rides NET_PKT_GVAR_CHANGE (gameSetGlobalVar
+    // hook), so the client's quest mirror stays live for its own saves.
+    mpHostSendGvarSnapshot(peer, player->netId);
+
     win_timed_msg("Player joined", COLOR_GREEN);
     debugFilePrint("MP: host accept profile done netId=%u name='%s' objNet=%u players=%d",
         player->netId, player->name, player->objNetId, gMpSession.numPlayers);
@@ -921,6 +981,13 @@ static int mpClientLoadMap(const NetMapSyncPayload* payload)
     mpDebugDumpWalls("client-pre-sync", 12);
     mpDebugDumpLightState("client-after-load");
     if (rc == 0) {
+        // Snapshot the map file's natural entering position before the co-op
+        // metadata overwrites gMapHeader.entering* with the host's position.
+        gMpClientMapEnteringTile = gMapHeader.enteringTile;
+        gMpClientMapEnteringElevation = gMapHeader.enteringElevation;
+        gMpClientMapEnteringRotation = gMapHeader.enteringRotation;
+        debugFilePrint("MP: client map entering snapshot tile=%d elev=%d rot=%d",
+            gMapHeader.enteringTile, gMapHeader.enteringElevation, gMapHeader.enteringRotation);
         mpSnapshotMapStaticObjects();
         mpDebugSnapshotPreSyncWalls();
         mpShowClientPlayer(gDude);
@@ -1439,6 +1506,26 @@ static int mpFindPlayerSpawnTile(int preferredTile, int elevation)
     return preferredTile;
 }
 
+// Randomize a spawn anchor within a small radius (1-2 hexes in a random
+// direction) so co-op clients scatter around the host critter instead of
+// stacking on one deterministic tile. Falls back to the anchor when no
+// candidate is free.
+static int mpRandomSpawnAnchor(int preferredTile, int elevation)
+{
+    if (!hexGridTileIsValid(preferredTile)) {
+        return preferredTile;
+    }
+    for (int attempt = 0; attempt < 8; attempt++) {
+        int rotation = randomBetween(0, ROTATION_COUNT - 1);
+        int distance = randomBetween(1, 2);
+        int tile = tileGetTileInDirection(preferredTile, rotation, distance);
+        if (hexGridTileIsValid(tile) && !_obj_occupied(tile, elevation)) {
+            return tile;
+        }
+    }
+    return preferredTile;
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
@@ -1526,6 +1613,17 @@ int MpHostStart(int32_t mapId)
             gMpActive, gGameLoaded, (void*)gDude, mapId);
         debugFilePrint("MP: MpHostStart rejected invalid state");
         return -1;
+    }
+
+    // The session slot: the save this game came from (loaded), or the next
+    // empty slot (new game — the main.cc new-game path already set it; this
+    // is a safety net for any hosting path that missed the explicit set).
+    if (gMpSessionSlot < 0) {
+        gMpSessionSlot = lsgGetLastLoadedSlot();
+        if (gMpSessionSlot < 0) {
+            gMpSessionSlot = lsgGetCoopSaveSlot();
+        }
+        debugFilePrint("MP: host session slot fallback slot=%d", gMpSessionSlot);
     }
 
     ENetHost* host = NetHostCreate(NET_DEFAULT_PORT, NET_MAX_PLAYERS);
@@ -1669,6 +1767,13 @@ int MpClientConnect(const char* address, uint16_t port)
 {
     if (gMpActive) {
         return -1;
+    }
+
+    if (gMpSessionSlot < 0) {
+        // No join path recorded a slot (should not happen): fall back to the
+        // hidden co-op slot so client saves never hit a picker mid-session.
+        gMpSessionSlot = lsgGetCoopSaveSlot();
+        debugFilePrint("MP: client join slot fallback coop slot=%d", gMpSessionSlot);
     }
 
     gMpPendingClientProfileValid = MpProfileCaptureLocal(&gMpPendingClientProfile);
@@ -2255,6 +2360,42 @@ void MpTick()
 // ---------------------------------------------------------------------------
 // Network event dispatch (host & client)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Client quest-state apply (NET_PKT_GVAR_SNAPSHOT / NET_PKT_GVAR_CHANGE).
+// The host's gvar table is the co-op quest state: the snapshot seeds the
+// mirror at join, change packets keep it live. The client's own saves then
+// persist the host's quests into the client's slot.
+// ---------------------------------------------------------------------------
+
+static void mpGvarOnChange(const NetGvarChangePayload* payload)
+{
+    if (!gMpIsClient || !gMpActive || payload == nullptr) {
+        return;
+    }
+    if (payload->index < 0 || payload->index >= gGameGlobalVarsLength) {
+        debugFilePrint("MP: gvar change out of range idx=%d len=%d", payload->index, gGameGlobalVarsLength);
+        return;
+    }
+    gGameGlobalVars[payload->index] = payload->value;
+    debugFilePrint("MP: gvar change idx=%d val=%d", payload->index, payload->value);
+}
+
+static void mpGvarOnSnapshot(const NetGvarSnapshotPayload* payload, size_t payloadLen)
+{
+    if (!gMpIsClient || !gMpActive || payload == nullptr) {
+        return;
+    }
+    const size_t maxValues = (payloadLen - offsetof(NetGvarSnapshotPayload, values)) / sizeof(int32_t);
+    const size_t hostCount = payload->count;
+    const int count = (hostCount < maxValues) ? (int)hostCount : (int)maxValues;
+    const int applyCount = (count < gGameGlobalVarsLength) ? count : gGameGlobalVarsLength;
+    if (applyCount > 0) {
+        memcpy(gGameGlobalVars, payload->values, (size_t)applyCount * sizeof(int32_t));
+    }
+    debugFilePrint("MP: gvar snapshot received count=%d applied=%d localLen=%d",
+        count, applyCount, gGameGlobalVarsLength);
+}
 
 static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t dataLength, void* /*userData*/)
 {
@@ -3078,6 +3219,22 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                 return;
             }
             MpCombatOnFloatMessage((const NetFloatMessagePayload*)payload);
+            break;
+        }
+        case NET_PKT_GVAR_SNAPSHOT: {
+            if (payloadLen < sizeof(NetGvarSnapshotPayload)) {
+                debugFilePrint("MP: gvar snapshot bad length=%zu", payloadLen);
+                return;
+            }
+            mpGvarOnSnapshot((const NetGvarSnapshotPayload*)payload, payloadLen);
+            break;
+        }
+        case NET_PKT_GVAR_CHANGE: {
+            if (payloadLen < sizeof(NetGvarChangePayload)) {
+                debugFilePrint("MP: gvar change bad length=%zu", payloadLen);
+                return;
+            }
+            mpGvarOnChange((const NetGvarChangePayload*)payload);
             break;
         }
         case NET_PKT_COMBAT_MESSAGE: {
@@ -3982,15 +4139,11 @@ void MpBroadcastMapFullSync(ENetPeer* toPeer)
     }
 }
 
-void MpBroadcastMapChanged(int32_t mapId)
+static void mpBuildMapChangedPayload(NetMapChangedPayload* p, int32_t mapId)
 {
-    if (!gMpIsHost || gMpSession.enetHost == nullptr) {
-        return;
-    }
-    NetMapChangedPayload p;
-    memset(&p, 0, sizeof(p));
-    mpBuildMapSyncPayload(&p.map);
-    p.map.mapId = mapId;
+    memset(p, 0, sizeof(*p));
+    mpBuildMapSyncPayload(&p->map);
+    p->map.mapId = mapId;
     // Anchor client-side avatar rebuilds at the host's ACTUAL post-transition
     // position instead of the map file's default entering tile. MpFinishHostMapChange
     // respawns every player around gDude's tile; the client mirrors that logic in
@@ -3999,15 +4152,24 @@ void MpBroadcastMapChanged(int32_t mapId)
     // first player-state update has nothing to snap.
     if (gDude != nullptr) {
         if (hexGridTileIsValid(gDude->tile)) {
-            p.map.enteringTile = gDude->tile;
+            p->map.enteringTile = gDude->tile;
         }
         if (elevationIsValid(gDude->elevation)) {
-            p.map.enteringElevation = gDude->elevation;
+            p->map.enteringElevation = gDude->elevation;
         }
         if (gDude->rotation >= 0 && gDude->rotation < ROTATION_COUNT) {
-            p.map.enteringRotation = gDude->rotation;
+            p->map.enteringRotation = gDude->rotation;
         }
     }
+}
+
+void MpBroadcastMapChanged(int32_t mapId)
+{
+    if (!gMpIsHost || gMpSession.enetHost == nullptr) {
+        return;
+    }
+    NetMapChangedPayload p;
+    mpBuildMapChangedPayload(&p, mapId);
     debugFilePrint("MP: broadcast map changed map=%d enteringTile=%d elev=%d",
         mapId, p.map.enteringTile, p.map.enteringElevation);
     NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE, NET_PKT_MAP_CHANGED, &p, sizeof(p));
@@ -4117,7 +4279,7 @@ void MpFinishHostMapChange()
         }
         MpPlayerProfile profileCopy = runtime->profile;
         MpProfileDetachAvatar(player->netId);
-        int playerTile = mpFindPlayerSpawnTile(tile, elevation);
+        int playerTile = mpFindPlayerSpawnTile(mpRandomSpawnAnchor(tile, elevation), elevation);
         runtime = MpProfileCreateRuntime(player->netId, profileCopy,
             playerTile, elevation, rotation);
         if (runtime == nullptr) {

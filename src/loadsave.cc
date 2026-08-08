@@ -436,6 +436,47 @@ int lsgSaveGame(int mode)
     debugFilePrint("LOADSAVE: save game begin mode=%d co-op=%d", mode, gMpActive ? 1 : 0);
     ScopedGameMode gm(GameMode::kSaveGame);
 
+    // Co-op: the save menu is gone for host and client alike. Every save
+    // (F4/Ctrl-S, F6, options menu — all funnel through here) silently writes
+    // into the slot the session was built from — never a slot picker. The
+    // session slot is the client's own SP slot when they joined by loading
+    // one, the next empty slot for new-game sessions, or the hidden co-op
+    // slot for in-game joins.
+    if (gMpActive && gMpSessionSlot >= 0) {
+        debugFilePrint("LOADSAVE: co-op save redirected to session slot=%d", gMpSessionSlot);
+        if (gMpIsClient) {
+            // A client save must not carry a session position: write the map's
+            // natural entrance into the dude's serialized transform instead.
+            // The load path would place the dude at the map entrance anyway,
+            // but this keeps the file explicitly position-free.
+            int entranceTile = -1;
+            int entranceElevation = -1;
+            int entranceRotation = -1;
+            MpGetClientMapEnteringPosition(&entranceTile, &entranceElevation, &entranceRotation);
+            if (gDude != nullptr && hexGridTileIsValid(entranceTile)) {
+                Object* dude = gDude;
+                const int oldTile = dude->tile;
+                const int oldElevation = dude->elevation;
+                const int oldRotation = dude->rotation;
+                const int elevation = elevationIsValid(entranceElevation)
+                    ? entranceElevation
+                    : oldElevation;
+                const int rotation = entranceRotation >= 0 && entranceRotation < ROTATION_COUNT
+                    ? entranceRotation
+                    : oldRotation;
+                objectSetLocation(dude, entranceTile, elevation, nullptr);
+                objectSetRotation(dude, rotation, nullptr);
+                const int rc = lsgQuickSaveGameInternal(gMpSessionSlot);
+                objectSetLocation(dude, oldTile, oldElevation, nullptr);
+                objectSetRotation(dude, oldRotation, nullptr);
+                debugFilePrint("LOADSAVE: client save position stripped (entrance=%d)",
+                    entranceTile);
+                return rc;
+            }
+        }
+        return lsgQuickSaveGameInternal(gMpSessionSlot);
+    }
+
     MessageListItem messageListItem;
 
     _ls_error_code = 0;
@@ -1021,6 +1062,31 @@ constexpr int LOAD_SAVE_COOP_SLOT = saveLoadTotalSlots;
 int lsgGetCoopSaveSlot()
 {
     return LOAD_SAVE_COOP_SLOT;
+}
+
+int lsgGetLastLoadedSlot()
+{
+    return _slot_cursor;
+}
+
+// First UI-range slot without a save file. New-game co-op sessions use this
+// as their session slot, so their saves appear among the player's own slots
+// and are reloadable from the main menu.
+int lsgFindNextEmptySlot()
+{
+    for (int slot = 0; slot < saveLoadTotalSlots; slot++) {
+        char path[COMPAT_MAX_PATH];
+        snprintf(path, sizeof(path), "%s\\%s%.2d\\", "SAVEGAME", "SLOT", slot + 1);
+        strcat(path, "SAVE.DAT");
+        fallout::File* f = fileOpen(path, "rb");
+        if (f == nullptr) {
+            debugFilePrint("LOADSAVE: next empty slot=%d", slot + 1);
+            return slot;
+        }
+        fileClose(f);
+    }
+    debugFilePrint("LOADSAVE: no empty slot found");
+    return -1;
 }
 
 // The save/load header writes slot metadata; the UI range is covered by

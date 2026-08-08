@@ -25,6 +25,12 @@ int lsgQuickSaveGame();
 // existing save or create a new character, save it here, and use that.
 // Future mid-session multiplayer saves will use the same helpers.
 int lsgGetCoopSaveSlot();
+// The slot most recently loaded (SP load or coop load). A client that joined
+// by loading one of its own saves writes back into that same slot.
+int lsgGetLastLoadedSlot();
+// First UI-range slot (01..100) with no SAVE.DAT yet, or -1 when all taken.
+// Co-op new-game sessions save their session character into this slot.
+int lsgFindNextEmptySlot();
 int lsgQuickSaveGameCoop();
 int lsgLoadGameCoop();
 int lsgLoadGame(int mode);

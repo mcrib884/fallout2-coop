@@ -107,6 +107,11 @@ extern MultiplayerSession gMpSession;
 extern bool gMpIsHost;
 extern bool gMpIsClient;
 extern bool gMpActive;
+// The save slot a co-op session was built from; every in-session save (host
+// and client alike) silently lands there: the player's own SP slot when they
+// loaded a save, the next empty slot for new-game sessions, the hidden co-op
+// slot for in-game joins. Set at session start, -1 before.
+extern int gMpSessionSlot;
 // Set while the synchronized dialogue modal is open on a client: MpTick
 // skips the deferred-packet drain so session-changing packets never apply
 // under the modal (the host's DIALOG_END closes the modal first).
@@ -153,6 +158,10 @@ void MpFinishHostMapChange();
 
 // apply (client)
 void MpApplyPlayerState(const NetPlayerStateUpdatePayload* payload);
+// The client's current map-entrance snapshot (natural entering position from
+// the map file, captured before the co-op metadata overwrites the header).
+// Used by the save redirect so client saves never carry a session position.
+void MpGetClientMapEnteringPosition(int* tile, int* elevation, int* rotation);
 // Snap the local dude to an authoritative tile (combat move resolutions that
 // diverge from the optimistic walk). Stops the running walk first.
 void MpApplyLocalDudeSnap(int tile, int elevation);

@@ -923,11 +923,9 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
     case KEY_CTRL_S:
     case KEY_F4:
         soundPlayFile("ib1p1xx1");
-        // Co-op: a session save would serialize the synthetic player protos.
-        if (gMpActive) {
-            win_timed_msg("Saving is unavailable during a co-op session", COLOR_RED);
-            break;
-        }
+        // Co-op: the host saves a vanilla full save (avatars carry
+        // OBJECT_NO_SAVE, so no synthetic protos are serialized); the client
+        // is redirected to its join slot inside lsgSaveGame.
         if (lsgSaveGame(1) == -1) {
             debugPrint("\n ** Error calling SaveGame()! **\n");
         }
@@ -935,10 +933,9 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
     case KEY_CTRL_L:
     case KEY_F5:
         soundPlayFile("ib1p1xx1");
-        // Co-op: loading replaces the map/dude out from under the network
-        // state — the session cannot recover.
         if (gMpActive) {
-            win_timed_msg("Loading is unavailable during a co-op session", COLOR_RED);
+            // Co-op: loading is unavailable during a co-op session.
+            debugPrint("\n ** Loading is unavailable during a co-op session! **\n");
             break;
         }
         if (lsgLoadGame(LOAD_SAVE_MODE_NORMAL) == -1) {
@@ -948,11 +945,6 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
     case KEY_F6:
         if (1) {
             soundPlayFile("ib1p1xx1");
-            if (gMpActive) {
-                win_timed_msg("Saving is unavailable during a co-op session", COLOR_RED);
-                break;
-            }
-
             int rc = lsgSaveGame(LOAD_SAVE_MODE_QUICK);
             if (rc == -1) {
                 debugPrint("\n ** Error calling SaveGame()! **\n");
@@ -968,7 +960,8 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
         if (1) {
             soundPlayFile("ib1p1xx1");
             if (gMpActive) {
-                win_timed_msg("Loading is unavailable during a co-op session", COLOR_RED);
+                // Co-op: loading is unavailable during a co-op session.
+                debugPrint("\n ** Loading is unavailable during a co-op session! **\n");
                 break;
             }
 
@@ -1083,6 +1076,17 @@ int gameSetGlobalVar(GameGlobalVar var, int value)
     }
 
     gGameGlobalVars[var] = value;
+
+    // Co-op: every gvar write is quest state. Relay it so clients keep their
+    // mirror of the host's quests live (their saves then persist it); the
+    // join snapshot (NET_PKT_GVAR_SNAPSHOT) seeds the mirror.
+    if (gMpActive && gMpIsHost) {
+        NetGvarChangePayload payload;
+        payload.index = var;
+        payload.value = value;
+        NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE,
+            NET_PKT_GVAR_CHANGE, &payload, sizeof(payload));
+    }
 
     return 0;
 }

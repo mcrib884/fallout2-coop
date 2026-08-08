@@ -233,8 +233,11 @@ int MpJoinFlowShow()
     // and reloaded from it, so the session always builds from a save and the
     // player's own slots are never touched.
     if (gGameLoaded) {
+        // The session's base save is the hidden co-op slot; client saves
+        // during the session land there too.
+        gMpSessionSlot = lsgGetCoopSaveSlot();
         int saveRc = lsgQuickSaveGameCoop();
-        debugFilePrint("MPMENU: in-game join coop save rc=%d", saveRc);
+        debugFilePrint("MPMENU: in-game join coop save rc=%d sessionSlot=%d", saveRc, gMpSessionSlot);
         if (saveRc != 1) {
             win_timed_msg("Could not back up your game before joining", COLOR_RED);
             return 0;

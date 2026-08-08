@@ -17,6 +17,7 @@
 #include "critter.h"
 #include "debug.h"
 #include "display_monitor.h"
+#include "font_manager.h"
 #include "game.h"
 #include "geometry.h"
 #include "input.h"
@@ -57,6 +58,18 @@ bool gMpActive = false;
 // The slot the client session was built from (see multiplayer.h). Set by the
 // join paths before MpClientConnect; the connect fallback covers stragglers.
 int gMpSessionSlot = -1;
+// The netId of the player whose NET_PLAYER_ACTION is currently being handled
+// on the host (0 when idle). Scripts run synchronously inside the action
+// handler, so any monitor line emitted or elevator requested during that
+// window belongs to the remote player's action — display_monitor.cc uses it
+// to relay non-combat script feedback, scripts.cc uses it to block remote
+// elevator use.
+static uint32_t gMpRemoteActionNetId = 0;
+
+bool MpRemoteActionActive()
+{
+    return gMpRemoteActionNetId != 0;
+}
 // The current map's NATURAL entering position, captured on the client right
 // after the map file load. The co-op map metadata overwrites
 // gMapHeader.entering* with the host's position; client saves must carry the
@@ -2255,6 +2268,150 @@ static void mpClientSyncLocalProfile()
         localNetId, upload.generation, changedSections);
 }
 
+// ---------------------------------------------------------------------------
+// Off-screen player indicators
+// ---------------------------------------------------------------------------
+// Small edge windows that point at remote players whose avatar is outside
+// the current viewport. Drawn once per frame from the main loop (after
+// MpTick, before renderPresent); each window is recreated only when its
+// clamped position changes, hidden when the player is on screen.
+#define MP_INDICATOR_WIDTH 104
+#define MP_INDICATOR_HEIGHT 16
+#define MP_INDICATOR_INSET 8
+#define MP_INDICATOR_FONT 101
+
+static int gMpIndicatorWindows[NET_MAX_PLAYERS];
+static int gMpIndicatorWinX[NET_MAX_PLAYERS];
+static int gMpIndicatorWinY[NET_MAX_PLAYERS];
+
+// Hiding a window leaves its pixels on screen until the map under it is
+// repainted, so every destroy path must refresh the window's rect — a
+// destroyed-but-unrefreshed rectangle would otherwise stay visible (the
+// destroy can also run after combat blocked the main loop, when the viewport
+// may not be redrawing at all).
+static void mpIndicatorHide(int index)
+{
+    if (gMpIndicatorWindows[index] == -1) {
+        return;
+    }
+    Rect rect;
+    rect.left = gMpIndicatorWinX[index];
+    rect.top = gMpIndicatorWinY[index];
+    rect.right = rect.left + MP_INDICATOR_WIDTH;
+    rect.bottom = rect.top + MP_INDICATOR_HEIGHT;
+    windowDestroy(gMpIndicatorWindows[index]);
+    gMpIndicatorWindows[index] = -1;
+    tileWindowRefreshRect(&rect, gElevation);
+}
+
+void MpDrawPlayerIndicators()
+{
+    if (!gMpActive || gMpSession.players == nullptr) {
+        return;
+    }
+    if (gMpIsClient && gMpSession.state != MP_STATE_CLIENT_PLAYING) {
+        return;
+    }
+    static bool gMpIndicatorInited = false;
+    if (!gMpIndicatorInited) {
+        gMpIndicatorInited = true;
+        for (int initIndex = 0; initIndex < NET_MAX_PLAYERS; initIndex++) {
+            gMpIndicatorWindows[initIndex] = -1;
+        }
+    }
+    // The main loop only calls this while the game is running, so the
+    // interface bar is always present; its top edge is the viewport bottom.
+    const int screenW = screenGetWidth();
+    const int screenH = screenGetHeight();
+    const int viewportBottom = screenH - INTERFACE_BAR_HEIGHT;
+
+    for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+        MultiplayerPlayer* player = &gMpSession.players[index];
+        const bool wantWindow = player != nullptr && player->isConnected
+            && !player->isLocal && player->netId != 0;
+        Object* obj = wantWindow
+            ? (player->obj != nullptr ? player->obj : MpFindObjByNetId(player->objNetId))
+            : nullptr;
+
+        if (!wantWindow || obj == nullptr || !hexGridTileIsValid(obj->tile)
+            || !elevationIsValid(obj->elevation)) {
+            mpIndicatorHide(index);
+            continue;
+        }
+
+        // Screen position of the avatar (tile top-left + body offset).
+        int bodyX;
+        int bodyY;
+        tileToScreenXY(obj->tile, &bodyX, &bodyY);
+        bodyX += 32;
+        bodyY += 28;
+
+        const bool onScreen = bodyX >= 0 && bodyX < screenW
+            && bodyY >= 0 && bodyY < viewportBottom;
+        if (onScreen) {
+            mpIndicatorHide(index);
+            continue;
+        }
+
+        // Clamp to the nearest edge and pick the direction glyph.
+        const char* arrow = ">>";
+        int winX = 0;
+        int winY = 0;
+        if (bodyX < 0) {
+            arrow = "<<";
+            winX = MP_INDICATOR_INSET;
+            winY = std::clamp(bodyY, MP_INDICATOR_INSET,
+                viewportBottom - MP_INDICATOR_INSET - MP_INDICATOR_HEIGHT);
+        } else if (bodyX >= screenW) {
+            arrow = ">>";
+            winX = screenW - MP_INDICATOR_INSET - MP_INDICATOR_WIDTH;
+            winY = std::clamp(bodyY, MP_INDICATOR_INSET,
+                viewportBottom - MP_INDICATOR_INSET - MP_INDICATOR_HEIGHT);
+        } else if (bodyY < 0) {
+            arrow = "^";
+            winX = std::clamp(bodyX - MP_INDICATOR_WIDTH / 2, MP_INDICATOR_INSET,
+                screenW - MP_INDICATOR_INSET - MP_INDICATOR_WIDTH);
+            winY = MP_INDICATOR_INSET;
+        } else {
+            arrow = "v";
+            winX = std::clamp(bodyX - MP_INDICATOR_WIDTH / 2, MP_INDICATOR_INSET,
+                screenW - MP_INDICATOR_INSET - MP_INDICATOR_WIDTH);
+            winY = viewportBottom - MP_INDICATOR_INSET - MP_INDICATOR_HEIGHT;
+        }
+
+        // Recreate the window only when its position moved.
+        if (gMpIndicatorWindows[index] != -1
+            && gMpIndicatorWinX[index] == winX && gMpIndicatorWinY[index] == winY) {
+            continue;
+        }
+        mpIndicatorHide(index);
+
+        int win = windowCreate(winX, winY, MP_INDICATOR_WIDTH, MP_INDICATOR_HEIGHT,
+            COLOR_BLACK, WINDOW_MOVE_ON_TOP);
+        if (win == -1) {
+            continue;
+        }
+        windowDrawBorder(win);
+        char text[MP_INDICATOR_WIDTH / 2 + 8];
+        const char* name = player->name;
+        if (name == nullptr || name[0] == '\0') {
+            name = "?";
+        }
+        snprintf(text, sizeof(text), "%s %s", arrow, name);
+        // The ambient font state at this point in the main loop is
+        // unpredictable (scripts/interface leave any font selected); without
+        // an explicit selection windowDrawText can silently skip the draw
+        // (line-height/width checks against the window size).
+        fontSetCurrent(MP_INDICATOR_FONT);
+        windowDrawText(win, text, 0, 6, 3, COLOR_LIGHT_YELLOW);
+        windowRefresh(win);
+
+        gMpIndicatorWindows[index] = win;
+        gMpIndicatorWinX[index] = winX;
+        gMpIndicatorWinY[index] = winY;
+    }
+}
+
 void MpTick()
 {
     if (!gMpActive) {
@@ -2561,6 +2718,21 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                     return;
                 }
 
+                // Scripts run synchronously inside this handler; the flag
+                // tells display_monitor.cc / scripts.cc that any monitor line
+                // or elevator request produced now belongs to this remote
+                // player's action. Cleared automatically on every exit.
+                struct MpRemoteActionScope {
+                    explicit MpRemoteActionScope(uint32_t netId)
+                    {
+                        gMpRemoteActionNetId = netId;
+                    }
+                    ~MpRemoteActionScope()
+                    {
+                        gMpRemoteActionNetId = 0;
+                    }
+                } remoteActionScope(p->netId);
+
                 if (action->action == NET_PLAYER_ACTION_WALK
                     || action->action == NET_PLAYER_ACTION_RUN) {
                     if (!hexGridTileIsValid(action->tile)
@@ -2662,6 +2834,56 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                         objectRotateClockwise(p->obj, nullptr);
                     }
                     break;
+                case NET_PLAYER_ACTION_USE_ITEM_ON: {
+                    // Client used an inventory item on a map object (crosshair
+                    // click or picker). Find the item by pid (rides the tile
+                    // field), gate/deduct combat AP like vanilla, and run the
+                    // use host-side — the target's USE_OBJ_ON script executes
+                    // here and the result streams back through the object
+                    // sync.
+                    Object* item = nullptr;
+                    if (p->obj != nullptr) {
+                        for (int itemIndex = 0;
+                            itemIndex < p->obj->data.inventory.length; itemIndex++) {
+                            Object* candidate = p->obj->data.inventory.items[itemIndex].item;
+                            if (candidate != nullptr && candidate->pid == action->tile) {
+                                item = candidate;
+                                break;
+                            }
+                        }
+                    }
+                    if (item == nullptr) {
+                        debugFilePrint("MP: use-item-on no item netId=%u pid=0x%X",
+                            p->netId, action->tile);
+                        break;
+                    }
+                    if (isInCombat()) {
+                        // Entry mode 1 (inventory picker) costs a flat 2 AP in
+                        // vanilla; the crosshair click costs the item's
+                        // weapon-mode AP cost.
+                        int cost = action->skill == 1
+                            ? 2
+                            : itemGetActionPointCost(p->obj,
+                                HIT_MODE_RIGHT_WEAPON_PRIMARY, false);
+                        if (p->obj->data.critter.combat.ap < cost) {
+                            debugFilePrint("MP: use-item-on rejected netId=%u pid=0x%X ap=%d cost=%d",
+                                p->netId, item->pid, p->obj->data.critter.combat.ap, cost);
+                            break;
+                        }
+                        if (_action_use_an_item_on_object(p->obj, target, item) != -1) {
+                            p->obj->data.critter.combat.ap -= cost;
+                            if (p->obj->data.critter.combat.ap < 0) {
+                                p->obj->data.critter.combat.ap = 0;
+                            }
+                            // The avatar's AP rides the player-state channel.
+                        }
+                    } else {
+                        _action_use_an_item_on_object(p->obj, target, item);
+                    }
+                    debugFilePrint("MP: use-item-on netId=%u targetNetId=%u pid=0x%X combat=%d",
+                        p->netId, action->targetNetId, item->pid, isInCombat() ? 1 : 0);
+                    break;
+                }
                 default:
                     break;
                 }
@@ -4035,24 +4257,17 @@ void MpBroadcastMapFullSync(ENetPeer* toPeer)
     int skipHidden = 0;
     int skipNoNetId = 0;
     int skipInventory = 0;
-    int skipStatic = 0;
     int skipOther = 0;
     Object* obj = objectFindFirst();
     while (obj != nullptr) {
-        // Static map-file objects are identical on every machine: the client
-        // already has them from its own map load. Skipping them here removes
-        // ~450 states from the sync and the net-id collision/vanishing-wall
-        // failure mode with them. Living beings (critters) are NOT static:
-        // the host owns them and streams their states, so they ship in the
-        // sync with their netIds and the client's vanilla copies get replaced
-        // (mpClearClientMapObjectsForFullSync destroys the vanilla critters
-        // and expects the sync to recreate them).
-        if (gMpMapStaticObjIds.count(obj->id) != 0
-            && FID_TYPE(obj->fid) != OBJ_TYPE_CRITTER) {
-            skipStatic++;
-            obj = objectFindNext();
-            continue;
-        }
+        // Static map-file scenery/walls SHIP in the sync. The client keeps its
+        // own map-file copies (mpClearClientMapObjectsForFullSync) and the
+        // apply path map-matches by tile+pid (mpApplyObjectStateInternal with
+        // allowMapMatch=true), so no duplicate objects are created; the states
+        // register the local copies with their host netIds and carry the
+        // host's CURRENT fid/flags (an already-open door). Without them the
+        // client's statics never get netIds and every action on them (TOUCH,
+        // INSPECT, PUSH, ROTATE) dies at MpGetObjNetId()==0.
         NetMapFullSyncObjectPayload state;
         if (mpBuildObjectState(obj, &state)) {
             objects.push_back(state);
@@ -4067,8 +4282,8 @@ void MpBroadcastMapFullSync(ENetPeer* toPeer)
         }
         obj = objectFindNext();
     }
-    debugFilePrint("MP: full sync objects=%zu sent=%zu skipNoNetId=%d skipHidden=%d skipInventory=%d skipStatic=%d skipOther=%d",
-        objects.size(), objects.size(), skipNoNetId, skipHidden, skipInventory, skipStatic, skipOther);
+    debugFilePrint("MP: full sync objects=%zu sent=%zu skipNoNetId=%d skipHidden=%d skipInventory=%d skipOther=%d",
+        objects.size(), objects.size(), skipNoNetId, skipHidden, skipInventory, skipOther);
 
     uint32_t syncId = ++gMpSession.nextFullSyncId;
     if (syncId == 0) {

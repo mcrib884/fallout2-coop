@@ -195,6 +195,11 @@ enum NetPlayerActionType {
     // inventory and drops it on the ground (the ground object then streams
     // back through the regular object sync).
     NET_PLAYER_ACTION_DROP = 11,
+    // Client uses an inventory item on a map object (crosshair click or the
+    // "use item on" inventory picker). targetNetId = the target object's
+    // netId, tile = the item's pid, skill = entry mode (0 = crosshair click,
+    // 1 = inventory picker; the host uses it to pick the combat AP cost).
+    NET_PLAYER_ACTION_USE_ITEM_ON = 12,
 };
 
 typedef struct NetPlayerActionPayload {

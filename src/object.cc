@@ -1567,35 +1567,43 @@ int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
         // NOTE: Uninline.
         obj_set_seen(tile);
 
-        int roofX = tile % 200 / 2;
-        int roofY = tile / 200 / 2;
-        if (roofX != _obj_last_roof_x || roofY != _obj_last_roof_y || elevation != _obj_last_elev) {
-            int currentSquare = _square[elevation]->field_0[roofX + 100 * roofY];
-            int currentSquareFid = buildFid(OBJ_TYPE_TILE, (currentSquare >> 16) & 0xFFF, 0, 0, 0);
-            // CE: Add additional checks for -1 to prevent array lookup at index -101.
-            int previousSquare = _obj_last_roof_x != -1 && _obj_last_roof_y != -1
-                ? _square[elevation]->field_0[_obj_last_roof_x + 100 * _obj_last_roof_y]
-                : 0;
-            bool isEmpty = buildFid(OBJ_TYPE_TILE, 1, 0, 0, 0) == currentSquareFid;
+        // Co-op: the roof-clear circle must follow the LOCAL player only.
+        // Synced remote critters and mirrored objects move through this same
+        // function — their transforms would drag the transparency circle to
+        // their tiles (on the client that reads as circles placed in the
+        // wrong places) and corrupt the last-roof tracking globals. Vanilla
+        // singleplayer keeps its original last-mover behavior.
+        if (obj == gDude || !gMpActive) {
+            int roofX = tile % 200 / 2;
+            int roofY = tile / 200 / 2;
+            if (roofX != _obj_last_roof_x || roofY != _obj_last_roof_y || elevation != _obj_last_elev) {
+                int currentSquare = _square[elevation]->field_0[roofX + 100 * roofY];
+                int currentSquareFid = buildFid(OBJ_TYPE_TILE, (currentSquare >> 16) & 0xFFF, 0, 0, 0);
+                // CE: Add additional checks for -1 to prevent array lookup at index -101.
+                int previousSquare = _obj_last_roof_x != -1 && _obj_last_roof_y != -1
+                    ? _square[elevation]->field_0[_obj_last_roof_x + 100 * _obj_last_roof_y]
+                    : 0;
+                bool isEmpty = buildFid(OBJ_TYPE_TILE, 1, 0, 0, 0) == currentSquareFid;
 
-            if (isEmpty != _obj_last_is_empty || (((currentSquare >> 16) & 0xF000) >> 12) != (((previousSquare >> 16) & 0xF000) >> 12)) {
-                if (!_obj_last_is_empty) {
-                    tile_fill_roof(_obj_last_roof_x, _obj_last_roof_y, elevation, true);
+                if (isEmpty != _obj_last_is_empty || (((currentSquare >> 16) & 0xF000) >> 12) != (((previousSquare >> 16) & 0xF000) >> 12)) {
+                    if (!_obj_last_is_empty) {
+                        tile_fill_roof(_obj_last_roof_x, _obj_last_roof_y, elevation, true);
+                    }
+
+                    if (!isEmpty) {
+                        tile_fill_roof(roofX, roofY, elevation, false);
+                    }
+
+                    if (rect != nullptr) {
+                        rectUnion(rect, &_scr_size, rect);
+                    }
                 }
 
-                if (!isEmpty) {
-                    tile_fill_roof(roofX, roofY, elevation, false);
-                }
-
-                if (rect != nullptr) {
-                    rectUnion(rect, &_scr_size, rect);
-                }
+                _obj_last_roof_x = roofX;
+                _obj_last_roof_y = roofY;
+                _obj_last_elev = elevation;
+                _obj_last_is_empty = isEmpty;
             }
-
-            _obj_last_roof_x = roofX;
-            _obj_last_roof_y = roofY;
-            _obj_last_elev = elevation;
-            _obj_last_is_empty = isEmpty;
         }
 
         if (rect != nullptr) {

@@ -39,6 +39,7 @@
 #include "multiplayer_combat.h"
 #include "multiplayer_dialog.h"
 #include "multiplayer_loot.h"
+#include "multiplayer_profile.h"
 #include "object.h"
 #include "party_member.h"
 #include "perk.h"
@@ -3210,7 +3211,22 @@ void inventoryOpenUseItemOn(Object* targetObj)
                         // opened by "Use Inventory Item On" (backpack) action icon
                         if (inventoryItemIndex < _pud->length && inventoryItemIndex >= 0) {
                             InventoryItem* inventoryItem = &(_pud->items[inventoryItemIndex]);
-                            if (isInCombat()) {
+                            if (gMpActive && gMpIsClient) {
+                                // Co-op: relay the picker use to the host
+                                // (entry mode 1); the target's script runs
+                                // host-side and the result streams back.
+                                if (targetObj != nullptr && inventoryItem->item != nullptr) {
+                                    uint32_t targetNetId = MpGetObjNetId(targetObj);
+                                    if (targetNetId != 0) {
+                                        MpSendPlayerAction(NET_PLAYER_ACTION_USE_ITEM_ON,
+                                            targetNetId, inventoryItem->item->pid,
+                                            targetObj->elevation, 1);
+                                    } else {
+                                        debugFilePrint("MPDBG: picker use-item-on no netId target pid=0x%X",
+                                            targetObj->pid);
+                                    }
+                                }
+                            } else if (isInCombat()) {
                                 if (gDude->data.critter.combat.ap >= 2) {
                                     if (_action_use_an_item_on_object(gDude, targetObj, inventoryItem->item) != -1) {
                                         int actionPoints = gDude->data.critter.combat.ap;
@@ -4730,6 +4746,22 @@ static void inventoryWindowOpenContextMenu(int keyCode, int inventoryWindowType)
 int inventoryOpenLooting(Object* looter, Object* target)
 {
     MessageListItem messageListItem;
+
+    // Co-op: script-requested looting (searched pots, containers, etc.) runs
+    // host-side with the REMOTE avatar as looter; the vanilla guard below
+    // would silently kill it. Open a synchronized loot session for the
+    // acting player instead — the host relays the container contents and the
+    // client runs its vanilla loot window on a mirror.
+    if (gMpActive && gMpIsHost && looter != gDude && looter != nullptr
+        && MpProfileIsNetworkPlayer(looter)) {
+        uint32_t netId = MpCombatGetCritterPlayerNetId(looter);
+        if (netId != 0) {
+            debugFilePrint("MPLOOT: script-requested loot netId=%u targetPid=0x%X",
+                netId, target != nullptr ? target->pid : 0);
+            MpLootHostStart(netId, target, false);
+            return 0;
+        }
+    }
 
     if (looter != _inven_dude) {
         return 0;

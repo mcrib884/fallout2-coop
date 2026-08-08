@@ -642,6 +642,9 @@ static void mainLoop()
             debugFilePrint("MAIN: first loop after MpTick");
         }
 
+        // Co-op: edge indicators for remote players outside the viewport.
+        MpDrawPlayerIndicators();
+
         gMainLastSection = 6;
         if (_main_game_paused != 0) {
             _main_game_paused = 0;

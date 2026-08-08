@@ -145,6 +145,13 @@ void MpPumpNetwork();
 
 // input (client -> host)
 void MpSendPlayerAction(uint8_t action, uint32_t targetNetId, int32_t tile, int32_t elevation, uint8_t skill = 0xFF);
+// True while the host is inside a remote player's action handler (see
+// multiplayer.cc gMpRemoteActionNetId). Lets feedback relay and the elevator
+// guard attribute script-side effects to a remote player's action.
+bool MpRemoteActionActive();
+// Per-frame edge indicators pointing at off-screen remote players. Called
+// from the main loop after MpTick, before renderPresent.
+void MpDrawPlayerIndicators();
 
 // broadcast (host -> clients)
 void MpBroadcastPlayerStates();

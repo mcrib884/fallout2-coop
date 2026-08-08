@@ -17,6 +17,7 @@
 #include "critter.h"
 #include "debug.h"
 #include "dialog.h"
+#include "display_monitor.h"
 #include "elevator.h"
 #include "endgame.h"
 #include "export.h"
@@ -1420,6 +1421,17 @@ void scriptsRequestWorldMap()
 int scriptsRequestElevator(Object* obj, int elevatorType)
 {
     int elevatorLevel = gElevation;
+
+    // Co-op: the elevator modal and the level change are host-global. A remote
+    // player's USE on an elevator panel would open the modal on the host's
+    // screen (and could yank every player's dude around); reject the request
+    // and feed the notice back through the monitor relay so the acting client
+    // sees it.
+    if (gMpActive && MpRemoteActionActive()) {
+        debugFilePrint("MP: elevator request blocked (remote action active)");
+        displayMonitorAddMessage("Elevators are not available in co-op.");
+        return -1;
+    }
 
     int tile = obj->tile;
     if (tile == -1) {

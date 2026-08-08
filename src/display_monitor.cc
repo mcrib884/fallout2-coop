@@ -244,7 +244,10 @@ void displayMonitorAddMessage(const char* str)
     // experience message). The acting client suppresses the messages its own
     // attack prediction generates while the authoritative version is in
     // flight — see MpCombatBeginLocalAttackPrediction.
-    if (gMpActive && MpCombatIsActive()) {
+    // Non-combat script feedback ("It's locked.", elevator notices) is relayed
+    // while the host is inside a remote player's action handler — the acting
+    // client gets the same feedback the host sees.
+    if (gMpActive && (MpCombatIsActive() || MpRemoteActionActive())) {
         if (gMpIsHost) {
             // Co-op: the host's own first-person lines ("You missed", the
             // bad-shot messages) must not reach the clients — they would

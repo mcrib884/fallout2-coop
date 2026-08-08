@@ -648,6 +648,12 @@ static void mpCombatDrainEndRequest()
 
 void MpCombatPump()
 {
+    // Off-screen player indicators: the blocking combat loops suspend the
+    // main loop (which normally drives them), so pump them here too — before
+    // the client early-return below, since the client's blocking turn loop
+    // is exactly where the main loop is suspended.
+    MpDrawPlayerIndicators();
+
     if (!gMpActive || gMpSession.enetHost == nullptr) {
         return;
     }
@@ -659,6 +665,17 @@ void MpCombatPump()
         MpBroadcastPlayerStates();
     } else {
         mpCombatDrainEndRequest();
+    }
+
+    // The blocking combat loops (the host's own turn in _combat_input, NPC
+    // turns in _combat_turn_run) never run MpCombatTick, which owns the
+    // throttled card refresh — without one here the HUD player cards stay
+    // empty black boxes for the whole host turn. Same throttle variable, so
+    // this is just an additional call site.
+    uint32_t now = getTicks();
+    if (gMpCombat.inCombat && now - gCombatLastCardUpdate >= 500) {
+        gCombatLastCardUpdate = now;
+        mpCombatUpdateCards();
     }
 }
 

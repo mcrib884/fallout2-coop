@@ -337,7 +337,8 @@ static bool gameMouseLongPressUsesLootActionForCritter(Object* object);
 
 static void customMouseModeFrmsInit();
 
-static bool gameMouseSendPlayerAction(uint8_t action, Object* target, uint8_t skill = 0xFF)
+static bool gameMouseSendPlayerAction(uint8_t action, Object* target, uint8_t skill = 0xFF,
+    int32_t extraPid = -1)
 {
     if (!gMpActive || !gMpIsClient || target == nullptr) {
         return false;
@@ -356,7 +357,10 @@ static bool gameMouseSendPlayerAction(uint8_t action, Object* target, uint8_t sk
         return false;
     }
 
-    MpSendPlayerAction(action, targetNetId, -1, target->elevation, skill);
+    // USE_ITEM_ON rides the item's pid in the tile field (DROP precedent);
+    // every other action sends tile=-1.
+    int32_t tile = extraPid >= 0 ? extraPid : -1;
+    MpSendPlayerAction(action, targetNetId, tile, target->elevation, skill);
     return true;
 }
 
@@ -1237,6 +1241,20 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
             if (object != nullptr) {
                 Object* weapon;
                 if (interfaceGetActiveItem(&weapon) != -1) {
+                    if (gMpActive && gMpIsClient) {
+                        // Co-op: the host owns the world. Relay the
+                        // item-on-object use (item pid rides the tile field)
+                        // and skip the local execution — the host runs the
+                        // target's USE_OBJ_ON script and the object stream
+                        // syncs the result back.
+                        if (weapon != nullptr) {
+                            gameMouseSendPlayerAction(NET_PLAYER_ACTION_USE_ITEM_ON,
+                                object, 0, weapon->pid);
+                        }
+                        gameMouseSetCursor(MOUSE_CURSOR_NONE);
+                        gameMouseSetMode(GAME_MOUSE_MODE_MOVE);
+                        return;
+                    }
                     if (isInCombat()) {
                         HitMode hitMode = interfaceGetCurrentHand()
                             ? HIT_MODE_RIGHT_WEAPON_PRIMARY

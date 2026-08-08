@@ -4,6 +4,13 @@
 #include "net.h"
 #include "obj_types.h"
 
+// Max number of stacked dialogue floats (NPC lines + player choices). Each
+// new float pushes the older ones one float-height up; the newest sits at
+// the bottom, closest to the critter. Shared by the host (mpDialogFloat)
+// and the client display (MpCombatOnFloatMessage) so both screens stack
+// identically.
+#define MP_DIALOG_FLOAT_STACK_MAX (8)
+
 namespace fallout {
 
 // Synchronized dialogue and barter (host-authoritative).

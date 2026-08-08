@@ -1344,6 +1344,13 @@ static int _action_use_skill_in_combat_error(Object* critter)
         if (messageListGetItem(&gProtoMessageList, &messageListItem) == 1) {
             displayMonitorAddMessage(messageListItem.text);
         }
+    } else if (gMpActive && gMpIsHost && MpCombatIsPlayerCritter(critter)) {
+        // Co-op: a remote player's blocked skill use must reach THEIR
+        // client, not the host's monitor.
+        uint8_t netId = MpCombatGetCritterPlayerNetId(critter);
+        if (netId != 0) {
+            MpSendSkillUseFeedback(netId, 902, 0, 0, 0);
+        }
     }
 
     return -1;

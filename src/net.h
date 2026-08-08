@@ -77,6 +77,10 @@ enum NetPacketType {
     // --- Synchronized barter (within a dialogue session) ---
     NET_PKT_BARTER_CMD = 48,      // client -> host: barter op (start/move/end/commit)
     NET_PKT_BARTER_STATE = 49,    // host -> barterer: authoritative tables + last op result
+    NET_PKT_LOOT_CMD = 50,        // client -> host: loot/steal op (move/takeall/end)
+    NET_PKT_LOOT_STATE = 51,      // host -> looter: authoritative loot state (open/move/takeall/end)
+    NET_PKT_COMBAT_MOVE_RESULT = 52, // host -> acting client: authoritative resolved move tile
+    NET_PKT_FLOAT_MESSAGE = 53,   // host -> clients: script float_msg relay (combat chatter)
 };
 
 enum NetUnreliablePacketType {
@@ -545,6 +549,88 @@ typedef struct NetBarterStatePayload {
     uint16_t offerCount;   // this barterer's offer as the host sees it
     uint16_t requestCount; // this barterer's request as the host sees it
 } NetBarterStatePayload;
+
+// --- Synchronized loot/steal (outside dialogue) ---
+//
+// The vanilla loot window on the client runs against a local mirror of the
+// target (fid/pid/items supplied by the host). Every move is a command to the
+// host, which applies it to the real objects (with the steal roll for steal
+// sessions) and echoes the authoritative state back: the target's item list,
+// the delta applied to the looter's own inventory, and any feedback message.
+
+enum NetLootOpcode {
+    NET_LOOT_OP_OPEN = 1,     // host -> client: open the loot/steal window
+    NET_LOOT_OP_MOVE = 2,     // client -> host: move item (qty signed; + take, - plant)
+    NET_LOOT_OP_TAKE_ALL = 3, // client -> host: take everything (weight-checked)
+    NET_LOOT_OP_END = 4,      // both ways: session over
+};
+
+typedef struct NetLootItem {
+    uint32_t pid;
+    int32_t qty;
+} NetLootItem;
+
+#define NET_LOOT_MAX_ITEMS 120
+
+// Client -> host: loot operation.
+typedef struct NetLootCmdPayload {
+    uint8_t op;          // NetLootOpcode
+    uint8_t netId;       // sender
+    uint8_t reserved[2];
+    uint32_t targetNetId; // session target (echoed from OPEN)
+    uint32_t pid;         // MOVE: item pid
+    int32_t qty;          // MOVE: signed quantity (+ take from target, - plant)
+} NetLootCmdPayload;
+
+// Host -> client: authoritative loot state. Followed by targetItemCount
+// NetLootItem entries (target inventory snapshot) then dudeDeltaCount
+// NetLootItem entries (signed deltas applied to the looter's inventory).
+typedef struct NetLootStatePayload {
+    uint8_t op;           // NetLootOpcode
+    uint8_t netId;        // session owner
+    uint8_t isSteal;      // steal-mode session (rolls apply)
+    uint8_t lastOk;       // 1 = last op applied
+    uint8_t targetItemCount;
+    uint8_t dudeDeltaCount;
+    uint16_t reserved;
+    uint32_t targetNetId;
+    uint32_t targetFid;   // OPEN: mirror display art
+    uint32_t targetPid;   // OPEN: mirror proto
+    char msgText[64];     // formatted feedback message (0 = none)
+} NetLootStatePayload;
+
+// Host -> acting client: the authoritative outcome of a combat move intent.
+// The client walks its local dude optimistically; a resolution to a different
+// tile than the clicked destination (rejected, or truncated at an occupied
+// tile) snaps the local dude into place so the vanilla targeting UI reads the
+// true geometry.
+typedef struct NetCombatMoveResultPayload {
+    uint8_t netId;        // acting player
+    uint8_t reserved[3];
+    uint32_t tile;        // authoritative destination tile
+    int32_t elevation;
+} NetCombatMoveResultPayload;
+
+// Host -> clients: floating text over a critter, relayed so clients see the
+// same text over the same critter (scripts and the engine AI only run
+// host-side). Two style sources: the script float_msg path sets type to the
+// resolved FloatingMessageType and leaves font/color/outline zeroed (the
+// client derives them from type); the engine AI path (combatai.msg "weapon
+// comments" like "My blade grows thirsty") sets type to NET_FLOAT_AI_STYLE
+// and fills the explicit style, because the AI config's font/color/outline
+// do not map to any FloatingMessageType. The synchronized dialogue floats
+// (NPC lines and player choices) use NET_FLOAT_DIALOG_STYLE with the same
+// explicit style contract.
+#define NET_FLOAT_AI_STYLE (-3)     // matches no FloatingMessageType (WARNING=-2..)
+#define NET_FLOAT_DIALOG_STYLE (-4) // dialogue float (explicit style below)
+typedef struct NetFloatMessagePayload {
+    uint32_t netId;       // critter the text floats over
+    int32_t type;         // resolved FloatingMessageType or NET_FLOAT_AI/DIALOG_STYLE
+    int32_t font;         // explicit style when type == NET_FLOAT_AI/DIALOG_STYLE
+    int32_t color;        // explicit style when type == NET_FLOAT_AI/DIALOG_STYLE
+    int32_t outline;      // explicit style when type == NET_FLOAT_AI/DIALOG_STYLE
+    char text[160];       // the message text
+} NetFloatMessagePayload;
 #pragma pack(pop)
 
 // --- Transport API ---

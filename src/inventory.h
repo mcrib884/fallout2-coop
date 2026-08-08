@@ -1,6 +1,7 @@
 #ifndef INVENTORY_H
 #define INVENTORY_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "animation.h"
@@ -64,6 +65,10 @@ int inventoryUnequip(Object* critter, Hand hand);
 int inventoryUnequipFunc(Object* critter, Hand hand, bool animate);
 int inventoryOpenLooting(Object* looter, Object* target);
 int inventoryOpenStealing(Object* thief, Object* target);
+// Co-op: formats an inventory.msg message (25/26/29/31 style) into |out| for
+// relay to a remote player's client (the host has the message list, the
+// client only displays the finished text).
+void inventoryFormatMessage(int msgId, int arg, char* out, size_t outSize);
 void barterProcessUI(int win, Object* barterer, Object* playerTable, Object* bartererTable, int barterMod);
 // Co-op: host-authoritative barter transaction. Presets the internal barter
 // globals (gPlayerTableObj/gBartererTableObj) from the given tables, then runs

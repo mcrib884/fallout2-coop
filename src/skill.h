@@ -46,8 +46,13 @@ char* skillGetAttributes(Skill skill);
 int skillGetFrmId(Skill skill);
 int skillUse(Object* obj, Object* target, Skill skill, int skillBonus);
 SkillStealResult skillsPerformStealing(Object* thief, Object* target, Object* item, int quantity, bool isPlanting, int* xpOverride);
+// Co-op: while a sink is set, skillsPerformStealing writes its would-be
+// steal feedback message into the sink instead of the local monitor, so the
+// host can relay it to the performing player's client. nullptr restores the
+// vanilla display.
+void skillSetRemoteMessageSink(char* out, size_t size);
 int skillGetGameDifficultyModifier(Skill skill);
-int skillUpdateLastUse(Skill skill);
+int skillUpdateLastUse(Object* critter, Skill skill);
 int skillsUsageSave(File* stream);
 int skillsUsageLoad(File* stream);
 char* skillsGetGenericResponse(Object* critter, bool isDude);

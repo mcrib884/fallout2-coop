@@ -154,7 +154,53 @@ void textObjectsSetLineDelay(double value)
 
 // text_object_create
 // 0x4B036C text_object_create
+static int textObjectAddInternal(Object* object, char* string, int font, int color, int outlineColor, Rect* rect, bool replacePrevious);
 int textObjectAdd(Object* object, char* string, int font, int color, int outlineColor, Rect* rect)
+{
+    return textObjectAddInternal(object, string, font, color, outlineColor, rect, true);
+}
+
+// Co-op: like textObjectAdd, but never removes the owner's previous floats.
+// Used by the synchronized dialogue floats so old lines stay up and fade
+// naturally while the stack keeps them apart.
+int textObjectAddNoReplace(Object* object, char* string, int font, int color, int outlineColor, Rect* rect)
+{
+    return textObjectAddInternal(object, string, font, color, outlineColor, rect, false);
+}
+
+// Co-op: returns the height a float created with the same string/font/outline
+// would occupy, using the identical wrap math as textObjectAddInternal. The
+// dialogue float stack shifts BEFORE adding the new line, so the newest float
+// is never caught in its own shift (which would lift it into the middle of
+// the stack and collide with the previous line). Returns 0 on failure.
+int textObjectMeasure(char* string, int font, int outlineColor)
+{
+    if (string == nullptr || *string == '\0' || !gTextObjectsInitialized) {
+        return 0;
+    }
+
+    int oldFont = fontGetCurrent();
+    fontSetCurrent(font);
+
+    short beginnings[WORD_WRAP_MAX_COUNT];
+    short count;
+    int height = 0;
+    if (wordWrap(string, 200, beginnings, &count) == 0) {
+        int lines = count - 1;
+        if (lines < 1) {
+            lines = 1;
+        }
+        height = (fontGetLineHeight() + 1) * lines;
+        if (outlineColor != -1) {
+            height += 2;
+        }
+    }
+
+    fontSetCurrent(oldFont);
+    return height;
+}
+
+static int textObjectAddInternal(Object* object, char* string, int font, int color, int outlineColor, Rect* rect, bool replacePrevious)
 {
     if (!gTextObjectsInitialized) {
         return -1;
@@ -274,7 +320,9 @@ int textObjectAdd(Object* object, char* string, int font, int color, int outline
         rect->bottom = textObject->y + textObject->height - 1;
     }
 
-    textObjectsRemoveByOwner(object);
+    if (replacePrevious) {
+        textObjectsRemoveByOwner(object);
+    }
 
     textObject->owner = object;
     textObject->time = _get_bk_time();
@@ -465,6 +513,90 @@ void textObjectsRemoveByOwner(Object* object)
             gTextObjects[index]->flags |= TEXT_OBJECT_MARKED_FOR_REMOVAL;
         }
     }
+}
+
+// Co-op: shifts every live text object owned by [object] vertically by [dy]
+// pixels. The offset persists for the object's lifetime. Used to stack
+// dialogue floats: every new line pushes the older lines higher so the most
+// recent text always sits closest to the critter. The old and new screen
+// rects are refreshed so nothing ghosts.
+void textObjectsShiftVertically(Object* object, int dy)
+{
+    if (dy == 0 || object == nullptr) {
+        return;
+    }
+
+    for (int index = 0; index < gTextObjectsCount; index++) {
+        TextObject* textObject = gTextObjects[index];
+        if (textObject->owner != object) {
+            continue;
+        }
+
+        Rect rect;
+        tileToScreenXY(textObject->tile, &(rect.left), &(rect.top));
+        rect.left += textObject->sx;
+        rect.top += textObject->sy;
+        rect.right = rect.left + textObject->width - 1;
+        rect.bottom = rect.top + textObject->height - 1;
+
+        textObject->sy += dy;
+
+        Rect movedRect;
+        tileToScreenXY(textObject->tile, &(movedRect.left), &(movedRect.top));
+        movedRect.left += textObject->sx;
+        movedRect.top += textObject->sy;
+        movedRect.right = movedRect.left + textObject->width - 1;
+        movedRect.bottom = movedRect.top + textObject->height - 1;
+
+        rectUnion(&rect, &movedRect, &rect);
+        tileWindowRefreshRect(&rect, gElevation);
+    }
+}
+
+// Co-op: returns the screen-Y of the lowest (bottom-most) live text object's
+// bottom edge, or -1 when no text object is alive.
+int textObjectsGetLowestBottomY()
+{
+    int lowest = -1;
+    for (int index = 0; index < gTextObjectsCount; index++) {
+        TextObject* textObject = gTextObjects[index];
+        int x = 0;
+        int y = 0;
+        tileToScreenXY(textObject->tile, &x, &y);
+        int bottom = y + textObject->sy + textObject->height - 1;
+        if (bottom > lowest) {
+            lowest = bottom;
+        }
+    }
+    return lowest;
+}
+
+// Co-op: the uniform screen-space shift (0 when none) needed so a new float
+// with the measured [floatHeight] anchored to [anchorTile] clears the lowest
+// live float by 2px. Every old float must climb by this SAME amount — a
+// per-owner shift would break the spacing between old floats, because owners
+// on adjacent tiles (NPC and choosing player) anchor their floats to
+// different tile screen positions and would move by different amounts.
+int textObjectsComputeStackShift(int anchorTile, int floatHeight)
+{
+    if (floatHeight <= 0) {
+        return 0;
+    }
+
+    int anchorY = 0;
+    int unusedScreenX = 0;
+    tileToScreenXY(anchorTile, &unusedScreenX, &anchorY);
+
+    // Mirrors textObjectFindPlacement's in-bounds placement:
+    // y = tileScreenY - height - 60.
+    const int newFloatTop = anchorY - (floatHeight + 60);
+    const int lowestBottom = textObjectsGetLowestBottomY();
+    if (lowestBottom < 0) {
+        return 0;
+    }
+
+    const int dy = lowestBottom - newFloatTop + 2;
+    return dy > 0 ? dy : 0;
 }
 
 } // namespace fallout

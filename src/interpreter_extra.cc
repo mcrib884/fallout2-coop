@@ -3302,6 +3302,27 @@ static void opFloatMessage(Program* program)
         break;
     }
 
+    // Co-op: scripts only run on the host, so script float_msg (combat
+    // chatter, steal/script reactions — any spoken line) never reaches the
+    // clients on its own. Mirror the resolved message to every client so the
+    // same text floats over the same critter there. Not combat-gated: a
+    // script reaction right before/after combat (e.g. a caught steal turning
+    // an NPC hostile) would otherwise be lost.
+    if (gMpActive && gMpIsHost) {
+        uint32_t netId = MpGetObjNetId(obj);
+        if (netId != 0) {
+            NetFloatMessagePayload relay;
+            memset(&relay, 0, sizeof(relay));
+            relay.netId = netId;
+            relay.type = floatingMessageType;
+            strncpy(relay.text, string, sizeof(relay.text) - 1);
+            NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE,
+                NET_PKT_FLOAT_MESSAGE, &relay, sizeof(relay));
+            debugFilePrint("MP: float msg relayed netId=%u type=%d text='%.48s'",
+                netId, floatingMessageType, relay.text);
+        }
+    }
+
     Rect rect;
     if (textObjectAdd(obj, string, font, color, backgroundColor, &rect) != -1) {
         tileWindowRefreshRect(&rect, obj->elevation);

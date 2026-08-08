@@ -65,6 +65,8 @@ void MpCombatOnStartedPacket();                                      // host -> 
 void MpCombatOnTurnStart(const NetCombatTurnStartPayload* payload);  // host -> client
 void MpCombatOnEndDenied();                                          // host -> client
 void MpCombatOnEndedPacket();                                        // host -> client
+void MpCombatOnMoveResult(const NetCombatMoveResultPayload* payload); // host -> acting client
+void MpCombatOnFloatMessage(const NetFloatMessagePayload* payload);  // host -> clients
 
 // Display-monitor sync: the host is the only combat simulator, so NPC turns,
 // host-player actions and the authoritative outcomes of remote intents only

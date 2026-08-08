@@ -14,9 +14,14 @@ void textObjectsEnable();
 void textObjectsSetBaseDelay(double value);
 void textObjectsSetLineDelay(double value);
 int textObjectAdd(Object* object, char* string, int font, int color, int outlineColor, Rect* rect);
+int textObjectAddNoReplace(Object* object, char* string, int font, int color, int outlineColor, Rect* rect);
+int textObjectMeasure(char* string, int font, int outlineColor);
 void textObjectsRenderInRect(Rect* rect);
 int textObjectsGetCount();
 void textObjectsRemoveByOwner(Object* object);
+void textObjectsShiftVertically(Object* object, int dy);
+int textObjectsGetLowestBottomY();
+int textObjectsComputeStackShift(int anchorTile, int floatHeight);
 
 } // namespace fallout
 

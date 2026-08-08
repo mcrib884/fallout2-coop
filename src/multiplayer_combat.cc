@@ -35,6 +35,7 @@
 #include "map.h"
 #include "memory.h"
 #include "multiplayer.h"
+#include "multiplayer_dialog.h"
 #include "multiplayer_vote.h"
 #include "object.h"
 #include "perk.h"
@@ -42,6 +43,7 @@
 #include "tile.h"
 #include "skill.h"
 #include "stat.h"
+#include "text_object.h"
 #include "svga.h"
 #include "text_font.h"
 #include "trait.h"
@@ -438,6 +440,25 @@ int MpCombatHostRemoteTurn(Object* critter, uint8_t netId)
 // host intent resolution
 // ---------------------------------------------------------------------------
 
+// The client resolves its own move clicks optimistically (its local dude
+// walks the full clicked path), but the host is authoritative. Every
+// resolution is sent back so the client can snap its local dude when the
+// outcome diverges from the clicked destination (reject or occupancy
+// truncation) — the vanilla targeting UI must read the avatar's true tile.
+static void mpCombatSendMoveResult(MultiplayerPlayer* player, int tile, int elevation)
+{
+    if (player == nullptr || player->peer == nullptr) {
+        return;
+    }
+    NetCombatMoveResultPayload payload;
+    memset(&payload, 0, sizeof(payload));
+    payload.netId = player->netId;
+    payload.tile = tile;
+    payload.elevation = elevation;
+    NetSendPacket(player->peer, NET_CHANNEL_RELIABLE,
+        NET_PKT_COMBAT_MOVE_RESULT, &payload, sizeof(payload));
+}
+
 static void mpCombatResolveMove(MultiplayerPlayer* player, const NetCombatCmdPayload* cmd)
 {
     Object* critter = player->obj;
@@ -448,15 +469,18 @@ static void mpCombatResolveMove(MultiplayerPlayer* player, const NetCombatCmdPay
     if (!hexGridTileIsValid(cmd->tile) || !elevationIsValid(cmd->elevation)) {
         debugFilePrint("MPCOMBAT: move rejected (bad tile/elev) netId=%u tile=%d elev=%d",
             player->netId, cmd->tile, cmd->elevation);
+        mpCombatSendMoveResult(player, critter->tile, critter->elevation);
         return;
     }
     if (cmd->elevation != critter->elevation) {
         debugFilePrint("MPCOMBAT: move rejected (elevation) netId=%u", player->netId);
+        mpCombatSendMoveResult(player, critter->tile, critter->elevation);
         return;
     }
     int ap = critter->data.critter.combat.ap;
     if (ap <= 0) {
         debugFilePrint("MPCOMBAT: move rejected (no AP) netId=%u", player->netId);
+        mpCombatSendMoveResult(player, critter->tile, critter->elevation);
         return;
     }
 
@@ -476,6 +500,7 @@ static void mpCombatResolveMove(MultiplayerPlayer* player, const NetCombatCmdPay
         animationRegisterMoveToTile(critter, targetTile, cmd->elevation, ap, 0);
     }
     reg_anim_end();
+    mpCombatSendMoveResult(player, targetTile, cmd->elevation);
     debugFilePrint("MPCOMBAT: move resolved netId=%u tile=%d elev=%d run=%d ap=%d free=%d",
         player->netId, targetTile, cmd->elevation, isRun ? 1 : 0,
         critter->data.critter.combat.ap, _combat_free_move);
@@ -998,6 +1023,12 @@ void MpCombatSendEndRequest()
     }
 }
 
+// The client's last clicked move destination (one intent per click). The host
+// echoes every move resolution; a resolution equal to this tile means the
+// move was accepted as-is and the local optimistic walk may finish.
+static int gMpLastMoveIntentTile = -1;
+static int gMpLastMoveIntentElevation = -1;
+
 void MpCombatSendMoveIntent(int tile, int elevation, bool isRun)
 {
     if (!gMpIsClient || !gMpActive || !gMpCombat.inCombat || !gMpCombat.turnActive) {
@@ -1010,6 +1041,8 @@ void MpCombatSendMoveIntent(int tile, int elevation, bool isRun)
     payload.tile = tile;
     payload.elevation = elevation;
     mpCombatSend(NET_PKT_COMBAT_CMD, &payload, sizeof(payload));
+    gMpLastMoveIntentTile = tile;
+    gMpLastMoveIntentElevation = elevation;
     debugFilePrint("MPCOMBAT: move intent sent tile=%d elev=%d run=%d", tile, elevation, isRun ? 1 : 0);
 
     // Client-side free-move prediction: the host consumes the avatar's Bonus
@@ -1163,6 +1196,147 @@ void MpCombatOnMonitorMessage(const char* text, size_t textLength)
     gMpCombat.suppressLocalMonitor = false;
     displayMonitorAddMessage(buffer);
     gMpCombat.suppressLocalMonitor = savedSuppress;
+}
+
+// Host -> acting client: authoritative outcome of the client's move intent.
+// The client's local dude walked optimistically toward the clicked tile; a
+// resolution elsewhere (reject, occupancy truncation) stops the walk and
+// snaps, so the vanilla targeting UI reads the true geometry.
+void MpCombatOnMoveResult(const NetCombatMoveResultPayload* payload)
+{
+    if (!gMpIsClient || !gMpActive || payload == nullptr
+        || payload->netId != gMpSession.localNetId) {
+        return;
+    }
+    Object* dude = gDude;
+    if (dude == nullptr || !hexGridTileIsValid((int)payload->tile)
+        || !elevationIsValid(payload->elevation)) {
+        return;
+    }
+    // A resolution equal to our own clicked destination means the move was
+    // accepted as-is — the local walk is still playing and must not be cut.
+    if ((int)payload->tile == gMpLastMoveIntentTile
+        && payload->elevation == gMpLastMoveIntentElevation) {
+        return;
+    }
+    if (dude->tile == (int)payload->tile && dude->elevation == payload->elevation) {
+        return; // already there
+    }
+    if (animationIsBusy(dude) != 0) {
+        reg_anim_clear(dude);
+    }
+    MpApplyLocalDudeSnap((int)payload->tile, payload->elevation);
+    debugFilePrint("MPCOMBAT: move result snap tile=%d elev=%d (intent was %d)",
+        (int)payload->tile, payload->elevation, gMpLastMoveIntentTile);
+}
+
+// Client: a relayed script float_msg (combat chatter). Scripts only run on
+// the host, so the host mirrors the text over the same critter; mirror the
+// host's opFloatMessage display rules (colors, font, screen centering).
+// Dialogue float stack (client side): ordered owner list of the live
+// dialogue floats. Every new NET_FLOAT_DIALOG_STYLE float pushes the older
+// ones one float-height up so the newest sits at the bottom — mirrors the
+// host's mpDialogFloat policy exactly.
+static Object* gMpClientFloatStack[MP_DIALOG_FLOAT_STACK_MAX];
+static int gMpClientFloatStackCount = 0;
+
+void MpCombatOnFloatMessage(const NetFloatMessagePayload* payload)
+{
+    if (!gMpIsClient || !gMpActive || payload == nullptr || payload->text[0] == '\0') {
+        return;
+    }
+    Object* obj = MpFindObjByNetId(payload->netId);
+    if (obj == nullptr || obj->elevation != gElevation) {
+        return;
+    }
+    int color = COLOR_LIGHT_YELLOW;
+    int backgroundColor = COLOR_BLACK;
+    int font = 101;
+    if (payload->type == NET_FLOAT_AI_STYLE || payload->type == NET_FLOAT_DIALOG_STYLE) {
+        // Engine AI path (combatai.msg weapon comments) and synchronized
+        // dialogue floats (NPC lines, player choices): the explicit style
+        // does not map to a FloatingMessageType — use it verbatim so host
+        // and client render the identical text.
+        font = payload->font;
+        color = payload->color;
+        backgroundColor = payload->outline;
+    } else switch (payload->type) {
+    case -2: // FLOATING_MESSAGE_TYPE_WARNING
+        color = COLOR_RED;
+        backgroundColor = COLOR_BLACK;
+        font = 103;
+        tileSetCenter(gDude->tile, TILE_SET_CENTER_REFRESH_WINDOW);
+        break;
+    case 0: // NORMAL
+    case 8: // YELLOW
+        color = COLOR_LIGHT_YELLOW;
+        break;
+    case 1: // BLACK
+    case 5: // PURPLE
+    case 10: // GREY
+        color = COLOR_DARK_GREY_2;
+        break;
+    case 2: // RED
+        color = COLOR_RED;
+        break;
+    case 3: // GREEN
+        color = COLOR_GREEN;
+        break;
+    case 4: // BLUE
+        color = COLOR_BLUE;
+        break;
+    case 6: // NEAR_WHITE
+        color = COLOR_LIGHT_GREY;
+        break;
+    case 7: // LIGHT_RED
+        color = COLOR_LIGHT_RED;
+        break;
+    case 9: // WHITE
+        color = COLOR_WHITE;
+        break;
+    case 11: // DARK_GREY
+        color = COLOR_DARK_GREY;
+        break;
+    case 12: // LIGHT_GREY
+        color = COLOR_GREY_2;
+        break;
+    }
+    Rect rect;
+    int addResult;
+    if (payload->type == NET_FLOAT_DIALOG_STYLE) {
+        // Stack first, add last (mirrors the host's mpDialogFloat): the old
+        // floats climb by a UNIFORM amount so the new line lands at the
+        // bottom slot, never caught in its own shift, and the old floats keep
+        // their relative spacing. Dialogue floats never replace each other —
+        // old lines fade naturally.
+        const int floatHeight = textObjectMeasure(const_cast<char*>(payload->text), payload->font, payload->outline);
+        if (floatHeight > 0) {
+            const int dy = textObjectsComputeStackShift(obj->tile, floatHeight);
+            if (dy > 0) {
+                for (int i = 0; i < gMpClientFloatStackCount; i++) {
+                    textObjectsShiftVertically(gMpClientFloatStack[i], -dy);
+                }
+            }
+        }
+        for (int i = 0; i < gMpClientFloatStackCount; i++) {
+            if (gMpClientFloatStack[i] == obj) {
+                gMpClientFloatStackCount--;
+                for (int j = i; j < gMpClientFloatStackCount; j++) {
+                    gMpClientFloatStack[j] = gMpClientFloatStack[j + 1];
+                }
+                break;
+            }
+        }
+        if (gMpClientFloatStackCount < MP_DIALOG_FLOAT_STACK_MAX) {
+            gMpClientFloatStack[gMpClientFloatStackCount++] = obj;
+        }
+        addResult = textObjectAddNoReplace(obj, const_cast<char*>(payload->text), font, color, backgroundColor, &rect);
+    } else {
+        addResult = textObjectAdd(obj, const_cast<char*>(payload->text), font, color, backgroundColor, &rect);
+    }
+    if (addResult != -1) {
+        tileWindowRefreshRect(&rect, obj->elevation);
+    }
 }
 
 void MpCombatBeginLocalAttackPrediction()

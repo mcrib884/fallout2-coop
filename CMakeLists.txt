@@ -193,6 +193,8 @@ set(FALLOUT_ENGINE_SOURCES
     "src/multiplayer_debug.h"
     "src/multiplayer_dialog.cc"
     "src/multiplayer_dialog.h"
+    "src/multiplayer_loot.cc"
+    "src/multiplayer_loot.h"
     "src/net.cc"
     "src/net.h"
     "src/nevs.cc"

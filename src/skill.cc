@@ -55,7 +55,7 @@ typedef struct SkillDescription {
 } SkillDescription;
 
 static void _show_skill_use_messages(Object* obj, Skill skill, Object* target, int successCount, int skillBonus);
-static int skillGetFreeUsageSlot(Skill skill);
+static int skillGetFreeUsageSlot(Object* critter, Skill skill);
 static int skill_use_slot_clear();
 
 // Damage flags which can be repaired using "Repair" skill.
@@ -227,6 +227,18 @@ void skillsGetTagged(Skill* skills, int count)
     for (int index = 0; index < count; index++) {
         skills[index] = gTaggedSkills[index];
     }
+}
+
+// Co-op: while set, skillsPerformStealing writes its would-be feedback
+// message here instead of the local monitor (the host relays it to the
+// performing player's client).
+static char* gSkillRemoteMessageSink = nullptr;
+static size_t gSkillRemoteMessageSinkSize = 0;
+
+void skillSetRemoteMessageSink(char* out, size_t size)
+{
+    gSkillRemoteMessageSink = out;
+    gSkillRemoteMessageSinkSize = size;
 }
 
 // 0x4AA52C
@@ -488,11 +500,21 @@ int skillRoll(Object* critter, Skill skill, int modifier, int* howMuch)
 
     int skillValue = skillGetValue(critter, skill);
 
-    if (critter == gDude && skill == SKILL_STEAL) {
-        if (dudeHasState(DUDE_STATE_SNEAKING)) {
-            if (dudeIsSneaking()) {
-                skillValue += 30;
+    // Co-op: the +30 sneak bonus on steal rolls applies to every player.
+    // Remote players' sneak state lives in their avatar's proto flags (the
+    // SNEAK toggle mirrors it there); gDude uses the vanilla dude state.
+    if (skill == SKILL_STEAL) {
+        bool sneaking = false;
+        if (critter == gDude) {
+            sneaking = dudeHasState(DUDE_STATE_SNEAKING) && dudeIsSneaking();
+        } else if (MpProfileIsNetworkPlayer(critter)) {
+            Proto* proto;
+            if (protoGetProto(critter->pid, &proto) == 0) {
+                sneaking = (proto->critter.data.flags & (1 << DUDE_STATE_SNEAKING)) != 0;
             }
+        }
+        if (sneaking) {
+            skillValue += 30;
         }
     }
 
@@ -596,10 +618,19 @@ bool skillGetMessageText(int messageId, char* dest, size_t size, int arg2, int a
         snprintf(dest, size, item.text, limb.text);
         break;
     }
-    default: // 501, 512-514, 590-592 — no placeholders
+    default: { // 501, 512-514, 590-592 — no placeholders
+        if (!messageListGetItem(&gSkillsMessageList, &item)) {
+            // Co-op: some routed messages (e.g. 902 combat-block) live in
+            // proto.msg; fall back so the client can format them too.
+            item.num = messageId;
+            if (!messageListGetItem(&gProtoMessageList, &item)) {
+                return false;
+            }
+        }
         strncpy(dest, item.text, size);
         dest[size - 1] = '\0';
         break;
+    }
     }
     return true;
 }
@@ -652,7 +683,9 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
     int maximumHpToHeal = 0;
     int minimumHpToHeal = 0;
 
-    if (obj == gDude) {
+    // Co-op: every player is their own dude — remote players' heal amount
+    // must scale with THEIR Healer perk, not the host's.
+    if (obj == gDude || MpProfileIsNetworkPlayer(obj)) {
         if (skill == SKILL_FIRST_AID || skill == SKILL_DOCTOR) {
             int healerRank = perkGetRank(obj, PERK_HEALER);
             minimumHpToHeal = 4 * healerRank;
@@ -668,7 +701,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
 
     switch (skill) {
     case SKILL_FIRST_AID:
-        if (skillGetFreeUsageSlot(SKILL_FIRST_AID) == -1) {
+        if (skillGetFreeUsageSlot(obj, SKILL_FIRST_AID) == -1) {
             // 590: You've taxed your ability with that skill. Wait a while.
             // 591: You're too tired.
             // 592: The strain might kill you.
@@ -727,7 +760,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
 
                 target->data.critter.combat.maneuver &= ~CRITTER_MANUEVER_FLEEING;
 
-                skillUpdateLastUse(SKILL_FIRST_AID);
+                skillUpdateLastUse(obj, SKILL_FIRST_AID);
 
                 successCount = 1;
 
@@ -781,7 +814,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
 
         break;
     case SKILL_DOCTOR:
-        if (skillGetFreeUsageSlot(SKILL_DOCTOR) == -1) {
+        if (skillGetFreeUsageSlot(obj, SKILL_DOCTOR) == -1) {
             // 590: You've taxed your ability with that skill. Wait a while.
             // 591: You're too tired.
             // 592: The strain might kill you.
@@ -839,7 +872,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                             // 521: You heal the %s.
                             prefix.num = (target == gDude ? 520 : 521);
 
-                            skillUpdateLastUse(SKILL_DOCTOR);
+                            skillUpdateLastUse(obj, SKILL_DOCTOR);
 
                             successCount = 1;
                             skillUseSlotAdded = 1;
@@ -891,7 +924,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                 }
 
                 if (!skillUseSlotAdded) {
-                    skillUpdateLastUse(SKILL_DOCTOR);
+                    skillUpdateLastUse(obj, SKILL_DOCTOR);
                 }
 
                 target->data.critter.combat.maneuver &= ~CRITTER_MANUEVER_FLEEING;
@@ -983,7 +1016,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
             return -1;
         }
 
-        if (skillGetFreeUsageSlot(SKILL_REPAIR) == -1) {
+        if (skillGetFreeUsageSlot(obj, SKILL_REPAIR) == -1) {
             // 590: You've taxed your ability with that skill. Wait a while.
             // 591: You're too tired.
             // 592: The strain might kill you.
@@ -1036,7 +1069,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                         // 520: You heal your %s.
                         // 521: You heal the %s.
                         prefix.num = (target == gDude ? 520 : 521);
-                        skillUpdateLastUse(SKILL_REPAIR);
+                        skillUpdateLastUse(obj, SKILL_REPAIR);
 
                         successCount = 1;
                         skillUseSlotAdded = 1;
@@ -1082,7 +1115,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                 }
 
                 if (!skillUseSlotAdded) {
-                    skillUpdateLastUse(SKILL_REPAIR);
+                    skillUpdateLastUse(obj, SKILL_REPAIR);
                 }
 
                 target->data.critter.combat.maneuver &= ~CRITTER_MANUEVER_FLEEING;
@@ -1190,7 +1223,9 @@ SkillStealResult skillsPerformStealing(Object* thief, Object* target, Object* it
 
     int stealModifier = -_gStealCount + 1;
 
-    if (thief != gDude || !perkHasRank(thief, PERK_PICKPOCKET)) {
+    // Co-op: every player is a "dude" — the Pickpocket perk must exempt a
+    // remote thief's roll the same way it exempts the host's.
+    if ((thief != gDude && !MpProfileIsNetworkPlayer(thief)) || !perkHasRank(thief, PERK_PICKPOCKET)) {
         // -4% per item size
         stealModifier -= 4 * itemGetSize(item);
 
@@ -1212,7 +1247,9 @@ SkillStealResult skillsPerformStealing(Object* thief, Object* target, Object* it
     }
 
     int stealRoll;
-    if (thief == gDude && objectIsPartyMember(target)) {
+    // Co-op: remote players stealing from the shared party get the same
+    // auto-success as the host's dude (the vanilla party-trade flow).
+    if ((thief == gDude || MpProfileIsNetworkPlayer(thief)) && objectIsPartyMember(target)) {
         stealRoll = ROLL_CRITICAL_SUCCESS;
     } else {
         int criticalChance = critterGetStat(thief, STAT_CRITICAL_CHANCE);
@@ -1246,7 +1283,11 @@ SkillStealResult skillsPerformStealing(Object* thief, Object* target, Object* it
         messageListItem.num = isPlanting ? 573 : 571;
         if (!skipMessages && messageListGetItem(&gSkillsMessageList, &messageListItem)) {
             snprintf(text, sizeof(text), messageListItem.text, objectGetName(item));
-            displayMonitorAddMessage(text);
+            if (gSkillRemoteMessageSink != nullptr) {
+                snprintf(gSkillRemoteMessageSink, gSkillRemoteMessageSinkSize, "%s", text);
+            } else {
+                displayMonitorAddMessage(text);
+            }
         }
 
         return SkillStealResult::Success;
@@ -1256,7 +1297,11 @@ SkillStealResult skillsPerformStealing(Object* thief, Object* target, Object* it
         messageListItem.num = isPlanting ? 572 : 570;
         if (!skipMessages && messageListGetItem(&gSkillsMessageList, &messageListItem)) {
             snprintf(text, sizeof(text), messageListItem.text, objectGetName(item));
-            displayMonitorAddMessage(text);
+            if (gSkillRemoteMessageSink != nullptr) {
+                snprintf(gSkillRemoteMessageSink, gSkillRemoteMessageSinkSize, "%s", text);
+            } else {
+                displayMonitorAddMessage(text);
+            }
         }
 
         return SkillStealResult::Caught;
@@ -1292,17 +1337,44 @@ int skillGetGameDifficultyModifier(Skill skill)
     }
 }
 
+// Co-op: usage-slot times are per player. The host's own dude (and
+// singleplayer) keep using the vanilla global table (saved in the savegame);
+// remote players' times live in their synced profile so each player enforces
+// their own 3-uses-per-24h limit.
+static int32_t skillUsageTime(Object* critter, Skill skill, int slot)
+{
+    if (critter != nullptr && critter != gDude && MpProfileIsNetworkPlayer(critter)) {
+        MpPlayerRuntime* runtime = MpProfileFindRuntimeByObject(critter);
+        if (runtime != nullptr) {
+            return runtime->profile.skillUseTimes[skill][slot];
+        }
+    }
+    return _timesSkillUsed[skill][slot];
+}
+
+static void skillUsageTimeSet(Object* critter, Skill skill, int slot, int32_t value)
+{
+    if (critter != nullptr && critter != gDude && MpProfileIsNetworkPlayer(critter)) {
+        MpPlayerRuntime* runtime = MpProfileFindRuntimeByObject(critter);
+        if (runtime != nullptr) {
+            runtime->profile.skillUseTimes[skill][slot] = value;
+            return;
+        }
+    }
+    _timesSkillUsed[skill][slot] = value;
+}
+
 // 0x4ABE44
-static int skillGetFreeUsageSlot(Skill skill)
+static int skillGetFreeUsageSlot(Object* critter, Skill skill)
 {
     for (int slot = 0; slot < SKILLS_MAX_USES_PER_DAY; slot++) {
-        if (_timesSkillUsed[skill][slot] == 0) {
+        if (skillUsageTime(critter, skill, slot) == 0) {
             return slot;
         }
     }
 
     unsigned int time = gameTimeGetTime();
-    int hoursSinceLastUsage = (time - _timesSkillUsed[skill][0]) / GAME_TIME_TICKS_PER_HOUR;
+    int hoursSinceLastUsage = (time - skillUsageTime(critter, skill, 0)) / GAME_TIME_TICKS_PER_HOUR;
     if (hoursSinceLastUsage <= 24) {
         return -1;
     }
@@ -1311,20 +1383,20 @@ static int skillGetFreeUsageSlot(Skill skill)
 }
 
 // 0x4ABEB8
-int skillUpdateLastUse(Skill skill)
+int skillUpdateLastUse(Object* critter, Skill skill)
 {
-    int slot = skillGetFreeUsageSlot(skill);
+    int slot = skillGetFreeUsageSlot(critter, skill);
     if (slot == -1) {
         return -1;
     }
 
-    if (_timesSkillUsed[skill][slot] != 0) {
+    if (skillUsageTime(critter, skill, slot) != 0) {
         for (int i = 0; i < slot; i++) {
-            _timesSkillUsed[skill][i] = _timesSkillUsed[skill][i + 1];
+            skillUsageTimeSet(critter, skill, i, skillUsageTime(critter, skill, i + 1));
         }
     }
 
-    _timesSkillUsed[skill][slot] = gameTimeGetTime();
+    skillUsageTimeSet(critter, skill, slot, gameTimeGetTime());
 
     return 0;
 }

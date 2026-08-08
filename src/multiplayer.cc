@@ -28,9 +28,12 @@
 #include "multiplayer_combat.h"
 #include "multiplayer_debug.h"
 #include "multiplayer_dialog.h"
+#include "multiplayer_loot.h"
 #include "multiplayer_profile.h"
 #include "object.h"
 #include "palette.h"
+#include "svga.h"
+#include "window_manager.h"
 #include "skill.h"
 #include "party_member.h"
 #include "proto.h"
@@ -852,6 +855,35 @@ static void mpSnapshotMapStaticObjects()
     debugFilePrint("MP: map static objects snapshot=%zu", gMpMapStaticObjIds.size());
 }
 
+// Fullscreen blackout held while a client is joining (CLIENT_SYNCING), so the
+// world-streaming phase and the final camera reveal are not visible. The
+// reveal is the state flip to CLIENT_PLAYING: the camera is already centered
+// on the local player when the blackout lifts — no camera reset jump.
+static int gMpJoinBlackoutWin = -1;
+
+static void mpJoinBlackoutShow()
+{
+    if (!gMpIsClient || gMpJoinBlackoutWin != -1) {
+        return;
+    }
+    gMpJoinBlackoutWin = windowCreate(0, 0, screenGetWidth(), screenGetHeight(),
+        COLOR_BLACK, WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
+    if (gMpJoinBlackoutWin != -1) {
+        windowRefresh(gMpJoinBlackoutWin);
+        debugFilePrint("MP: join blackout shown");
+    }
+}
+
+static void mpJoinBlackoutHide()
+{
+    if (gMpJoinBlackoutWin == -1) {
+        return;
+    }
+    windowDestroy(gMpJoinBlackoutWin);
+    gMpJoinBlackoutWin = -1;
+    debugFilePrint("MP: join blackout hidden");
+}
+
 static int mpClientLoadMap(const NetMapSyncPayload* payload)
 {
     if (payload == nullptr || payload->mapId < 0) {
@@ -1073,13 +1105,15 @@ static void mpClientTryFinishMapSync()
         }
     }
     // The host's center tile belongs to the host's player. Center the local
-    // camera on the local player so he is on screen.
+    // camera on the local player so he is on screen — this is the join reveal:
+    // the blackout lifts already focused on the player, no camera jump.
     if (gDude != nullptr && hexGridTileIsValid(gDude->tile)) {
         tileSetCenter(gDude->tile,
             TILE_SET_CENTER_REFRESH_WINDOW | TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS);
     }
     tileWindowRefreshFull();
     gMpSession.state = MP_STATE_CLIENT_PLAYING;
+    mpJoinBlackoutHide();
 }
 
 // Enter CLIENT_SYNCING and arm the sync watchdog. Every path that switches the
@@ -1087,6 +1121,12 @@ static void mpClientTryFinishMapSync()
 // the state stay consistent.
 static void mpEnterClientSync()
 {
+    // Joining (previous state CONNECTING): hold a fullscreen blackout over the
+    // world-streaming phase. Map changes (previous state PLAYING) keep their
+    // vanilla transition visuals — the blackout is join-only.
+    if (gMpIsClient && gMpSession.state == MP_STATE_CLIENT_CONNECTING) {
+        mpJoinBlackoutShow();
+    }
     gMpSession.state = MP_STATE_CLIENT_SYNCING;
     gMpSession.clientSyncStartTick = getTicks();
     debugFilePrint("MP: enter client syncing state map=%d", gMpSession.currentMapId);
@@ -1676,6 +1716,9 @@ static void mpClientDisconnectNow(bool notifyPeer)
     }
     debugFilePrint("MP: client disconnect begin notify=%d", notifyPeer ? 1 : 0);
 
+    // Never leave the join blackout up (disconnect during sync / timeout).
+    mpJoinBlackoutHide();
+
     // Tear down the combat mirror (card windows, UI restore, acting-NPC
     // outline) BEFORE the session teardown and the main-menu map unload. A
     // disconnect that lands mid-combat leaves the mirror alive, and the stale
@@ -1787,6 +1830,9 @@ static void mpHostRemovePlayer(MultiplayerPlayer* player)
 
     // Co-op: a dialogue participant disconnected — remove + recalc the vote.
     MpDialogHostPlayerDisconnected(netId);
+
+    // Co-op: a loot session owner disconnected — release the session.
+    MpLootHostPlayerDisconnected(netId);
 
     if (wasHandshaken && gVoteSession.state == VOTE_STATE_ACTIVE) {
         // A disconnected initiator cancels. A disconnected voter is an
@@ -2402,11 +2448,20 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                     actionPickUp(p->obj, target);
                     break;
                 case NET_PLAYER_ACTION_LOOT:
-                    actionLootCritter(p->obj, target);
+                    // Co-op: the vanilla loot path is a silent no-op for a
+                    // remote looter (inventory.cc guards looter != gDude);
+                    // run the synchronized loot session instead.
+                    MpLootHostStart(p->netId, target, false);
                     break;
                 case NET_PLAYER_ACTION_USE_SKILL:
                     if (skillIsValid(action->skill)) {
-                        actionUseSkill(p->obj, target, (Skill)action->skill);
+                        if ((Skill)action->skill == SKILL_STEAL) {
+                            // Co-op: steal opens the synchronized steal
+                            // window (host-side rolls, relayed state).
+                            MpLootHostStart(p->netId, target, true);
+                        } else {
+                            actionUseSkill(p->obj, target, (Skill)action->skill);
+                        }
                     }
                     break;
                 case NET_PLAYER_ACTION_PUSH:
@@ -2477,6 +2532,9 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                 break;
             case NET_PKT_BARTER_CMD:
                 MpDialogHostHandleBarterCmd(payload, payloadLen, peer);
+                break;
+            case NET_PKT_LOOT_CMD:
+                MpLootOnHostPacket(payload, payloadLen, peer);
                 break;
             case NET_PKT_COMBAT_START_REQUEST: {
                 if (payloadLen != sizeof(NetCombatStartRequestPayload)) {
@@ -2839,6 +2897,11 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             // dialogue modal directly; the modal pumps MpTick itself).
             MpDialogOnClientPacket(packetType, payload, payloadLen);
             break;
+        case NET_PKT_LOOT_STATE:
+            // Synchronized loot: applied inline (the vanilla loot window
+            // pumps MpTick itself via MpLootLoopTick).
+            MpLootOnClientPacket(payload, payloadLen);
+            break;
         case NET_PKT_PLAYER_EVENT: {
             if (payloadLen != sizeof(NetPlayerEventPayload)) {
                 return;
@@ -2927,6 +2990,10 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                 return;
             }
             const NetMapChangedPayload* m = (const NetMapChangedPayload*)payload;
+            // Any open loot window is stale across a map change: the host's
+            // sessions are closed on the transition, the mirror dies with
+            // the old objects.
+            MpLootOnClientReset();
             MpApplyMapChanged(&m->map);
             break;
         }
@@ -2995,6 +3062,22 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
         }
         case NET_PKT_COMBAT_ENDED: {
             MpCombatOnEndedPacket();
+            break;
+        }
+        case NET_PKT_COMBAT_MOVE_RESULT: {
+            if (payloadLen < sizeof(NetCombatMoveResultPayload)) {
+                debugFilePrint("MP: combat move result bad length=%zu", payloadLen);
+                return;
+            }
+            MpCombatOnMoveResult((const NetCombatMoveResultPayload*)payload);
+            break;
+        }
+        case NET_PKT_FLOAT_MESSAGE: {
+            if (payloadLen < sizeof(NetFloatMessagePayload)) {
+                debugFilePrint("MP: float message bad length=%zu", payloadLen);
+                return;
+            }
+            MpCombatOnFloatMessage((const NetFloatMessagePayload*)payload);
             break;
         }
         case NET_PKT_COMBAT_MESSAGE: {
@@ -3341,7 +3424,13 @@ void MpCombatEndReviveDowned()
             reviveHp = 1;
         }
         critter->data.critter.hp = reviveHp;
+        // A leftover fall/knockdown animation (or the active-animation state)
+        // keeps rendering the corpse after a bare fid restore. Clear pending
+        // animations, restore the standing visual, then play the vanilla
+        // get-up animation — the same sequence the engine uses out of combat.
+        reg_anim_clear(critter);
         mpRestoreStandingVisual(critter, p->downedOrigFid, true);
+        _dude_standup(critter);
         p->downedOrigFid = 0;
         if (critter == gDude) {
             // The vanilla _combat_over rendered the HUD from the downed
@@ -3387,7 +3476,12 @@ void MpDebugApplyHeal(Object* critter, int value)
         p->downed = false;
         critter->data.critter.combat.results &= ~(DAM_DEAD | DAM_KNOCKED_OUT | DAM_KNOCKED_DOWN | DAM_LOSE_TURN);
         critter->data.critter.hp = newHp > 0 ? newHp : 1;
+        // Same get-up sequence as MpCombatEndReviveDowned: clear leftover
+        // fall animation state, restore the standing visual, play the
+        // vanilla get-up animation.
+        reg_anim_clear(critter);
         mpRestoreStandingVisual(critter, p->downedOrigFid, true);
+        _dude_standup(critter);
         p->downedOrigFid = 0;
         debugFilePrint("MPDBG: heal revived netId=%u hp=%d", p->netId, critter->data.critter.hp);
         displayMonitorAddMessage("A downed player gets back up!");
@@ -3441,7 +3535,13 @@ void MpApplyPlayerStatus(const NetPlayerStatusPayload* s)
     } else {
         dude->data.critter.hp = s->hp;
         dude->data.critter.combat.results &= ~(DAM_DEAD | DAM_KNOCKED_OUT | DAM_KNOCKED_DOWN | DAM_LOSE_TURN);
+        // Same get-up sequence as the host's revive: clear leftover fall
+        // animation state (the client's own predicted fall may still be
+        // queued and would re-corps the dude after the fid restore), restore
+        // the standing visual, then play the get-up animation.
+        reg_anim_clear(dude);
         mpRestoreStandingVisual(dude, p->downedOrigFid, true);
+        _dude_standup(dude);
         p->downedOrigFid = 0;
         interfaceRenderHitPoints(true);
         debugFilePrint("MP: player status self revived hp=%d fid=0x%X", s->hp, dude->fid);
@@ -3978,6 +4078,10 @@ void MpFinishHostMapChange()
     }
     debugFilePrint("MP: finish map change begin map=%d", gMapHeader.index);
 
+    // Co-op: loot/steal sessions target objects of the old map — close them
+    // all (no XP; the targets died with the map).
+    MpLootHostCloseAllSessions();
+
     MultiplayerPlayer* hostPlayer = &gMpSession.players[0];
     hostPlayer->obj = gDude;
     hostPlayer->lastSafeTile = gDude->tile;
@@ -4490,12 +4594,28 @@ void MpApplyPlayerState(const NetPlayerStateUpdatePayload* s)
     // reach the HP bar — refresh it whenever the synced value changes.
     if (isLocalPlayer && obj->data.critter.hp != oldLocalHp) {
         interfaceRenderHitPoints(true);
+        // Diagnostic (throttled): a local-player HP correction from the
+        // authoritative channel. A large divergence (e.g. 9 -> 33) means the
+        // client's local simulation applied its own damage numbers; the state
+        // is truth and this log proves the correction landed.
+        static uint32_t gMpLocalHpLogTick = 0;
+        uint32_t nowTicks = getTicks();
+        if (nowTicks - gMpLocalHpLogTick > 500) {
+            gMpLocalHpLogTick = nowTicks;
+            debugFilePrint("MP: local hp state %d->%d", oldLocalHp, obj->data.critter.hp);
+        }
     }
     // Thin client: the AP bar no longer updates from local action writes (the
     // host owns AP spends). Refresh it when the synced value changes so the
     // mirror stays visible — same full interface refresh the vanilla action
-    // path uses, not a one-off blit.
-    if (isLocalPlayer && obj->data.critter.combat.ap != oldLocalAp) {
+    // path uses, not a one-off blit. The re-render is gated to the local
+    // player's own turn (and out-of-combat): the host refreshes every
+    // combatant's AP at round start, and re-rendering that while the enemy
+    // (or another player) acts would turn the bar green before the player's
+    // turn — vanilla keeps the stale render from the player's last spend
+    // until their own turn re-renders it.
+    if (isLocalPlayer && obj->data.critter.combat.ap != oldLocalAp
+        && (!MpCombatIsActive() || gMpCombat.whoseTurn == gMpSession.localNetId)) {
         interfaceRenderActionPoints(obj->data.critter.combat.ap, _combat_free_move);
         // Trace the mirror's AP trajectory (throttled): explains any
         // lost/regained AP the player perceives during combat.
@@ -4533,6 +4653,22 @@ void MpApplyPlayerState(const NetPlayerStateUpdatePayload* s)
     // this re-check the client would sit in SYNCING forever waiting on the
     // final readiness condition.
     mpClientTryFinishMapSync();
+}
+
+// Co-op: snap the local dude to an authoritative position (combat move
+// resolutions that diverge from the optimistic walk). Stops any running
+// local animation first so the walk cannot continue past the truth.
+void MpApplyLocalDudeSnap(int tile, int elevation)
+{
+    Object* dude = gDude;
+    if (dude == nullptr || !hexGridTileIsValid(tile) || !elevationIsValid(elevation)) {
+        return;
+    }
+    if (animationIsBusy(dude) != 0) {
+        reg_anim_clear(dude);
+    }
+    mpApplyObjectTransform(dude, tile, dude->x, dude->y, dude->rotation,
+        dude->fid, 0, elevation, 0, false);
 }
 
 void MpApplyPlayerJoined(const NetPlayerJoinedPayload* payload)

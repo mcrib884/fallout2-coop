@@ -153,6 +153,9 @@ void MpFinishHostMapChange();
 
 // apply (client)
 void MpApplyPlayerState(const NetPlayerStateUpdatePayload* payload);
+// Snap the local dude to an authoritative tile (combat move resolutions that
+// diverge from the optimistic walk). Stops the running walk first.
+void MpApplyLocalDudeSnap(int tile, int elevation);
 void MpApplyMapFullSync(const void* data, size_t dataLength);
 void MpApplyMapTileSync(const void* data, size_t dataLength);
 void MpApplyMapChanged(const NetMapSyncPayload* payload);

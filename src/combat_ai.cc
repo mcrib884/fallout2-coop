@@ -22,6 +22,7 @@
 #include "map.h"
 #include "memory.h"
 #include "message.h"
+#include "multiplayer.h"
 #include "object.h"
 #include "party_member.h"
 #include "platform_compat.h"
@@ -3430,6 +3431,28 @@ static int _ai_print_msg(Object* critter, int type)
     Rect rect;
     if (textObjectAdd(critter, string, ai->font, ai->color, ai->outline_color, &rect) == 0) {
         tileWindowRefreshRect(&rect, critter->elevation);
+
+        // Co-op: the engine AI (combatai.msg weapon comments — "My blade
+        // grows thirsty") is host-side only. Relay with the AI packet's
+        // explicit style; the client renders it identically over the same
+        // critter instead of deriving a color from a message type.
+        if (gMpActive && gMpIsHost) {
+            uint32_t netId = MpGetObjNetId(critter);
+            if (netId != 0) {
+                NetFloatMessagePayload relay;
+                memset(&relay, 0, sizeof(relay));
+                relay.netId = netId;
+                relay.type = NET_FLOAT_AI_STYLE;
+                relay.font = ai->font;
+                relay.color = ai->color;
+                relay.outline = ai->outline_color;
+                strncpy(relay.text, string, sizeof(relay.text) - 1);
+                NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE,
+                    NET_PKT_FLOAT_MESSAGE, &relay, sizeof(relay));
+                debugFilePrint("MP: ai float relayed netId=%u font=%d color=%d outline=%d text='%.48s'",
+                    netId, ai->font, ai->color, ai->outline_color, relay.text);
+            }
+        }
     }
 
     return 0;

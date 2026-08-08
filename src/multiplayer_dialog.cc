@@ -47,6 +47,7 @@
 #include "stat_defs.h"
 #include "svga.h"
 #include "text_font.h"
+#include "text_object.h"
 #include "tile.h"
 #include "time.h"
 #include "window_manager.h"
@@ -116,6 +117,81 @@ static MpDialogSession gMpDialog = {};
 // Builds the current host node's option texts with the chooser names appended
 // (defined below; used by the join modal and the host pump re-render).
 static void mpDialogHostBuildNodeTexts(const char** texts, int* reactions, int* procs);
+
+// Synchronized dialogue flavor: float `text` over `obj` (host display) and
+// relay it to every client through the float channel. The dialogue floats use
+// an explicit style (NET_FLOAT_DIALOG_STYLE) so host and client render the
+// identical text — NPC lines in light yellow over the speaker, player choices
+// in white over the choosing avatar. The full line stays in the combat-log
+// transcript; the float is a capped echo (120 chars).
+//
+// The NPC and the choosing player stand adjacent, so their floats would
+// overlap: every new float pushes every tracked owner's live floats one
+// float-height up (textObjectsShiftVertically), so the newest always sits at
+// the bottom and older lines stack above. Dialogue floats never replace each
+// other (textObjectAddNoReplace) — every line lives until its natural fade.
+static Object* gMpDialogFloatStack[MP_DIALOG_FLOAT_STACK_MAX];
+static int gMpDialogFloatStackCount = 0;
+
+static void mpDialogFloat(Object* obj, const char* text, int font, int color, int outline)
+{
+    if (obj == nullptr || text == nullptr || text[0] == '\0' || !gMpActive) {
+        return;
+    }
+    char capped[121];
+    snprintf(capped, sizeof(capped), "%.120s", text);
+
+    // Stack first, add last: every tracked owner's live floats climb by a
+    // UNIFORM amount (textObjectsComputeStackShift) BEFORE the new line
+    // exists, so the new line lands at the bottom slot and is never caught in
+    // its own shift, and the old floats keep their relative spacing (per-owner
+    // shifts would break it — adjacent owners anchor to different tiles).
+    const int floatHeight = textObjectMeasure(capped, font, outline);
+    if (floatHeight > 0) {
+        const int dy = textObjectsComputeStackShift(obj->tile, floatHeight);
+        if (dy > 0) {
+            for (int i = 0; i < gMpDialogFloatStackCount; i++) {
+                textObjectsShiftVertically(gMpDialogFloatStack[i], -dy);
+            }
+        }
+    }
+    for (int i = 0; i < gMpDialogFloatStackCount; i++) {
+        if (gMpDialogFloatStack[i] == obj) {
+            gMpDialogFloatStackCount--;
+            for (int j = i; j < gMpDialogFloatStackCount; j++) {
+                gMpDialogFloatStack[j] = gMpDialogFloatStack[j + 1];
+            }
+            break;
+        }
+    }
+    if (gMpDialogFloatStackCount < MP_DIALOG_FLOAT_STACK_MAX) {
+        gMpDialogFloatStack[gMpDialogFloatStackCount++] = obj;
+    }
+
+    Rect rect;
+    if (textObjectAddNoReplace(obj, const_cast<char*>(capped), font, color, outline, &rect) != 0) {
+        return; // nothing was created — no stacking to do
+    }
+
+    tileWindowRefreshRect(&rect, obj->elevation);
+    if (gMpIsHost) {
+        uint32_t netId = MpGetObjNetId(obj);
+        if (netId != 0) {
+            NetFloatMessagePayload payload;
+            memset(&payload, 0, sizeof(payload));
+            payload.netId = netId;
+            payload.type = NET_FLOAT_DIALOG_STYLE;
+            payload.font = font;
+            payload.color = color;
+            payload.outline = outline;
+            strncpy(payload.text, capped, sizeof(payload.text) - 1);
+            NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE, NET_PKT_FLOAT_MESSAGE,
+                &payload, sizeof(payload));
+            debugFilePrint("MPDIALOG float relayed netId=%u font=%d color=%d outline=%d text='%.48s'",
+                netId, font, color, outline, capped);
+        }
+    }
+}
 
 struct MpDialogClientState {
     bool sessionActive;
@@ -305,6 +381,29 @@ static void mpDialogEmitNpcLine()
     mpDialogEmitTranscript(0, line);
 }
 
+// The name of the current dialogue initiator — whoever holds the role at the
+// moment (it hands off when the initiator leaves or disconnects). Returns
+// nullptr when there is no initiator.
+// Resolve a participant's display name for dialogue output. The player slots
+// carry the names exchanged during the handshake, but the client's OWN slot
+// is never filled locally (only the other players are broadcast to it) — so
+// always check the slot and fall back to the local avatar's name, then "?".
+// The dialogue must always show the correct name regardless of which side
+// renders it.
+static const char* mpDialogParticipantName(uint8_t netId)
+{
+    if (netId >= 1 && netId <= NET_MAX_PLAYERS) {
+        const char* name = gMpSession.players[netId - 1].name;
+        if (name != nullptr && name[0] != '\0') {
+            return name;
+        }
+        if (netId == gMpSession.localNetId && gDude != nullptr) {
+            return critterGetName(gDude);
+        }
+    }
+    return "?";
+}
+
 static void mpDialogEmitResolvedLine(int optionIndex)
 {
     char line[NET_DIALOG_TRANSCRIPT_MAX + 1];
@@ -322,7 +421,7 @@ static void mpDialogEmitResolvedLine(int optionIndex)
         if (gMpDialog.voters[netId - 1].selected != optionIndex) {
             continue;
         }
-        const char* name = gMpSession.players[netId - 1].name;
+        const char* name = mpDialogParticipantName(netId);
         if (firstName == 0) {
             strncpy(names, name, sizeof(names) - 1);
             firstName = netId;
@@ -944,6 +1043,11 @@ void MpDialogHostNodeReady(const MpDialogNodeData* node)
     // NPC line goes to the combat log of every connected player.
     mpDialogEmitNpcLine();
 
+    // Float the NPC line over the speaker (host display + client relay).
+    if (gMpDialog.speaker != nullptr && gMpDialog.replyText[0] != '\0') {
+        mpDialogFloat(gMpDialog.speaker, gMpDialog.replyText, 101, COLOR_LIGHT_YELLOW, COLOR_BLACK);
+    }
+
     for (int i = 0; i < gMpDialog.participantCount; i++) {
         if (!mpDialogCanSendTo(gMpDialog.participants[i])) {
             continue;
@@ -1070,6 +1174,11 @@ void MpDialogHostHandleChoice(const void* data, size_t dataLength, void* peer)
 
     debugFilePrint("MPDIALOG vote session=%u node=%u netId=%u option=%d",
         gMpDialog.sessionId, gMpDialog.nodeSeq, p->netId, p->optionIndex);
+    // Float the chosen option over the choosing player's avatar.
+    if (p->optionIndex < gMpDialog.optionCount && player->obj != nullptr
+        && gMpDialog.options[p->optionIndex].text[0] != '\0') {
+        mpDialogFloat(player->obj, gMpDialog.options[p->optionIndex].text, 101, COLOR_WHITE, COLOR_BLACK);
+    }
     mpDialogRecalcVote();
 }
 
@@ -1164,6 +1273,10 @@ void MpDialogHostLocalChoice(int optionIndex)
     }
     gMpDialog.voters[netId - 1].selected = (int8_t)optionIndex;
     debugFilePrint("MPDIALOG vote session=%u node=%u netId=%u option=%d", gMpDialog.sessionId, gMpDialog.nodeSeq, netId, optionIndex);
+    // Float the chosen option over the host participant's avatar.
+    if (gDude != nullptr && gMpDialog.options[optionIndex].text[0] != '\0') {
+        mpDialogFloat(gDude, gMpDialog.options[optionIndex].text, 101, COLOR_WHITE, COLOR_BLACK);
+    }
     mpDialogRecalcVote();
 }
 
@@ -1801,7 +1914,7 @@ static void mpDialogHostDrawOverlay()
     char line[128];
     for (int i = 0; i < gMpDialog.participantCount && i < 6; i++) {
         uint8_t netId = gMpDialog.participants[i];
-        const char* name = gMpSession.players[netId - 1].name;
+        const char* name = mpDialogParticipantName(netId);
         if (gMpDialog.voters[netId - 1].suspended) {
             snprintf(line, sizeof(line), "%s (barter)", name);
         } else {
@@ -2395,15 +2508,8 @@ static void mpDialogFormatOptionWithChoosers(char* out, size_t outSize, const ch
         if (selections[netId - 1] != optionIndex) {
             continue;
         }
-        const char* name = gMpSession.players[netId - 1].name;
-        if (name == nullptr || name[0] == '\0') {
-            // The client's own slot name is never filled locally; fall back to
-            // the local avatar's name so the client sees its own chooser entry.
-            if (netId == gMpSession.localNetId) {
-                name = critterGetName(gDude);
-            }
-        }
-        if (name == nullptr || name[0] == '\0') {
+        const char* name = mpDialogParticipantName(netId);
+        if (name[0] == '?') {
             continue;
         }
         size_t nameLen = strlen(name);
@@ -2934,7 +3040,7 @@ static void mpDialogDrawClientWindow()
         if (netId < 1 || netId > NET_MAX_PLAYERS) {
             continue;
         }
-            const char* name = gMpSession.players[netId - 1].name;
+            const char* name = mpDialogParticipantName(netId);
             if (gMpDialogClient.suspended[netId - 1]) {
                 snprintf(line, sizeof(line), "%s (barter)", name);
             } else {

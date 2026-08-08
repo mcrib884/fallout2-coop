@@ -38,6 +38,7 @@
 #include "multiplayer.h"
 #include "multiplayer_combat.h"
 #include "multiplayer_dialog.h"
+#include "multiplayer_loot.h"
 #include "object.h"
 #include "party_member.h"
 #include "perk.h"
@@ -4893,6 +4894,20 @@ int inventoryOpenLooting(Object* looter, Object* target)
     for (;;) {
         sharedFpsLimiter.mark();
 
+        // Co-op: pump the network every frame; break when the mp loot
+        // session ended (host END, abort, disconnect).
+        if (gMpActive && !MpLootLoopTick()) {
+            break;
+        }
+
+        // Co-op: the authoritative echo refreshed the panes — re-render both
+        // inventories and the body.
+        if (gMpActive && MpLootConsumeDirty()) {
+            _display_target_inventory(_target_stack_offset[_target_curr_stack], -1, _target_pud, INVENTORY_WINDOW_TYPE_LOOT);
+            _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_LOOT);
+            _display_body(getTargetDisplayFid(), INVENTORY_WINDOW_TYPE_LOOT);
+        }
+
         if (_game_user_wants_to_quit != GAME_QUIT_REQUEST_NONE) {
             break;
         }
@@ -4955,9 +4970,15 @@ int inventoryOpenLooting(Object* looter, Object* target)
                 int currentWeight = objectGetInventoryWeight(_inven_dude);
                 int newInventoryWeight = objectGetInventoryWeight(target);
                 if (newInventoryWeight <= maxCarryWeight - currentWeight) {
-                    itemMoveAll(target, _inven_dude);
-                    _display_target_inventory(_target_stack_offset[_target_curr_stack], -1, _target_pud, INVENTORY_WINDOW_TYPE_LOOT);
-                    _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_LOOT);
+                    if (gMpActive && gMpIsClient && MpLootSessionOpen()) {
+                        // Co-op: the host weight-checks again and applies;
+                        // the authoritative echo refreshes the panes.
+                        MpLootClientSendTakeAll();
+                    } else {
+                        itemMoveAll(target, _inven_dude);
+                        _display_target_inventory(_target_stack_offset[_target_curr_stack], -1, _target_pud, INVENTORY_WINDOW_TYPE_LOOT);
+                        _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_LOOT);
+                    }
                 } else {
                     // Sorry, you cannot carry that much.
                     messageListItem.num = 31;
@@ -5097,7 +5118,10 @@ int inventoryOpenLooting(Object* looter, Object* target)
     itemMoveAll(hiddenBox, target);
     objectDestroy(hiddenBox, nullptr);
 
-    if (_gIsSteal && !isCaughtStealing && stealingXp > 0 && !objectIsPartyMember(target)) {
+    // Co-op: in an mp loot session the host awards the XP on the avatar and
+    // sends the message; the client's local award would double it.
+    if (_gIsSteal && !isCaughtStealing && stealingXp > 0 && !objectIsPartyMember(target)
+        && !(gMpActive && gMpIsClient && MpLootSessionOpen())) {
         stealingXp = std::min(300 - skillGetValue(looter, SKILL_STEAL), stealingXp);
         debugPrint("\n[[[%d]]]", 300 - skillGetValue(looter, SKILL_STEAL));
 
@@ -5125,13 +5149,22 @@ int inventoryOpenLooting(Object* looter, Object* target)
     // NOTE: Uninline.
     inventoryCommonFree();
 
-    if (_gIsSteal && isCaughtStealing && _gStealCount > 0 && objectGetSid(target, &sid) != -1) {
+    // Co-op: the host runs the target's PICKUP script on a caught steal (the
+    // client's scripts are inert anyway); skip the local bookkeeping.
+    if (_gIsSteal && isCaughtStealing && _gStealCount > 0 && objectGetSid(target, &sid) != -1
+        && !(gMpActive && gMpIsClient && MpLootSessionOpen())) {
         scriptSetObjects(sid, looter, nullptr);
         scriptExecProc(sid, SCRIPT_PROC_PICKUP);
 
         // TODO: Looks like inlining, script is not used.
         Script* script;
         scriptGetScript(sid, &script);
+    }
+
+    // Co-op: the mp loot session ends when the local window closes; the host
+    // awards any pending steal XP and releases the session.
+    if (gMpActive) {
+        MpLootLoopEnded();
     }
 
     return 0;
@@ -5155,6 +5188,27 @@ int inventoryOpenStealing(Object* thief, Object* target)
     _gStealSize = 0;
 
     return rc;
+}
+
+// Co-op: formats an inventory.msg message (25/26/29/31 style) for relay to a
+// remote player's client — the host has the message list, the client only
+// displays the finished text.
+void inventoryFormatMessage(int msgId, int arg, char* out, size_t outSize)
+{
+    if (out == nullptr || outSize == 0) {
+        return;
+    }
+    out[0] = '\0';
+    MessageListItem messageListItem;
+    messageListItem.num = msgId;
+    if (messageListGetItem(&gInventoryMessageList, &messageListItem)) {
+        if (strchr(messageListItem.text, '%') != nullptr) {
+            snprintf(out, outSize, messageListItem.text, arg);
+        } else {
+            strncpy(out, messageListItem.text, outSize - 1);
+            out[outSize - 1] = '\0';
+        }
+    }
 }
 
 // 0x474708
@@ -5217,7 +5271,8 @@ static InventoryMoveResult _move_inventory(Object* item, int slotIndex, Object* 
     InventoryMoveResult result = INVENTORY_MOVE_RESULT_FAILED;
 
     if (isPlanting) {
-        if (!immediate && tryEquipPartyItem(item, true)) {
+        if (!immediate && tryEquipPartyItem(item, true)
+            && !(gMpActive && gMpIsClient && MpLootSessionOpen())) {
             result = INVENTORY_MOVE_RESULT_SUCCESS;
         } else if (immediate || inventoryLootMouseHitTestScroller(true)) {
             int quantityToMove = quantity;
@@ -5226,27 +5281,35 @@ static InventoryMoveResult _move_inventory(Object* item, int slotIndex, Object* 
             }
 
             if (quantityToMove != -1) {
-                bool skipMove = false;
-                if (_gIsSteal && _inven_dude == gDude) {
-                    SkillStealResult stealResult = skillsPerformStealing(_inven_dude, targetObj, item, quantityToMove, true, stealXpOverridePtr);
-                    if (stealResult == SkillStealResult::Caught) {
-                        result = INVENTORY_MOVE_RESULT_CAUGHT_STEALING;
-                    } else if (stealResult == SkillStealResult::Fail) {
-                        skipMove = true;
+                if (gMpActive && gMpIsClient && MpLootSessionOpen()) {
+                    // Co-op: the host rolls + applies; the authoritative echo
+                    // refreshes both panes. Nothing moves locally.
+                    MpLootClientSendMove((uint32_t)item->pid, -quantityToMove);
+                    result = INVENTORY_MOVE_RESULT_SUCCESS;
+                } else {
+                    bool skipMove = false;
+                    if (_gIsSteal && _inven_dude == gDude) {
+                        SkillStealResult stealResult = skillsPerformStealing(_inven_dude, targetObj, item, quantityToMove, true, stealXpOverridePtr);
+                        if (stealResult == SkillStealResult::Caught) {
+                            result = INVENTORY_MOVE_RESULT_CAUGHT_STEALING;
+                        } else if (stealResult == SkillStealResult::Fail) {
+                            skipMove = true;
+                        }
                     }
-                }
 
-                if (!skipMove && result != INVENTORY_MOVE_RESULT_CAUGHT_STEALING) {
-                    if (itemMove(_inven_dude, targetObj, item, quantityToMove) != -1) {
-                        result = INVENTORY_MOVE_RESULT_SUCCESS;
-                    } else {
-                        inventoryDisplayMessage(26); // There is no space left for that item.
+                    if (!skipMove && result != INVENTORY_MOVE_RESULT_CAUGHT_STEALING) {
+                        if (itemMove(_inven_dude, targetObj, item, quantityToMove) != -1) {
+                            result = INVENTORY_MOVE_RESULT_SUCCESS;
+                        } else {
+                            inventoryDisplayMessage(26); // There is no space left for that item.
+                        }
                     }
                 }
             }
         }
     } else {
-        if (!immediate && tryEquipPartyItem(item, false)) {
+        if (!immediate && tryEquipPartyItem(item, false)
+            && !(gMpActive && gMpIsClient && MpLootSessionOpen())) {
             result = INVENTORY_MOVE_RESULT_SUCCESS;
         } else if (immediate || inventoryLootMouseHitTestScroller(false)) {
             int quantityToMove = quantity;
@@ -5255,27 +5318,34 @@ static InventoryMoveResult _move_inventory(Object* item, int slotIndex, Object* 
             }
 
             if (quantityToMove != -1) {
-                bool skipMove = false;
-                if (_gIsSteal && _inven_dude == gDude) {
-                    SkillStealResult stealResult = skillsPerformStealing(_inven_dude, targetObj, item, quantityToMove, false, stealXpOverridePtr);
-                    if (stealResult == SkillStealResult::Caught) {
-                        result = INVENTORY_MOVE_RESULT_CAUGHT_STEALING;
-                    } else if (stealResult == SkillStealResult::Fail) {
-                        skipMove = true;
-                    }
-                }
-
-                if (!skipMove && result != INVENTORY_MOVE_RESULT_CAUGHT_STEALING) {
-                    if (itemMove(targetObj, _inven_dude, item, quantityToMove) == 0) {
-                        if ((item->flags & OBJECT_IN_RIGHT_HAND) != 0) {
-                            targetObj->fid = buildFid(FID_TYPE(targetObj->fid), targetObj->fid & 0xFFF, animationTypeFromFid(targetObj->fid), 0, targetObj->rotation + 1);
+                if (gMpActive && gMpIsClient && MpLootSessionOpen()) {
+                    // Co-op: the host rolls + applies; the authoritative echo
+                    // refreshes both panes. Nothing moves locally.
+                    MpLootClientSendMove((uint32_t)item->pid, quantityToMove);
+                    result = INVENTORY_MOVE_RESULT_SUCCESS;
+                } else {
+                    bool skipMove = false;
+                    if (_gIsSteal && _inven_dude == gDude) {
+                        SkillStealResult stealResult = skillsPerformStealing(_inven_dude, targetObj, item, quantityToMove, false, stealXpOverridePtr);
+                        if (stealResult == SkillStealResult::Caught) {
+                            result = INVENTORY_MOVE_RESULT_CAUGHT_STEALING;
+                        } else if (stealResult == SkillStealResult::Fail) {
+                            skipMove = true;
                         }
+                    }
 
-                        targetObj->flags &= ~OBJECT_EQUIPPED;
+                    if (!skipMove && result != INVENTORY_MOVE_RESULT_CAUGHT_STEALING) {
+                        if (itemMove(targetObj, _inven_dude, item, quantityToMove) == 0) {
+                            if ((item->flags & OBJECT_IN_RIGHT_HAND) != 0) {
+                                targetObj->fid = buildFid(FID_TYPE(targetObj->fid), targetObj->fid & 0xFFF, animationTypeFromFid(targetObj->fid), 0, targetObj->rotation + 1);
+                            }
 
-                        result = INVENTORY_MOVE_RESULT_SUCCESS;
-                    } else {
-                        inventoryDisplayMessage(25); // You cannot pick that up. You are at your maximum weight capacity.
+                            targetObj->flags &= ~OBJECT_EQUIPPED;
+
+                            result = INVENTORY_MOVE_RESULT_SUCCESS;
+                        } else {
+                            inventoryDisplayMessage(25); // You cannot pick that up. You are at your maximum weight capacity.
+                        }
                     }
                 }
             }
@@ -5811,7 +5881,7 @@ void barterProcessUI(int win, Object* barterer, Object* playerTable, Object* bar
     for (;;) {
         sharedFpsLimiter.mark();
 
-        if (keyCode == KEY_ESCAPE || _game_user_wants_to_quit != GAME_QUIT_REQUEST_NONE) {
+        if (_game_user_wants_to_quit != GAME_QUIT_REQUEST_NONE) {
             break;
         }
 

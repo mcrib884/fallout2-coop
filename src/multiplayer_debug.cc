@@ -147,9 +147,18 @@ void dbgStatModify(int index, int delta)
         return;
     }
     Stat stat = static_cast<Stat>(index);
+    int before = critterGetBaseStat(gDude, stat);
     debugFilePrint("MPDBG: stat modify index=%d delta=%d stat=%s before=%d",
-        index, delta, statGetName(stat), critterGetBaseStat(gDude, stat));
-    int next = std::clamp(critterGetBaseStat(gDude, stat) + delta, 1, 10);
+        index, delta, statGetName(stat), before);
+    // The vanilla setter stores (target - traitModifier) into the raw base
+    // (critterSetBaseStat subtracts the trait modifier so that
+    // getWithTraitModifier == target). The menu displays the raw value, so
+    // the target must be computed from the trait-MODIFIED base — exactly the
+    // critterIncBaseStat/critterDecBaseStat semantics. Without this, a
+    // Gifted character (+1 all SPECIAL) stores raw+delta-1: increases never
+    // visibly change and decreases jump by two.
+    int next = std::clamp(
+        critterGetBaseStatWithTraitModifier(gDude, stat) + delta, 1, 10);
     critterSetBaseStat(gDude, stat, next);
     critterUpdateDerivedStats(gDude);
     interfaceRenderHitPoints(true);

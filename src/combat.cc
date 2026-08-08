@@ -5377,6 +5377,12 @@ static void _damage_object(Object* target, int damage, bool animated, int hitUni
 
     if (target == gDude) {
         interfaceRenderHitPoints(animated);
+    } else if (gMpActive && gMpIsHost && MpCombatIsPlayerCritter(target)) {
+        // Co-op: the host's interface (party boxes, HP bars) shows the
+        // remote avatar's HP, but vanilla only re-renders for gDude. A hit
+        // on a remote avatar would leave the on-screen numbers stale until
+        // some unrelated refresh (e.g. the acting player's next turn).
+        interfaceRenderHitPoints(true);
     }
 
     target->data.critter.combat.damageLastTurn += damage;

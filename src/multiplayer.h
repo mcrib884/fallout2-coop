@@ -165,6 +165,11 @@ void MpDrawPlayerIndicators();
 // returns just the local dude. Fills outAnchors up to maxAnchors.
 int MpGetCircleAnchors(Object** outAnchors, int maxAnchors);
 
+// True for any critter that belongs to a connected player: the local dude or
+// any remote avatar (both the host's avatar on a client and the clients'
+// avatars on the host). Used to render the constant player overlay.
+bool MpIsPlayerObject(const Object* obj);
+
 // broadcast (host -> clients)
 void MpBroadcastPlayerStates();
 void MpBroadcastObjectStates();

@@ -32,14 +32,17 @@
 #include "multiplayer_dialog.h"
 #include "multiplayer_loot.h"
 #include "multiplayer_profile.h"
+#include "queue.h"
 #include "random.h"
 #include "object.h"
 #include "palette.h"
 #include "perk.h"
+#include "sfall_script_hooks.h"
 #include "svga.h"
 #include "window_manager.h"
 #include "skill.h"
 #include "party_member.h"
+#include "message.h"
 #include "proto.h"
 #include "proto_instance.h"
 #include "scripts.h"
@@ -2859,6 +2862,66 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                     break;
                 }
 
+                if (action->action == NET_PLAYER_ACTION_USE_ITEM) {
+                    // Client armed an explosive from its own inventory. The arm
+                    // mutated the pid locally (DYNAMITE_I -> DYNAMITE_II etc.),
+                    // so the avatar's copy is still the INACTIVE pid the client
+                    // sent. Find it, arm it with the same fuse the client
+                    // selected (action->tile = fuse seconds), and queue the
+                    // explosion event — the later drop relay (carrying the
+                    // ACTIVE pid) then matches and the bomb stays alive.
+                    if (p->obj != nullptr) {
+                        Object* item = nullptr;
+                        for (int itemIndex = 0;
+                            itemIndex < p->obj->data.inventory.length; itemIndex++) {
+                            Object* candidate = p->obj->data.inventory.items[itemIndex].item;
+                            if (candidate != nullptr
+                                && candidate->pid == (int)action->targetNetId) {
+                                item = candidate;
+                                break;
+                            }
+                        }
+                        if (item != nullptr && explosiveIsExplosive(item->pid)
+                            && (item->flags & OBJECT_QUEUED) == 0) {
+                            int seconds = action->tile;
+                            if (seconds < 0) {
+                                seconds = 0;
+                            }
+                            explosiveActivate(&(item->pid));
+                            int delay = 10 * seconds;
+                            int roll;
+                            if (perkHasRank(p->obj, PERK_DEMOLITION_EXPERT)) {
+                                roll = ROLL_SUCCESS;
+                            } else {
+                                roll = skillRoll(p->obj, SKILL_TRAPS, 0, nullptr);
+                            }
+                            EventType eventType;
+                            switch (roll) {
+                            case ROLL_CRITICAL_FAILURE:
+                                delay = 0;
+                                eventType = EVENT_TYPE_EXPLOSION_FAILURE;
+                                break;
+                            case ROLL_FAILURE:
+                                eventType = EVENT_TYPE_EXPLOSION_FAILURE;
+                                delay /= 2;
+                                break;
+                            default:
+                                eventType = EVENT_TYPE_EXPLOSION;
+                                break;
+                            }
+                            if (scriptHooks_ExplosiveTimer(item, 10 * seconds, eventType) == -1) {
+                                queueAddEvent(delay, item, nullptr, eventType);
+                            }
+                            debugFilePrint("MP: use item arm netId=%u pid=0x%X seconds=%d delay=%d type=%d",
+                                p->netId, item->pid, seconds, delay, eventType);
+                        } else {
+                            debugFilePrint("MP: use item no item netId=%u pid=0x%X",
+                                p->netId, action->targetNetId);
+                        }
+                    }
+                    break;
+                }
+
                 Object* target = mpHostFindObjectByNetId(action->targetNetId);
                 if (target == nullptr) {
                     return;
@@ -3666,6 +3729,23 @@ bool MpIsCoopPlayerCritter(const Object* critter)
         return false;
     }
     return critter == gDude;
+}
+
+bool MpIsPlayerObject(const Object* obj)
+{
+    if (!gMpActive || obj == nullptr) {
+        return false;
+    }
+    if (obj == gDude) {
+        return true;
+    }
+    for (int i = 0; i < NET_MAX_PLAYERS; i++) {
+        const MultiplayerPlayer* p = &gMpSession.players[i];
+        if (p->isConnected && p->obj == obj) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool MpPlayerIsDownedByNetId(uint8_t netId)

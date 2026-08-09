@@ -536,6 +536,14 @@ int _show_death(Object* obj, AnimationType anim)
 // 0x410FEC show_damage_extras
 int showDamageToExtras(Attack* attack)
 {
+    // Co-op client: the local predicted attack must not animate death (or any
+    // damage) on burst/area extra targets — the client's locally rolled
+    // extrasFlags may claim DAM_DEAD for enemies the host never killed. The
+    // host's authoritative object-state channel delivers the real outcome.
+    if (gMpActive && gMpIsClient && MpCombatIsActive() && attack->attacker == gDude) {
+        return 0;
+    }
+
     for (int index = 0; index < attack->extrasLength; index++) {
         Object* obj = attack->extras[index];
         if (objectTypeFromFid(obj->fid) == OBJ_TYPE_CRITTER) {

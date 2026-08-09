@@ -829,7 +829,13 @@ void _obj_render_pre_roof(Rect* rect, int elevation)
                     if ((objectListNode->obj->flags & OBJECT_HIDDEN) == 0) {
                         _obj_render_object(objectListNode->obj, &updatedRect, lightIntensity);
 
-                        if (objectHasVisibleOutline(objectListNode->obj)) {
+                        // Co-op: players are always outlined — the post-roof
+                        // pass draws a constant dim green ring around them,
+                        // visible even behind walls. Players carrying a combat
+                        // outline keep the normal (disabled) gate.
+                        if (objectHasVisibleOutline(objectListNode->obj)
+                            || (gMpActive && MpIsPlayerObject(objectListNode->obj)
+                                && (objectListNode->obj->outline & OUTLINE_TYPE_MASK) == 0)) {
                             outlinedObjects.push_back(objectListNode->obj);
                         }
                     }
@@ -865,7 +871,10 @@ void _obj_render_pre_roof(Rect* rect, int elevation)
                 if ((objectListNode->obj->flags & OBJECT_HIDDEN) == 0) {
                     _obj_render_object(object, &updatedRect, lightIntensity);
 
-                    if (objectHasVisibleOutline(objectListNode->obj)) {
+                    // Co-op: players are always outlined (see pre-roof note).
+                    if (objectHasVisibleOutline(objectListNode->obj)
+                        || (gMpActive && MpIsPlayerObject(objectListNode->obj)
+                            && (objectListNode->obj->outline & OUTLINE_TYPE_MASK) == 0)) {
                         outlinedObjects.push_back(objectListNode->obj);
                     }
                 }
@@ -4936,54 +4945,65 @@ static void objectDrawOutline(Object* object, Rect* rect)
         int v43;
         int v44;
 
-        switch (outlineType) {
-        case OUTLINE_TYPE_HOSTILE:
-            color = 243;
+        // Co-op: constant dim light-green ring around every player's sprite,
+        // drawn in the post-roof pass so it stays visible even behind walls.
+        // Much dimmer than the bright combat outline (palette 229); when a
+        // combat outline is set it takes over normally.
+        if (outlineType == 0 && gMpActive && MpIsPlayerObject(object)) {
+            color = COLOR_LIGHT_GREEN_2;
             v53 = 0;
-            v43 = 5;
-            v44 = frameHeight / 5;
-            break;
-        case OUTLINE_TYPE_2:
-            color = COLOR_RED;
+            v43 = 0;
             v44 = 0;
-            if (v53 != 0) {
-                v47 = _commonGrayTable;
-                v48 = _redBlendTable;
+        } else {
+            switch (outlineType) {
+            case OUTLINE_TYPE_HOSTILE:
+                color = 243;
+                v53 = 0;
+                v43 = 5;
+                v44 = frameHeight / 5;
+                break;
+            case OUTLINE_TYPE_2:
+                color = COLOR_RED;
+                v44 = 0;
+                if (v53 != 0) {
+                    v47 = _commonGrayTable;
+                    v48 = _redBlendTable;
+                }
+                break;
+            case OUTLINE_TYPE_4:
+                color = COLOR_GREY_2;
+                v44 = 0;
+                if (v53 != 0) {
+                    v47 = _commonGrayTable;
+                    v48 = _wallBlendTable;
+                }
+                break;
+            case OUTLINE_TYPE_FRIENDLY:
+                v43 = 4;
+                v44 = frameHeight / 4;
+                color = 229;
+                v53 = 0;
+                break;
+            case OUTLINE_TYPE_ITEM:
+                v44 = 0;
+                color = COLOR_LIGHT_GOLD_2;
+                if (v53 != 0) {
+                    v47 = _commonGrayTable;
+                    v48 = _redBlendTable;
+                }
+                break;
+            case OUTLINE_TYPE_32:
+                color = 61;
+                v53 = 0;
+                v43 = 1;
+                v44 = frameHeight;
+                break;
+            default:
+                color = COLOR_MAGENTA;
+                v53 = 0;
+                v44 = 0;
+                break;
             }
-            break;
-        case OUTLINE_TYPE_4:
-            color = COLOR_GREY_2;
-            v44 = 0;
-            if (v53 != 0) {
-                v47 = _commonGrayTable;
-                v48 = _wallBlendTable;
-            }
-            break;
-        case OUTLINE_TYPE_FRIENDLY:
-            v43 = 4;
-            v44 = frameHeight / 4;
-            color = 229;
-            v53 = 0;
-            break;
-        case OUTLINE_TYPE_ITEM:
-            v44 = 0;
-            color = COLOR_LIGHT_GOLD_2;
-            if (v53 != 0) {
-                v47 = _commonGrayTable;
-                v48 = _redBlendTable;
-            }
-            break;
-        case OUTLINE_TYPE_32:
-            color = 61;
-            v53 = 0;
-            v43 = 1;
-            v44 = frameHeight;
-            break;
-        default:
-            color = COLOR_MAGENTA;
-            v53 = 0;
-            v44 = 0;
-            break;
         }
 
         unsigned char v54 = color;

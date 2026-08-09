@@ -934,6 +934,22 @@ static UseItemResultCode _obj_use_explosive(Object* explosive)
             // SFALL
             explosiveActivate(&(explosive->pid));
 
+            // Co-op client: the arm ran locally (pid I -> II) but the host
+            // never saw it — the avatar's copy is still the inactive pid, so
+            // a subsequent drop relay (which carries the ACTIVE pid) finds
+            // nothing and the bomb vanishes. Relay the arm: the inactive pid
+            // (so the host can locate the item in the avatar's inventory)
+            // plus the fuse seconds the client selected. The host arms its
+            // copy with the same fuse.
+            //
+            // NOTE: do NOT gate on the item's owner here — the inventory USE
+            // flow removes the item from the dude's inventory first, which
+            // nulls owner (itemRemoveInternal). The client can only reach
+            // this path through its own dude's use flows.
+            if (gMpIsClient && gMpActive) {
+                MpSendPlayerAction(NET_PLAYER_ACTION_USE_ITEM, pid, seconds, gDude->elevation);
+            }
+
             int delay = 10 * seconds;
 
             int roll;

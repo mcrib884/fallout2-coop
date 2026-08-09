@@ -211,6 +211,12 @@ enum NetPlayerActionType {
     // netId, tile = the item's pid, skill = entry mode (0 = crosshair click,
     // 1 = inventory picker; the host uses it to pick the combat AP cost).
     NET_PLAYER_ACTION_USE_ITEM_ON = 12,
+    // Client arms an explosive from its own inventory (sets the fuse). The
+    // arm mutated the pid locally (DYNAMITE_I -> DYNAMITE_II etc.), so the
+    // host must arm its avatar's copy with the same fuse. targetNetId = the
+    // item's pid (the INACTIVE one, so the host can find it in the avatar's
+    // inventory), tile = the fuse seconds the client selected.
+    NET_PLAYER_ACTION_USE_ITEM = 13,
 };
 
 typedef struct NetPlayerActionPayload {

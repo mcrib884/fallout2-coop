@@ -991,6 +991,11 @@ static void opDestroyObject(Program* program)
         int quantity = itemGetQuantity(owner, object);
         itemRemoveWithReason(owner, object, quantity, RemoveInventoryObjectHookReason::ItemDestroyed);
 
+        // Co-op: a script destroyed an item from a player's inventory (e.g.
+        // the temple fight weapon strip). The whole party loses it together,
+        // and each owning client's local inventory follows.
+        MpHostMirrorItemRemoval(owner, object, quantity);
+
         if (owner == gDude) {
             bool animated = !gameUiIsDisabled();
             interfaceUpdateItems(animated, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
@@ -1147,6 +1152,18 @@ static void opGetDude(Program* program)
     // requests combat the vanilla way, and it enters as the vanilla script
     // attacker — a real combatant, not a bystander.
     if (gMpIsHost && gMpActive) {
+        // An active dialogue pins dude_obj to the session initiator for the
+        // whole conversation: scripts that embed the player's name or react
+        // to "the player" must keep resolving to the talking player, not to
+        // whoever happens to stand nearest (the temple warrior's name line
+        // flipped from the client to the host the moment the host walked
+        // closer).
+        Object* initiatorAvatar = MpDialogInitiatorAvatar();
+        if (initiatorAvatar != nullptr) {
+            dude = initiatorAvatar;
+            programStackPushPointer(program, dude);
+            return;
+        }
         int sid = scriptGetSid(program);
         Script* script = nullptr;
         if (scriptGetScript(sid, &script) != -1 && script->target != nullptr
@@ -1752,6 +1769,11 @@ static void opRemoveObjectFromInventory(Program* program)
         Rect rect;
         _obj_connect(item, 1, 0, &rect);
         tileWindowRefreshRect(&rect, item->elevation);
+
+        // Co-op: a script removed an item from a REMOTE player's avatar (e.g.
+        // the temple warrior strip at the fight start). The owning client's
+        // local inventory must lose the same item.
+        MpHostMirrorItemRemoval(owner, item, 1);
 
         if (updateFlags) {
             correctFidForRemovedItem(owner, item, flags);
@@ -3821,6 +3843,11 @@ static void opRemoveMultipleObjectsFromInventory(Program* program)
         if (itemRemoveWithReason(owner, item, quantity, RemoveInventoryObjectHookReason::ItemRemovedMulti) == 0) {
             Rect updatedRect;
             _obj_connect(item, 1, 0, &updatedRect);
+
+            // Co-op: relay script-driven removals from a remote player's
+            // avatar to the owning client's local inventory.
+            MpHostMirrorItemRemoval(owner, item, quantity);
+
             if (itemWasEquipped) {
                 if (owner == gDude) {
                     bool animated = !gameUiIsDisabled();
@@ -4781,7 +4808,28 @@ static void opMoveObjectInventoryToObject(Program* program)
         correctFidForRemovedItem(object1, oldWeapon, flags);
     }
 
+    // Co-op: a script is stripping gear from a player avatar (the temple
+    // fight's move_obj_inven_to_obj into the trunk). Snapshot what is about
+    // to move so the same strip can be mirrored to the whole party and
+    // relayed to each owning client — the a82af690 removal relay only covers
+    // the remove opcodes, not this move.
+    std::vector<int> stripPids;
+    std::vector<int> stripQtys;
+    if (gMpIsHost && gMpActive && MpIsPlayerObject(object1)) {
+        for (int itemIndex = 0; itemIndex < object1->data.inventory.length; itemIndex++) {
+            Object* stripItem = object1->data.inventory.items[itemIndex].item;
+            if (stripItem != nullptr) {
+                stripPids.push_back(stripItem->pid);
+                stripQtys.push_back(object1->data.inventory.items[itemIndex].quantity);
+            }
+        }
+    }
+
     itemMoveAll(object1, object2);
+
+    if (gMpIsHost && gMpActive && !stripPids.empty()) {
+        MpHostMirrorInventoryMove(object1, object2, stripPids.data(), stripQtys.data(), (int)stripPids.size());
+    }
 
     if (object1 == gDude) {
         if (oldArmor != nullptr) {

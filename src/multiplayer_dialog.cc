@@ -275,6 +275,14 @@ Object* MpDialogPendingInitiatorAvatar()
     return mpDialogPlayerAvatar(gMpDialog.pendingInitiator);
 }
 
+Object* MpDialogInitiatorAvatar()
+{
+    if (!gMpActive || !gMpIsHost || !gMpDialog.active || gMpDialog.initiatorNetId == 0) {
+        return nullptr;
+    }
+    return mpDialogPlayerAvatar(gMpDialog.initiatorNetId);
+}
+
 static bool mpDialogIsParticipant(uint8_t netId)
 {
     for (int i = 0; i < gMpDialog.participantCount; i++) {
@@ -819,6 +827,12 @@ void MpDialogHostDirectorTick()
     if (gMpDialog.hostParticipant) {
         return;
     }
+
+    // NOTE: no proximity auto-join here. This conversation only starts when
+    // someone talks to the NPC (the scripted forced dialogue is talk-triggered
+    // via the NPC's talk procedure), so joining must be by click as well —
+    // symmetric with the client. The join fires from actionTalk and from the
+    // client NET_PLAYER_ACTION_TALK routing only.
 
     // Interruptions first (mirrors the modal pump; MpCombatTick runs right
     // after this in MpTick and may start combat).

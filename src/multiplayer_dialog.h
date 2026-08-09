@@ -50,7 +50,6 @@ void MpDialogClearPendingInitiator();
 // True while the host has an active mp dialogue session (script paused at
 // dialog_go). Used to gate world-tick processing and effect routing.
 bool MpDialogHostActive();
-
 // A remote/host player tried to talk to `speaker` while a session is already
 // running on that NPC: join the session instead of re-entering the talk
 // script. Returns true when the join happened (caller must skip actionTalk).
@@ -86,6 +85,12 @@ bool MpDialogDirectorMode();
 // Avatar of the player who initiated the pending dialogue (host-side).
 // nullptr when no pending initiator, not host, or the player is missing.
 Object* MpDialogPendingInitiatorAvatar();
+
+// Avatar of the player who initiated the ACTIVE session (host-side). Unlike
+// the pending variant this stays valid for the whole session, so scripts that
+// resolve "dude_obj" mid-dialogue keep seeing the initiator even when another
+// player walks closer. nullptr when no session, no initiator, or not host.
+Object* MpDialogInitiatorAvatar();
 
 // Current node sequence of the active host session (used by the director
 // choice path to detect whether a reply proc built a new node).

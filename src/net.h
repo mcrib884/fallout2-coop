@@ -84,6 +84,7 @@ enum NetPacketType {
     NET_PKT_GVAR_SNAPSHOT = 54,   // host -> joining client: full gvar table (quest state)
     NET_PKT_GVAR_CHANGE = 55,     // host -> clients: one live gvar write
     NET_PKT_MAP_ELEVATION = 56,   // host -> clients: shared elevation change (same-map transition)
+    NET_PKT_ITEM_REMOVE = 57,     // host -> client: script removed an item from the player's inventory
 };
 
 enum NetUnreliablePacketType {
@@ -177,6 +178,15 @@ typedef struct NetMapElevationPayload {
     int32_t elevation;
     int32_t rotation;
 } NetMapElevationPayload;
+
+// Script-driven inventory removal relay (host -> owning client): a script
+// removed an item from a player avatar's inventory (e.g. the temple warrior
+// strip). Carries the proto pid + quantity so the client can drop the same
+// item from its local dude inventory.
+typedef struct NetItemRemovePayload {
+    int32_t pid;
+    int32_t quantity;
+} NetItemRemovePayload;
 
 typedef struct NetWelcomePayload {
     uint8_t assignedNetId;

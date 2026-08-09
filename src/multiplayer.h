@@ -186,6 +186,20 @@ void MpApplyPlayerState(const NetPlayerStateUpdatePayload* payload);
 // CURRENT map: snap the local dude and switch the shared elevation (no map
 // reload). See multiplayer.cc mpApplySessionElevationChange.
 void MpOnMapElevationChange(const NetMapElevationPayload* payload);
+// A script removed an item from a player's inventory on the host (e.g. the
+// temple warrior strip): drop the matching item from the local dude inventory.
+// (client)
+void MpOnItemRemove(const NetItemRemovePayload* payload);
+// A script removed an item from a player avatar's inventory on the host:
+// relay the removal to the owning client so its LOCAL inventory matches.
+// (host; called from the script removal opcodes)
+void MpHostMirrorItemRemoval(Object* avatar, Object* item, int quantity);
+// A script MOVED a player avatar's inventory into a container on the host
+// (e.g. the temple warrior strip into the trunk via move_obj_inven_to_obj):
+// mirror the same strip onto every other player avatar and relay the
+// removals to each owning client. (host; called from opMoveObjectInventoryToObject)
+void MpHostMirrorInventoryMove(Object* sourceAvatar, Object* destContainer,
+    const int* pids, const int* qtys, int count);
 // The client's current map-entrance snapshot (natural entering position from
 // the map file, captured before the co-op metadata overwrites the header).
 // Used by the save redirect so client saves never carry a session position.

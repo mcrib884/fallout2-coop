@@ -22,6 +22,8 @@
 #include "geometry.h"
 #include "input.h"
 #include "interface.h"
+#include "interpreter_extra.h"
+#include "inventory.h"
 #include "item.h"
 #include "light.h"
 #include "loadsave.h"
@@ -3555,6 +3557,13 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             MpOnMapElevationChange((const NetMapElevationPayload*)payload);
             break;
         }
+        case NET_PKT_ITEM_REMOVE: {
+            if (payloadLen != sizeof(NetItemRemovePayload)) {
+                return;
+            }
+            MpOnItemRemove((const NetItemRemovePayload*)payload);
+            break;
+        }
         case NET_PKT_MAP_CHANGE_ABORT: {
             // The host could not load the target map. The session stays on the
             // current map; the client must not sit in CLIENT_SYNCING waiting
@@ -5710,6 +5719,225 @@ void MpOnMapElevationChange(const NetMapElevationPayload* payload)
         objUpdateRoofsForTile(gDude->tile, gDude->elevation);
         tileSetCenter(gDude->tile,
             TILE_SET_CENTER_REFRESH_WINDOW | TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS);
+    }
+}
+
+// Host-side mirror of a script-driven inventory removal: a script removed an
+// item from a player avatar's inventory on the host (e.g. the temple warrior
+// strip at the start of the fight). Scripts targeting "the player" act on the
+// party in co-op, so the same removal (matched by pid) is applied to EVERY
+// other connected player avatar, and each owning client whose inventory
+// changed is relayed a NET_PKT_ITEM_REMOVE so its LOCAL inventory follows.
+// The originally targeted avatar is already handled by the vanilla opcode.
+void MpHostMirrorItemRemoval(Object* avatar, Object* item, int quantity)
+{
+    if (!gMpIsHost || !gMpActive || avatar == nullptr || item == nullptr || quantity <= 0) {
+        return;
+    }
+
+    for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+        MultiplayerPlayer* player = &gMpSession.players[index];
+        if (!player->isConnected || player->isLocal || player->obj == nullptr
+            || player->obj == avatar || player->peer == nullptr) {
+            continue;
+        }
+        Object* remoteItem = nullptr;
+        for (int itemIndex = 0; itemIndex < player->obj->data.inventory.length; itemIndex++) {
+            Object* candidate = player->obj->data.inventory.items[itemIndex].item;
+            if (candidate != nullptr && candidate->pid == item->pid) {
+                remoteItem = candidate;
+                break;
+            }
+        }
+        if (remoteItem == nullptr) {
+            continue;
+        }
+        int remoteQty = quantity;
+        int have = itemGetQuantity(player->obj, remoteItem);
+        if (remoteQty > have) {
+            remoteQty = have;
+        }
+        if (remoteQty <= 0) {
+            continue;
+        }
+        itemRemoveWithReason(player->obj, remoteItem, remoteQty, RemoveInventoryObjectHookReason::ItemRemoved);
+        NetItemRemovePayload payload;
+        payload.pid = remoteItem->pid;
+        payload.quantity = remoteQty;
+        debugFilePrint("MP: item remove spread netId=%u pid=0x%X qty=%d",
+            player->netId, remoteItem->pid, remoteQty);
+        NetSendPacket(player->peer, NET_CHANNEL_RELIABLE, NET_PKT_ITEM_REMOVE, &payload, sizeof(payload));
+    }
+
+    // If the script targeted a REMOTE avatar directly, that player's client
+    // needs the removal relayed too (its local inventory must drop the item).
+    for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+        MultiplayerPlayer* player = &gMpSession.players[index];
+        if (!player->isConnected || player->isLocal || player->obj != avatar
+            || player->peer == nullptr) {
+            continue;
+        }
+        NetItemRemovePayload payload;
+        payload.pid = item->pid;
+        payload.quantity = quantity;
+        debugFilePrint("MP: item remove relay netId=%u pid=0x%X qty=%d", player->netId, item->pid, quantity);
+        NetSendPacket(player->peer, NET_CHANNEL_RELIABLE, NET_PKT_ITEM_REMOVE, &payload, sizeof(payload));
+        break;
+    }
+}
+
+void MpHostMirrorInventoryMove(Object* sourceAvatar, Object* destContainer,
+    const int* pids, const int* qtys, int count)
+{
+    if (!gMpIsHost || !gMpActive || sourceAvatar == nullptr || destContainer == nullptr
+        || pids == nullptr || qtys == nullptr || count <= 0) {
+        return;
+    }
+
+    // The vanilla move already stripped the SOURCE avatar's inventory into the
+    // container. Two things remain: (1) if the source is a REMOTE player's
+    // avatar, that player's local inventory must drop the same items; (2) the
+    // strip is a party strip in co-op — every other player avatar loses the
+    // same gear into the same container, and each owning client drops it too.
+    for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+        MultiplayerPlayer* player = &gMpSession.players[index];
+        if (!player->isConnected || player->obj == nullptr || player->peer == nullptr) {
+            continue;
+        }
+
+        if (player->obj == sourceAvatar) {
+            // Source avatar already moved by the vanilla opcode; relay to its
+            // owner so the local inventory matches.
+            if (!player->isLocal) {
+                for (int i = 0; i < count; i++) {
+                    NetItemRemovePayload payload;
+                    payload.pid = pids[i];
+                    payload.quantity = qtys[i];
+                    debugFilePrint("MP: item strip relay netId=%u pid=0x%X qty=%d",
+                        player->netId, pids[i], qtys[i]);
+                    NetSendPacket(player->peer, NET_CHANNEL_RELIABLE, NET_PKT_ITEM_REMOVE,
+                        &payload, sizeof(payload));
+                }
+            }
+            continue;
+        }
+
+        // Party strip: find the same-pid gear on this avatar and move it into
+        // the same container, then relay to the owning client. When the avatar
+        // is the host's own dude (the script targeted a remote avatar), the
+        // vanilla opcode's gDude cleanup never runs — replicate it here.
+        bool isLocalDude = (player->obj == gDude) && player->isLocal;
+        Object* oldWeapon = nullptr;
+        Object* oldArmor = nullptr;
+        if (isLocalDude) {
+            oldWeapon = interfaceGetCurrentHand() == HAND_RIGHT
+                ? critterGetItem2(player->obj)
+                : critterGetItem1(player->obj);
+            oldArmor = critterGetArmor(player->obj);
+        }
+        for (int i = 0; i < count; i++) {
+            Object* remoteItem = nullptr;
+            for (int itemIndex = 0; itemIndex < player->obj->data.inventory.length; itemIndex++) {
+                Object* candidate = player->obj->data.inventory.items[itemIndex].item;
+                if (candidate != nullptr && candidate->pid == pids[i]) {
+                    remoteItem = candidate;
+                    break;
+                }
+            }
+            if (remoteItem == nullptr) {
+                continue;
+            }
+            int remoteQty = qtys[i];
+            int have = itemGetQuantity(player->obj, remoteItem);
+            if (remoteQty > have) {
+                remoteQty = have;
+            }
+            if (remoteQty <= 0) {
+                continue;
+            }
+            itemMoveForce(player->obj, destContainer, remoteItem, remoteQty);
+            if (!player->isLocal) {
+                NetItemRemovePayload payload;
+                payload.pid = remoteItem->pid;
+                payload.quantity = remoteQty;
+                debugFilePrint("MP: item strip spread netId=%u pid=0x%X qty=%d",
+                    player->netId, remoteItem->pid, remoteQty);
+                NetSendPacket(player->peer, NET_CHANNEL_RELIABLE, NET_PKT_ITEM_REMOVE,
+                    &payload, sizeof(payload));
+            }
+        }
+
+        // The vanilla opcode's gDude branch (scriptHooks_InvenWield before the
+        // move, armor/gender/interface refresh after) never runs when the
+        // script targeted a remote avatar — replicate the post-move cleanup.
+        if (isLocalDude) {
+            if (oldWeapon != nullptr) {
+                int flags = 0;
+                if ((oldWeapon->flags & OBJECT_IN_LEFT_HAND) != 0) {
+                    flags |= OBJECT_IN_LEFT_HAND;
+                }
+                if ((oldWeapon->flags & OBJECT_IN_RIGHT_HAND) != 0) {
+                    flags |= OBJECT_IN_RIGHT_HAND;
+                }
+                correctFidForRemovedItem(player->obj, oldWeapon, flags);
+            }
+            if (oldArmor != nullptr) {
+                adjustCritterStatsOnArmorChange(gDude, oldArmor, nullptr);
+            }
+            _proto_dude_update_gender();
+            bool animated = !gameUiIsDisabled();
+            interfaceUpdateItems(animated, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
+            debugFilePrint("MP: item strip local dude cleaned up");
+        }
+    }
+}
+
+void MpOnItemRemove(const NetItemRemovePayload* payload)
+{
+    if (!gMpIsClient || payload == nullptr || gDude == nullptr) {
+        return;
+    }
+    Object* item = nullptr;
+    for (int index = 0; index < gDude->data.inventory.length; index++) {
+        Object* candidate = gDude->data.inventory.items[index].item;
+        if (candidate != nullptr && candidate->pid == payload->pid) {
+            item = candidate;
+            break;
+        }
+    }
+    if (item == nullptr) {
+        debugFilePrint("MP: item remove no item pid=0x%X qty=%d", payload->pid, payload->quantity);
+        return;
+    }
+    debugFilePrint("MP: item remove applied pid=0x%X qty=%d", payload->pid, payload->quantity);
+    int quantity = payload->quantity;
+    int have = itemGetQuantity(gDude, item);
+    if (quantity > have) {
+        quantity = have;
+    }
+    if (quantity <= 0) {
+        return;
+    }
+    bool updateFlags = false;
+    int flags = 0;
+    if ((item->flags & OBJECT_EQUIPPED) != 0) {
+        if ((item->flags & OBJECT_IN_LEFT_HAND) != 0) {
+            flags |= OBJECT_IN_LEFT_HAND;
+        }
+        if ((item->flags & OBJECT_IN_RIGHT_HAND) != 0) {
+            flags |= OBJECT_IN_RIGHT_HAND;
+        }
+        if ((item->flags & OBJECT_WORN) != 0) {
+            flags |= OBJECT_WORN;
+        }
+        updateFlags = true;
+    }
+    if (itemRemoveWithReason(gDude, item, quantity, RemoveInventoryObjectHookReason::ItemRemoved) == 0) {
+        if (updateFlags) {
+            correctFidForRemovedItem(gDude, item, flags);
+        }
+        bool animated = !gameUiIsDisabled();
+        interfaceUpdateItems(animated, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
     }
 }
 

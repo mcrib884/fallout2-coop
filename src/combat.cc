@@ -6484,7 +6484,10 @@ void _combat_outline_on()
         return;
     }
 
-    if (isInCombat()) {
+    // Co-op client: the combat mirror never builds the vanilla _combat_list,
+    // so iterate the elevation critter scan instead — otherwise enemies never
+    // get the red HOSTILE outline while the client's attack cursor is up.
+    if (isInCombat() && !(gMpActive && gMpIsClient)) {
         for (int index = 0; index < _list_total; index++) {
             _combat_update_critter_outline_for_los(_combat_list[index], 1);
         }
@@ -6516,7 +6519,9 @@ void _combat_outline_off()
     int v5;
     Object** v9;
 
-    if (isInCombat()) {
+    // Co-op client: same as above — the mirror has no _combat_list, so use
+    // the elevation critter scan to clear outlines.
+    if (isInCombat() && !(gMpActive && gMpIsClient)) {
         for (i = 0; i < _list_total; i++) {
             objectDisableOutline(_combat_list[i], nullptr);
         }

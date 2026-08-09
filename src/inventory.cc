@@ -505,7 +505,7 @@ static int gSecondaryInventoryScrollDownButton = -1;
 static unsigned int gInventoryWindowDudeRotationTimestamp = 0;
 
 // 0x5190F8 curr_rot
-static int gInventoryWindowDudeRotation = 0;
+static Rotation gInventoryWindowDudeRotation = ROTATION_NE;
 
 // 0x5190FC num
 static const int gInventoryWindowCursorFrmIds[INVENTORY_WINDOW_CURSOR_COUNT] = {
@@ -689,7 +689,7 @@ static bool inventoryBackgroundLoad(FrmImage& image, int col1FrmId, const char* 
     image.unlock();
 
     if (columns == 1) {
-        return image.lock(buildFid(OBJ_TYPE_INTERFACE, col1FrmId, 0, 0, 0));
+        return image.lock(buildFid(OBJ_TYPE_INTERFACE, col1FrmId));
     }
 
     if (columns == 2) {
@@ -745,7 +745,7 @@ static ConstBuffer2D inventoryGetBackgroundBuffer(int inventoryWindowType, int f
             windowGetHeight(gInventoryBarterBackgroundWindow) };
     }
 
-    if (fallbackImage.lock(buildFid(OBJ_TYPE_INTERFACE, fallbackFrmId, 0, 0, 0))) {
+    if (fallbackImage.lock(buildFid(OBJ_TYPE_INTERFACE, fallbackFrmId))) {
         return fallbackImage.getBuffer();
     }
 
@@ -977,7 +977,7 @@ static void inventoryLootRenderPaneWeight(unsigned char* windowBuffer, int pitch
 
     int color = COLOR_GREEN;
     int inventoryWeight = objectGetInventoryWeight(object);
-    if (PID_TYPE(object->pid) == OBJ_TYPE_CRITTER) {
+    if (objectTypeFromPid(object->pid) == OBJ_TYPE_CRITTER) {
         int currentWeight = inventoryWeight + extraWeight;
         int maxWeight = critterGetStat(object, STAT_CARRY_WEIGHT);
         int weightPercentage = maxWeight < 1 ? 0 : (int)std::ceil(currentWeight * 100 / (float)maxWeight);
@@ -995,7 +995,7 @@ static void inventoryLootRenderPaneWeight(unsigned char* windowBuffer, int pitch
         if (currentWeight > maxWeight) {
             color = COLOR_RED;
         }
-    } else if (targetPane && PID_TYPE(object->pid) == OBJ_TYPE_ITEM && itemGetType(object) == ITEM_TYPE_CONTAINER) {
+    } else if (targetPane && objectTypeFromPid(object->pid) == OBJ_TYPE_ITEM && itemGetType(object) == ITEM_TYPE_CONTAINER) {
         int currentSize = containerGetTotalSize(object);
         int maxSize = containerGetMaxSize(object);
         int sizePercentage = maxSize < 1 ? 0 : (int)std::ceil(currentSize * 100 / (float)maxSize);
@@ -1123,7 +1123,7 @@ static bool hasPartySlots()
         && partyTargetEquipped != nullptr
         && partyBaseTarget != nullptr
         && _target_stack[0] == partyBaseTarget
-        && PID_TYPE(partyBaseTarget->pid) == OBJ_TYPE_CRITTER
+        && objectTypeFromPid(partyBaseTarget->pid) == OBJ_TYPE_CRITTER
         && objectIsPartyMember(partyBaseTarget);
 }
 
@@ -1251,7 +1251,7 @@ static int buildPartyDisplayFid()
         weaponAnimationCode = weaponGetAnimationCode(rightHandItem);
     }
 
-    return buildFid(FID_TYPE(partyBaseTarget->fid), partyBaseTarget->fid & 0xFFF, 0, weaponAnimationCode, 0);
+    return buildFid(objectTypeFromFid(partyBaseTarget->fid), partyBaseTarget->fid & 0xFFF, ANIM_STAND, weaponAnimationCode, ROTATION_NE);
 }
 
 static int getTargetDisplayFid()
@@ -1515,9 +1515,9 @@ void inventorySetDude(Object* obj, int pid)
 }
 
 // TODO(CE): move to more generic location
-int inventoryComputeCritterFid(Object* critter, int basePid, Object* rightHandItem, Object* leftHandItem, Object* armor, Hand activeHand, AnimationType anim, int rotation)
+int inventoryComputeCritterFid(Object* critter, int basePid, Object* rightHandItem, Object* leftHandItem, Object* armor, Hand activeHand, AnimationType anim, Rotation rotation)
 {
-    if (FID_TYPE(critter->fid) != OBJ_TYPE_CRITTER) {
+    if (objectTypeFromFid(critter->fid) != OBJ_TYPE_CRITTER) {
         return critter->fid;
     }
 
@@ -1542,7 +1542,7 @@ int inventoryComputeCritterFid(Object* critter, int basePid, Object* rightHandIt
         }
     }
 
-    int animationCode = 0;
+    WeaponAnimation animationCode = WEAPON_ANIMATION_NONE;
     Object* itemInHand = activeHand == HAND_RIGHT ? rightHandItem : leftHandItem;
     if (itemInHand != nullptr) {
         if (protoGetProto(itemInHand->pid, &proto) != -1
@@ -1604,7 +1604,7 @@ void inventoryOpen()
             // global (_combat_turn_obj) is only ever advanced by the host's
             // real combat loop, so it stays null on the client and the
             // vanilla gate below would block inventory forever. Use the
-            // mirror's own turn tracking: same rule as vanilla — only the
+            // mirror's own turn tracking: same rule as vanilla ÔÇö only the
             // acting player opens inventory during combat.
             if (!gMpCombat.turnActive || gMpCombat.whoseTurn != gMpSession.localNetId) {
                 debugFilePrint("MPINV: open blocked (not client's turn) turnActive=%d whoseTurn=%u local=%u",
@@ -1641,7 +1641,7 @@ void inventoryOpen()
                 if (gMpActive && gMpIsClient) {
                     // Thin client: AP is host-authoritative. The host charges
                     // the cost below and the mirrored AP lands via the tick
-                    // state — a local deduction here would be a prediction
+                    // state ÔÇö a local deduction here would be a prediction
                     // write fighting the state channel (double-write desync).
                     MpCombatSendInventoryApCost(actionPointsRequired);
                 } else {
@@ -1814,7 +1814,7 @@ static bool _setup_inventory(int inventoryWindowType)
             blitBuffer2D(inventoryLootFrmImage.getBuffer(), destBuf);
         } else {
             FrmImage backgroundFrmImage;
-            if (backgroundFrmImage.lock(buildFid(OBJ_TYPE_INTERFACE, windowDescription->frmId, 0, 0, 0))) {
+            if (backgroundFrmImage.lock(buildFid(OBJ_TYPE_INTERFACE, windowDescription->frmId))) {
                 blitBuffer2D(backgroundFrmImage.getBuffer(), destBuf);
             }
         }
@@ -2245,7 +2245,7 @@ static void _display_inventory(int stackOffset, int dragSlotIndex, int inventory
         pitch = INVENTORY_USE_ON_WINDOW_WIDTH;
 
         FrmImage backgroundFrmImage;
-        int backgroundFid = buildFid(OBJ_TYPE_INTERFACE, 113, 0, 0, 0);
+        int backgroundFid = buildFid(OBJ_TYPE_INTERFACE, 113);
         if (backgroundFrmImage.lock(backgroundFid)) {
             // Clear scroll view background.
             blitBufferToBuffer(backgroundFrmImage.getData() + pitch * INVENTORY_SCROLLER_Y + INVENTORY_SCROLLER_X,
@@ -2497,13 +2497,13 @@ static void _display_body(int fid, int inventoryWindowType)
         return;
     }
 
-    gInventoryWindowDudeRotation += 1;
+    gInventoryWindowDudeRotation = gInventoryWindowDudeRotation + 1;
 
     if (gInventoryWindowDudeRotation == ROTATION_COUNT) {
-        gInventoryWindowDudeRotation = 0;
+        gInventoryWindowDudeRotation = ROTATION_FIRST;
     }
 
-    int rotations[2];
+    Rotation rotations[2];
     if (fid == -1) {
         rotations[0] = gInventoryWindowDudeRotation;
         rotations[1] = ROTATION_SE;
@@ -2539,7 +2539,7 @@ static void _display_body(int fid, int inventoryWindowType)
             frame = artGetFrameCount(art) - 1;
         }
 
-        int rotation = rotations[index];
+        Rotation rotation = rotations[index];
 
         unsigned char* frameData = artGetFrameData(art, frame, rotation);
 
@@ -2565,7 +2565,7 @@ static void _display_body(int fid, int inventoryWindowType)
             rect.bottom = rect.top + INVENTORY_BODY_VIEW_HEIGHT - 1;
 
             FrmImage backgroundFrmImage;
-            int backgroundFid = buildFid(OBJ_TYPE_INTERFACE, gGameDialogSpeakerIsPartyMember ? 420 : 111, 0, 0, 0);
+            int backgroundFid = buildFid(OBJ_TYPE_INTERFACE, gGameDialogSpeakerIsPartyMember ? 420 : 111);
             if (backgroundFrmImage.lock(backgroundFid)) {
                 blitBufferToBuffer(backgroundFrmImage.getData() + rect.top * 640 + rect.left,
                     INVENTORY_BODY_VIEW_WIDTH,
@@ -2670,17 +2670,17 @@ static int inventoryCommonInit()
     for (index = 0; index < INVENTORY_WINDOW_CURSOR_COUNT; index++) {
         InventoryCursorData* cursorData = &(gInventoryCursorData[index]);
 
-        int fid = buildFid(OBJ_TYPE_INTERFACE, gInventoryWindowCursorFrmIds[index], 0, 0, 0);
+        int fid = buildFid(OBJ_TYPE_INTERFACE, gInventoryWindowCursorFrmIds[index]);
         Art* frm = artLock(fid, &(cursorData->frmHandle));
         if (frm == nullptr) {
             break;
         }
 
         cursorData->frm = frm;
-        cursorData->frmData = artGetFrameData(frm, 0, 0);
-        cursorData->width = artGetWidth(frm, 0, 0);
-        cursorData->height = artGetHeight(frm, 0, 0);
-        artGetFrameOffsets(frm, 0, 0, &(cursorData->offsetX), &(cursorData->offsetY));
+        cursorData->frmData = artGetFrameData(frm);
+        cursorData->width = artGetWidth(frm);
+        cursorData->height = artGetHeight(frm);
+        artGetFrameOffsets(frm, 0, ROTATION_NE, &(cursorData->offsetX), &(cursorData->offsetY));
     }
 
     if (index != INVENTORY_WINDOW_CURSOR_COUNT) {
@@ -3145,7 +3145,7 @@ static void _adjust_fid()
         gInventoryArmor,
         interfaceGetCurrentHand(),
         ANIM_STAND,
-        0);
+        ROTATION_NE);
     gInventoryWindowDudeFid = scriptHooks_AdjustFid(fid, fid);
 }
 
@@ -3416,7 +3416,7 @@ static void inventorySetLeftPaneCritter(Object* critter, Object* target, int inv
     _stack[0] = critter;
     _stack_offset[0] = 0;
 
-    int animationCode = 0;
+    WeaponAnimation animationCode = WEAPON_ANIMATION_NONE;
     Object* itemInHand = interfaceGetCurrentHand() == HAND_RIGHT ? gInventoryRightHandItem : gInventoryLeftHandItem;
     if (itemInHand != nullptr) {
         Proto* proto = nullptr;
@@ -3427,7 +3427,7 @@ static void inventorySetLeftPaneCritter(Object* critter, Object* target, int inv
         }
     }
 
-    gInventoryWindowDudeFid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, 0, animationCode, 0);
+    gInventoryWindowDudeFid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, ANIM_STAND, animationCode, ROTATION_NE);
     gInventoryWindowDudeRotationTimestamp = 0;
     _display_inventory(0, -1, inventoryWindowType);
     _display_body(target->fid, inventoryWindowType);
@@ -3761,7 +3761,7 @@ static void inventoryRenderSummary()
     // Total wt:
     messageListItem.num = 20;
     if (messageListGetItem(&gInventoryMessageList, &messageListItem)) {
-        if (PID_TYPE(_stack[0]->pid) == OBJ_TYPE_CRITTER) {
+        if (objectTypeFromPid(_stack[0]->pid) == OBJ_TYPE_CRITTER) {
             int carryWeight = critterGetStat(_stack[0], STAT_CARRY_WEIGHT);
             int inventoryWeight = objectGetInventoryWeight(_stack[0]);
             snprintf(formattedText, sizeof(formattedText), "%s %d/%d", messageListItem.text, inventoryWeight, carryWeight);
@@ -3907,7 +3907,7 @@ int inventoryEquipFunc(Object* critter, Object* item, Hand handIndex, bool anima
 
         if (critter == gDude) {
             if (!isoIsDisabled()) {
-                int fid = buildFid(OBJ_TYPE_CRITTER, baseFrmId, 0, weaponAnimationFromFid(critter->fid), critter->rotation + 1);
+                int fid = buildFid(OBJ_TYPE_CRITTER, baseFrmId, ANIM_STAND, weaponAnimationFromFid(critter->fid), critter->rotation + 1);
                 animationRegisterSetFid(critter, fid, 0);
             }
         } else {
@@ -3998,11 +3998,11 @@ int inventoryEquipFunc(Object* critter, Object* item, Hand handIndex, bool anima
                 if (weaponAnimationCode != WEAPON_ANIMATION_NONE) {
                     animationRegisterTakeOutWeapon(critter, weaponAnimationCode, -1);
                 } else {
-                    int fid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, 0, 0, critter->rotation + 1);
+                    int fid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, ANIM_STAND, WEAPON_ANIMATION_NONE, critter->rotation + 1);
                     animationRegisterSetFid(critter, fid, -1);
                 }
             } else {
-                int fid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, 0, weaponAnimationCode, critter->rotation + 1);
+                int fid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, ANIM_STAND, weaponAnimationCode, critter->rotation + 1);
                 _dude_stand(critter, critter->rotation, fid);
             }
         }
@@ -4063,13 +4063,13 @@ int inventoryUnequipFunc(Object* critter, Hand hand, bool animate)
 
             animationRegisterAnimate(critter, ANIM_PUT_AWAY, 0);
 
-            int fid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, 0, 0, critter->rotation + 1);
+            int fid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, ANIM_STAND, WEAPON_ANIMATION_NONE, critter->rotation + 1);
             animationRegisterSetFid(critter, fid, -1);
 
             return reg_anim_end();
         }
 
-        int fid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, 0, 0, critter->rotation + 1);
+        int fid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, ANIM_STAND, WEAPON_ANIMATION_NONE, critter->rotation + 1);
         _dude_stand(critter, critter->rotation, fid);
     }
 
@@ -4501,7 +4501,7 @@ static void inventoryWindowOpenContextMenu(int keyCode, int inventoryWindowType)
 
     int offsetX;
     int offsetY;
-    artGetRotationOffsets(cursorData->frm, 0, &offsetX, &offsetY);
+    artGetRotationOffsets(cursorData->frm, ROTATION_NE, &offsetX, &offsetY);
 
     Rect rect;
     rect.left = x - inventoryWindowX - cursorData->width / 2 + offsetX;
@@ -4750,7 +4750,7 @@ int inventoryOpenLooting(Object* looter, Object* target)
     // Co-op: script-requested looting (searched pots, containers, etc.) runs
     // host-side with the REMOTE avatar as looter; the vanilla guard below
     // would silently kill it. Open a synchronized loot session for the
-    // acting player instead — the host relays the container contents and the
+    // acting player instead ÔÇö the host relays the container contents and the
     // client runs its vanilla loot window on a mirror.
     if (gMpActive && gMpIsHost && looter != gDude && looter != nullptr
         && MpProfileIsNetworkPlayer(looter)) {
@@ -4767,12 +4767,12 @@ int inventoryOpenLooting(Object* looter, Object* target)
         return 0;
     }
 
-    if (FID_TYPE(target->fid) == OBJ_TYPE_CRITTER && critterFlagCheck(target->pid, CRITTER_NO_STEAL)) {
+    if (objectTypeFromFid(target->fid) == OBJ_TYPE_CRITTER && critterFlagCheck(target->pid, CRITTER_NO_STEAL)) {
         inventoryDisplayMessage(50); // You can't find anything to take from that.
         return 0;
     }
 
-    if (FID_TYPE(target->fid) == OBJ_TYPE_ITEM && itemGetType(target) == ITEM_TYPE_CONTAINER) {
+    if (objectTypeFromFid(target->fid) == OBJ_TYPE_ITEM && itemGetType(target) == ITEM_TYPE_CONTAINER) {
         if (target->frame == 0) {
             CacheEntry* handle;
             Art* frm = artLock(target->fid, &handle);
@@ -4835,7 +4835,7 @@ int inventoryOpenLooting(Object* looter, Object* target)
     int critterCount = 0;
     int critterIndex = 0;
     if (!_gIsSteal) {
-        if (FID_TYPE(target->fid) == OBJ_TYPE_CRITTER) {
+        if (objectTypeFromFid(target->fid) == OBJ_TYPE_CRITTER) {
             critterCount = objectListCreate(target->tile, target->elevation, OBJ_TYPE_CRITTER, &critters);
             int endIndex = critterCount - 1;
             for (int index = 0; index < critterCount; index++) {
@@ -4932,7 +4932,7 @@ int inventoryOpenLooting(Object* looter, Object* target)
             break;
         }
 
-        // Co-op: the authoritative echo refreshed the panes — re-render both
+        // Co-op: the authoritative echo refreshed the panes ÔÇö re-render both
         // inventories and the body.
         if (gMpActive && MpLootConsumeDirty()) {
             _display_target_inventory(_target_stack_offset[_target_curr_stack], -1, _target_pud, INVENTORY_WINDOW_TYPE_LOOT);
@@ -5209,7 +5209,7 @@ int inventoryOpenStealing(Object* thief, Object* target)
         return -1;
     }
 
-    _gIsSteal = PID_TYPE(thief->pid) == OBJ_TYPE_CRITTER && critterIsActive(target);
+    _gIsSteal = objectTypeFromPid(thief->pid) == OBJ_TYPE_CRITTER && critterIsActive(target);
     _gStealCount = 0;
     _gStealSize = 0;
 
@@ -5223,7 +5223,7 @@ int inventoryOpenStealing(Object* thief, Object* target)
 }
 
 // Co-op: formats an inventory.msg message (25/26/29/31 style) for relay to a
-// remote player's client — the host has the message list, the client only
+// remote player's client ÔÇö the host has the message list, the client only
 // displays the finished text.
 void inventoryFormatMessage(int msgId, int arg, char* out, size_t outSize)
 {
@@ -5369,9 +5369,8 @@ static InventoryMoveResult _move_inventory(Object* item, int slotIndex, Object* 
                     if (!skipMove && result != INVENTORY_MOVE_RESULT_CAUGHT_STEALING) {
                         if (itemMove(targetObj, _inven_dude, item, quantityToMove) == 0) {
                             if ((item->flags & OBJECT_IN_RIGHT_HAND) != 0) {
-                                targetObj->fid = buildFid(FID_TYPE(targetObj->fid), targetObj->fid & 0xFFF, animationTypeFromFid(targetObj->fid), 0, targetObj->rotation + 1);
+                                targetObj->fid = buildFid(objectTypeFromFid(targetObj->fid), targetObj->fid & 0xFFF, animationTypeFromFid(targetObj->fid), WEAPON_ANIMATION_NONE, targetObj->rotation + 1);
                             }
-
                             targetObj->flags &= ~OBJECT_EQUIPPED;
 
                             result = INVENTORY_MOVE_RESULT_SUCCESS;
@@ -6162,7 +6161,7 @@ void barterProcessUI(int win, Object* barterer, Object* playerTable, Object* bar
     inventoryCommonFree();
 
     // Co-op: the vanilla trade loop ended (T/ESC/M-less exit, auto-end, mp
-    // session death) — tear down the mp barter session (host: return items,
+    // session death) ÔÇö tear down the mp barter session (host: return items,
     // un-suspend the voter, broadcast; client: local flags).
     if (gMpActive) {
         MpDialogBarterLoopEnded();
@@ -6418,7 +6417,7 @@ static void _draw_amount(int value, int inventoryWindowType)
 {
     // BIGNUM.frm
     FrmImage numbersFrmImage;
-    int numbersFid = buildFid(OBJ_TYPE_INTERFACE, 170, 0, 0, 0);
+    int numbersFid = buildFid(OBJ_TYPE_INTERFACE, 170);
     if (!numbersFrmImage.lock(numbersFid)) {
         return;
     }
@@ -6647,7 +6646,7 @@ static int inventoryQuantityWindowInit(int inventoryWindowType, Object* item)
     unsigned char* windowBuffer = windowGetBuffer(_mt_wid);
 
     FrmImage backgroundFrmImage;
-    int backgroundFid = buildFid(OBJ_TYPE_INTERFACE, windowDescription->frmId, 0, 0, 0);
+    int backgroundFid = buildFid(OBJ_TYPE_INTERFACE, windowDescription->frmId);
     if (backgroundFrmImage.lock(backgroundFid)) {
         blitBufferToBuffer(backgroundFrmImage.getData(),
             windowDescription->width,
@@ -6675,7 +6674,7 @@ static int inventoryQuantityWindowInit(int inventoryWindowType, Object* item)
 
         // Timer overlay
         FrmImage overlayFrmImage;
-        int overlayFid = buildFid(OBJ_TYPE_INTERFACE, 306, 0, 0, 0);
+        int overlayFid = buildFid(OBJ_TYPE_INTERFACE, 306);
         if (overlayFrmImage.lock(overlayFid)) {
             blitBufferToBuffer(overlayFrmImage.getData(),
                 105, 81, 105,
@@ -6712,10 +6711,10 @@ static int inventoryQuantityWindowInit(int inventoryWindowType, Object* item)
         148, 128, -1, KEY_ESCAPE, FrmId(OBJ_TYPE_INTERFACE, 8), FrmId(OBJ_TYPE_INTERFACE, 9));
 
     if (inventoryWindowType == INVENTORY_WINDOW_TYPE_MOVE_ITEMS) {
-        fid = buildFid(OBJ_TYPE_INTERFACE, 307, 0, 0, 0);
+        fid = buildFid(OBJ_TYPE_INTERFACE, 307);
         _moveFrmImages[6].lock(fid);
 
-        fid = buildFid(OBJ_TYPE_INTERFACE, 308, 0, 0, 0);
+        fid = buildFid(OBJ_TYPE_INTERFACE, 308);
         _moveFrmImages[7].lock(fid);
 
         if (_moveFrmImages[6].isLocked() && _moveFrmImages[7].isLocked()) {

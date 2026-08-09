@@ -63,6 +63,11 @@ static double gMouseSensitivity = 1.0;
 // 0x51E2AC last_buttons
 static int last_buttons = 0;
 
+// Co-op: middle-button state for the camera drag (raw device flag, kept out
+// of the event bits so the vanilla input machine is unaffected).
+static bool gMouseMiddleDown = false;
+static bool gMouseRightDown = false;
+
 // 0x6AC790 mouse_is_hidden
 static bool gCursorIsHidden;
 
@@ -575,6 +580,12 @@ void _mouse_info()
     int y;
     int buttons = 0;
 
+    // Co-op: camera drag (middle mouse button). The SDL device reports the
+    // middle button in buttons[2]; the vanilla event machine only tracks
+    // left/right, so keep it as a plain per-frame state flag instead of
+    // feeding it into the event bits (that would disturb the input logic).
+    bool middleDown = false;
+
     MouseData mouseData;
     if (mouseDeviceGetData(&mouseData)) {
         x = mouseData.x;
@@ -587,10 +598,15 @@ void _mouse_info()
         if (mouseData.buttons[1] == 1) {
             buttons |= MOUSE_STATE_RIGHT_BUTTON_DOWN;
         }
+
+        middleDown = mouseData.buttons[2] == 1;
     } else {
         x = 0;
         y = 0;
     }
+
+    gMouseMiddleDown = middleDown;
+    gMouseRightDown = (buttons & MOUSE_STATE_RIGHT_BUTTON_DOWN) != 0;
 
     // Mouse sensitivity only applies to relative movement. In windowed mode
     // SDL provides absolute coordinates that should not be scaled.
@@ -752,6 +768,16 @@ void mouseGetPosition(int* xPtr, int* yPtr)
 {
     *xPtr = _mouse_hotx + gMouseCursorX;
     *yPtr = _mouse_hoty + gMouseCursorY;
+}
+
+bool mouseGetMiddleButton()
+{
+    return gMouseMiddleDown;
+}
+
+bool mouseGetRightButton()
+{
+    return gMouseRightDown;
 }
 
 // 0x4CAA04

@@ -8,6 +8,7 @@
 
 #include "art.h"
 #include "color.h"
+#include "content_config.h"
 #include "credits.h"
 #include "cycle.h"
 #include "db.h"
@@ -81,6 +82,7 @@ static void endgameEndingRefreshSubtitles();
 static void endgameEndingSubtitlesFree();
 static void _endgame_movie_callback();
 static void _endgame_movie_bk_process();
+static void endgamePlayConfiguredMovie();
 static int endgameEndingInit();
 static void endgameEndingFree();
 static int endgameDeathEndingValidate(int* percentage);
@@ -222,7 +224,7 @@ void endgamePlaySlideshow()
             if (ending->art_num == 327) {
                 endgameEndingRenderPanningScene(ending->direction, ending->voiceOverBaseName);
             } else {
-                int fid = buildFid(OBJ_TYPE_INTERFACE, ending->art_num, 0, 0, 0);
+                int fid = buildFid(OBJ_TYPE_INTERFACE, ending->art_num);
                 endgameEndingRenderStaticScene(fid, ending->voiceOverBaseName);
             }
         }
@@ -243,11 +245,17 @@ void endgamePlayMovie()
     backgroundSoundLoad(gameSoundGetMusicOverride("endgame_movie_music0", "akiss"), GSOUND_LIMIT_AFTER, GSOUND_STREAM, GSOUND_NO_LOOP);
     inputPauseForTocks(3000);
 
-    // NOTE: Result is ignored. I guess there was some kind of switch for male
-    // vs. female ending, but it was not implemented.
-    critterGetStat(gDude, STAT_GENDER);
+    endgamePlayConfiguredMovie();
 
-    creditsOpen("credits.txt", -1, false);
+    const char* creditsFilePath = "credits.txt";
+    char* configuredCreditsFilePath;
+    if (configGetString(&gContentConfig, CONTENT_CONFIG_MOVIES_SECTION, "endgame_credits_file", &configuredCreditsFilePath)) {
+        creditsFilePath = configuredCreditsFilePath;
+    }
+    if (creditsFilePath[0] != '\0') {
+        creditsOpen(creditsFilePath, -1, false);
+    }
+
     backgroundSoundDelete();
     backgroundSoundSetEndCallback(nullptr);
     tickersRemove(_endgame_movie_bk_process);
@@ -256,6 +264,29 @@ void endgamePlayMovie()
     paletteFadeTo(_cmap);
     isoEnable();
     endgameEndingHandleContinuePlaying();
+}
+
+bool endgameShouldPlayMovieAfterSlideshow()
+{
+    bool enabled;
+    configGetBool(&gContentConfig, CONTENT_CONFIG_MOVIES_SECTION, "endgame_play_after_slideshow", &enabled, true);
+    return enabled;
+}
+
+static void endgamePlayConfiguredMovie()
+{
+    int movie = -1;
+
+    int gender = critterGetStat(gDude, STAT_GENDER);
+    if (gender == GENDER_FEMALE) {
+        configGetInt(&gContentConfig, CONTENT_CONFIG_MOVIES_SECTION, "endgame_movie_female", &movie, -1);
+    } else {
+        configGetInt(&gContentConfig, CONTENT_CONFIG_MOVIES_SECTION, "endgame_movie_male", &movie, -1);
+    }
+
+    if (movie >= 0 && movie < GAME_MOVIE_MAX_COUNT) {
+        gameMoviePlay(movie, GAME_MOVIE_FADE_IN | GAME_MOVIE_PAUSE_MUSIC);
+    }
 }
 
 // 0x43F8C4 gameOverConfim
@@ -314,14 +345,14 @@ static int endgameEndingHandleContinuePlaying()
 // 0x43FBDC endgame_pan_desert
 static void endgameEndingRenderPanningScene(int direction, const char* narratorFileName)
 {
-    int fid = buildFid(OBJ_TYPE_INTERFACE, 327, 0, 0, 0);
+    int fid = buildFid(OBJ_TYPE_INTERFACE, 327);
 
     CacheEntry* backgroundHandle;
     Art* background = artLock(fid, &backgroundHandle);
     if (background != nullptr) {
-        int width = artGetWidth(background, 0, 0);
-        int height = artGetHeight(background, 0, 0);
-        unsigned char* backgroundData = artGetFrameData(background, 0, 0);
+        int width = artGetWidth(background);
+        int height = artGetHeight(background);
+        unsigned char* backgroundData = artGetFrameData(background);
         bufferFill(gEndgameEndingSlideshowWindowBuffer, ENDGAME_ENDING_WINDOW_WIDTH, ENDGAME_ENDING_WINDOW_HEIGHT, ENDGAME_ENDING_WINDOW_WIDTH, COLOR_BLACK);
         endgameEndingLoadPalette(6, 327);
 
@@ -459,12 +490,12 @@ static void endgameEndingRenderStaticScene(int fid, const char* narratorFileName
         return;
     }
 
-    unsigned char* backgroundData = artGetFrameData(background, 0, 0);
+    unsigned char* backgroundData = artGetFrameData(background);
     if (backgroundData != nullptr) {
         blitBufferToBuffer(backgroundData, ENDGAME_ENDING_WINDOW_WIDTH, ENDGAME_ENDING_WINDOW_HEIGHT, ENDGAME_ENDING_WINDOW_WIDTH, gEndgameEndingSlideshowWindowBuffer, ENDGAME_ENDING_WINDOW_WIDTH);
         windowRefresh(gEndgameEndingSlideshowWindow);
 
-        endgameEndingLoadPalette(FID_TYPE(fid), fid & 0xFFF);
+        endgameEndingLoadPalette(objectTypeFromFid(fid), fid & 0xFFF);
 
         // CE: Update overlay.
         endgameEndingUpdateOverlay();

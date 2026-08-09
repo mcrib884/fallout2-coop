@@ -184,7 +184,7 @@ static bool captureInventoryNode(const Object* object, MpPlayerProfile* profile,
     size_t nodeIndex = profile->inventory.size();
     profile->inventory.push_back(node);
 
-    if (PID_TYPE(object->pid) == OBJ_TYPE_ITEM) {
+    if (objectTypeFromPid(object->pid) == OBJ_TYPE_ITEM) {
         int type = itemGetType(const_cast<Object*>(object));
         switch (type) {
         case ITEM_TYPE_WEAPON:
@@ -234,9 +234,9 @@ static bool captureInventoryNode(const Object* object, MpPlayerProfile* profile,
 
 static bool captureCommon(const Object* object, MpPlayerProfile* profile)
 {
-    if (object == nullptr || profile == nullptr || PID_TYPE(object->pid) != OBJ_TYPE_CRITTER) {
+    if (object == nullptr || profile == nullptr || objectTypeFromPid(object->pid) != OBJ_TYPE_CRITTER) {
         debugFilePrint("MPROF: capture common failed obj=%p critter=%d",
-            (void*)object, object != nullptr ? (PID_TYPE(object->pid) == OBJ_TYPE_CRITTER) : -1);
+            (void*)object, object != nullptr ? (objectTypeFromPid(object->pid) == OBJ_TYPE_CRITTER) : -1);
         return false;
     }
 
@@ -327,7 +327,7 @@ static bool captureModelFiles(MpPlayerProfile* profile)
     for (int animation = 0; animation < ANIM_COUNT; animation++) {
         for (int weapon = 0; weapon < WEAPON_ANIMATION_COUNT; weapon++) {
             for (int rotation = 0; rotation < ROTATION_COUNT; rotation++) {
-                int fid = buildFid(OBJ_TYPE_CRITTER, modelId, animation, weapon, rotation);
+                int fid = buildFid(OBJ_TYPE_CRITTER, modelId, animation, weapon, static_cast<Rotation>(rotation));
                 char* fullPath = artBuildFilePath(fid);
                 if (fullPath == nullptr) continue;
                 probed++;
@@ -530,7 +530,7 @@ static bool applyItemNode(const MpPlayerProfile& profile, uint32_t id,
         return false;
     }
     const MpInventoryNode& node = profile.inventory[id - 1];
-    if (node.id != id || node.pid < 0 || PID_TYPE(node.pid) != OBJ_TYPE_ITEM
+    if (node.id != id || node.pid < 0 || objectTypeFromPid(node.pid) != OBJ_TYPE_ITEM
         || node.quantity < 1) {
         return false;
     }
@@ -549,7 +549,7 @@ static bool applyItemNode(const MpPlayerProfile& profile, uint32_t id,
     }
     item->fid = fid;
     item->frame = node.frame;
-    item->rotation = node.rotation;
+    item->rotation = static_cast<Rotation>(node.rotation);
     item->flags = node.flags;
     item->data.flags = node.dataFlags;
     item->lightDistance = node.lightDistance;
@@ -1013,7 +1013,7 @@ static bool validateInventory(const MpPlayerProfile& profile)
         }
         if (state[id - 1] == 2) return true;
         const MpInventoryNode& node = profile.inventory[id - 1];
-        if (node.id != id || node.pid < 0 || PID_TYPE(node.pid) != OBJ_TYPE_ITEM || node.quantity < 1) {
+        if (node.id != id || node.pid < 0 || objectTypeFromPid(node.pid) != OBJ_TYPE_ITEM || node.quantity < 1) {
             debugFilePrint("MPROF: inventory validate node bad id=%u pid=0x%X qty=%d", id, node.pid, node.quantity);
             return false;
         }
@@ -1556,7 +1556,7 @@ MpPlayerRuntime* MpProfileCreateRuntime(uint8_t netId, const MpPlayerProfile& pr
     if (hexGridTileIsValid(tile) && elevationIsValid(elevation)) {
         objectSetLocation(object, tile, elevation, nullptr);
     }
-    objectSetRotation(object, rotation, nullptr);
+    objectSetRotation(object, static_cast<Rotation>(rotation), nullptr);
 
     std::unordered_map<uint32_t, Object*> built;
     for (uint32_t root : resolvedProfile.rootInventory) {
@@ -1571,8 +1571,12 @@ MpPlayerRuntime* MpProfileCreateRuntime(uint8_t netId, const MpPlayerProfile& pr
     }
     object->fid = resolvedProfile.fid;
     object->frame = resolvedProfile.frame;
-    object->rotation = resolvedProfile.rotation;
-    object->elevation = resolvedProfile.elevation;
+    // Placement (tile/elevation/rotation) comes from the caller's spawn
+    // arguments — the host-anchored join spawn or the map-change spawn — and
+    // was already applied above. The profile's transform fields are the
+    // player's last-known solo position, which may be a DIFFERENT map or a
+    // different elevation; letting them overwrite the spawn would put the
+    // avatar on the wrong elevation and make it invisible to the host.
 
     MpPlayerRuntime runtime;
     runtime.profile = resolvedProfile;
@@ -1822,7 +1826,7 @@ bool MpProfileApplyLocal(const MpPlayerProfile& profile, bool applyPcStats,
     }
     Proto* proto = nullptr;
     if (protoGetProto(gDude->pid, &proto) == -1 || proto == nullptr
-        || PID_TYPE(gDude->pid) != OBJ_TYPE_CRITTER) {
+        || objectTypeFromPid(gDude->pid) != OBJ_TYPE_CRITTER) {
         debugFilePrint("MPROF: apply local failed protoGetProto pid=0x%X", gDude->pid);
         return false;
     }

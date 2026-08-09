@@ -23,6 +23,7 @@
 #include "memory.h"
 #include "message.h"
 #include "multiplayer.h"
+#include "multiplayer_combat.h"
 #include "object.h"
 #include "party_member.h"
 #include "platform_compat.h"
@@ -543,7 +544,7 @@ int aiLoad(File* stream)
 {
     for (int index = 0; index < gPartyMemberDescriptionsLength; index++) {
         int pid = gPartyMemberPids[index];
-        if (pid != -1 && PID_TYPE(pid) == OBJ_TYPE_CRITTER) {
+        if (pid != -1 && objectTypeFromPid(pid) == OBJ_TYPE_CRITTER) {
             Proto* proto;
             if (protoGetProto(pid, &proto) == -1) {
                 return -1;
@@ -564,7 +565,7 @@ int aiSave(File* stream)
 {
     for (int index = 0; index < gPartyMemberDescriptionsLength; index++) {
         int pid = gPartyMemberPids[index];
-        if (pid != -1 && PID_TYPE(pid) == OBJ_TYPE_CRITTER) {
+        if (pid != -1 && objectTypeFromPid(pid) == OBJ_TYPE_CRITTER) {
             Proto* proto;
             if (protoGetProto(pid, &proto) == -1) {
                 return -1;
@@ -875,7 +876,7 @@ bool aiIsBurstDisabled(Object* critter)
 
 void aiSetBurstDisabled(Object* critter, bool disable)
 {
-    if (critter == nullptr || FID_TYPE(critter->fid) != OBJ_TYPE_CRITTER || critter == gDude) {
+    if (critter == nullptr || objectTypeFromFid(critter->fid) != OBJ_TYPE_CRITTER || critter == gDude) {
         return;
     }
 
@@ -1190,7 +1191,7 @@ static void _ai_run_away(Object* a1, Object* a2)
     if (distance < ai->max_dist) {
         combatData->maneuver |= CRITTER_MANUEVER_FLEEING;
 
-        int rotation = tileGetRotationTo(a2->tile, a1->tile);
+        Rotation rotation = tileGetRotationTo(a2->tile, a1->tile);
 
         int destination;
         int actionPoints = combatData->ap;
@@ -1237,7 +1238,7 @@ static int _ai_move_away(Object* a1, Object* a2, int a3)
             actionPoints = a3;
         }
 
-        int rotation = tileGetRotationTo(a2->tile, a1->tile);
+        Rotation rotation = tileGetRotationTo(a2->tile, a1->tile);
 
         int destination;
         int actionPointsLeft = actionPoints;
@@ -1716,7 +1717,7 @@ int _caiSetupTeamCombat(Object* attackerTeam, Object* defenderTeam)
 {
     Object* obj = objectFindFirstAtElevation(attackerTeam->elevation);
     while (obj != nullptr) {
-        if (PID_TYPE(obj->pid) == OBJ_TYPE_CRITTER && obj != gDude) {
+        if (objectTypeFromPid(obj->pid) == OBJ_TYPE_CRITTER && obj != gDude) {
             obj->data.critter.combat.maneuver |= CRITTER_MANEUVER_ENGAGING;
         }
         obj = objectFindNextAtElevation();
@@ -2408,7 +2409,7 @@ static int _ai_move_steps_closer(Object* critter, Object* target, int actionPoin
         _moveBlockObj = nullptr;
         if (pathfinderFindPath(critter, critter->tile, target->tile, nullptr, 0, _obj_ai_blocking_at) == 0
             && _moveBlockObj != nullptr
-            && PID_TYPE(_moveBlockObj->pid) == OBJ_TYPE_CRITTER) {
+            && objectTypeFromPid(_moveBlockObj->pid) == OBJ_TYPE_CRITTER) {
             if (shouldUnhide) {
                 target->flags &= ~OBJECT_HIDDEN;
             }
@@ -2885,7 +2886,7 @@ static int _ai_try_attack(Object* attacker, Object* defender)
                         int tile = attacker->tile;
                         int index;
                         for (index = 0; index < actionPoints; index++) {
-                            tile = tileGetTileInDirection(tile, rotations[index], 1);
+                            tile = tileGetTileInDirection(tile, static_cast<Rotation>(rotations[index]), 1);
 
                             actionPointsToUse++;
 
@@ -3262,7 +3263,7 @@ bool _combatai_want_to_stop(Object* a1)
 // 0x42B504
 int critterSetTeam(Object* obj, int team)
 {
-    if (PID_TYPE(obj->pid) != OBJ_TYPE_CRITTER) {
+    if (objectTypeFromPid(obj->pid) != OBJ_TYPE_CRITTER) {
         return 0;
     }
 
@@ -3318,7 +3319,7 @@ int critterSetTeam(Object* obj, int team)
 // 0x42B5D4
 int critterSetAiPacket(Object* object, int aiPacket)
 {
-    if (PID_TYPE(object->pid) != OBJ_TYPE_CRITTER) {
+    if (objectTypeFromPid(object->pid) != OBJ_TYPE_CRITTER) {
         return -1;
     }
 
@@ -3340,7 +3341,7 @@ int critterSetAiPacket(Object* object, int aiPacket)
 // 0x42B634
 int _combatai_msg(Object* critter, Attack* attack, int type, int delay)
 {
-    if (PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
+    if (objectTypeFromPid(critter->pid) != OBJ_TYPE_CRITTER) {
         return -1;
     }
 
@@ -3518,7 +3519,7 @@ static int _combatai_rating(Object* obj)
         return 0;
     }
 
-    if (FID_TYPE(obj->fid) != OBJ_TYPE_CRITTER) {
+    if (objectTypeFromFid(obj->fid) != OBJ_TYPE_CRITTER) {
         return 0;
     }
 
@@ -3558,18 +3559,32 @@ void _combatai_check_retaliation(Object* a1, Object* a2)
 
 static int adjustPerceptionDistanceForDudeSneak(int maxDistance, Object* target)
 {
-    if (target != gDude) {
+    if (target == nullptr) {
         return maxDistance;
     }
 
-    if (dudeIsSneaking()) {
-        int sneak = skillGetValue(gDude, SKILL_SNEAK);
-        maxDistance /= 4;
-        if (sneak > 120) {
-            maxDistance -= 1;
+    if (target == gDude) {
+        if (dudeIsSneaking()) {
+            int sneak = skillGetValue(gDude, SKILL_SNEAK);
+            maxDistance /= 4;
+            if (sneak > 120) {
+                maxDistance -= 1;
+            }
+        } else if (dudeHasState(DUDE_STATE_SNEAKING)) {
+            maxDistance = maxDistance * 2 / 3;
         }
-    } else if (dudeHasState(DUDE_STATE_SNEAKING)) {
-        maxDistance = maxDistance * 2 / 3;
+        return maxDistance;
+    }
+
+    // Co-op: a remote player's avatar sneaks through its proto flag (the
+    // gDude state helpers are singleplayer-scoped). The flag-only branch
+    // applies - the "attempting sneak" 2/3 perception reduction.
+    if (gMpActive && MpCombatIsPlayerCritter(target)) {
+        Proto* proto;
+        if (protoGetProto(target->pid, &proto) == 0
+            && (proto->critter.data.flags & (1 << DUDE_STATE_SNEAKING)) != 0) {
+            maxDistance = maxDistance * 2 / 3;
+        }
     }
 
     return maxDistance;

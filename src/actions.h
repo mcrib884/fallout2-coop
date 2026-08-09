@@ -10,7 +10,7 @@
 
 namespace fallout {
 
-extern int rotation;
+extern Rotation rotation;
 
 int _action_attack(Attack* attack);
 int _action_use_an_item_on_object(Object* user, Object* targetObj, Object* item);
@@ -26,7 +26,7 @@ bool _action_explode_running();
 // anims) for a resolved attack. Co-op: the client replays the host's
 // authoritative outcome with this (playSounds=false — the acting client
 // already heard the predicted hit/death sounds at swing time).
-void showDamageToObject(Object* defender, int damage, int flags, Object* weapon, bool hitFromFront, int knockbackDistance, int knockbackRotation, AnimationType attackerAnimation, Object* attacker, int delay, bool playSounds = true);
+void showDamageToObject(Object* defender, int damage, int flags, Object* weapon, bool hitFromFront, int knockbackDistance, Rotation knockbackRotation, AnimationType attackerAnimation, Object* attacker, int delay, bool playSounds = true);
 // Picks the death animation for the defender (exposed for the co-op local
 // hit/death sound prediction on the acting client).
 AnimationType pickDeathAnim(Object* attacker, Object* defender, Object* weapon, int damage, AnimationType attackerAnimation, bool hitFromFront);

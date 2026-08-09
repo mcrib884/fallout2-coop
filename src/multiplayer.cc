@@ -35,6 +35,7 @@
 #include "random.h"
 #include "object.h"
 #include "palette.h"
+#include "perk.h"
 #include "svga.h"
 #include "window_manager.h"
 #include "skill.h"
@@ -69,6 +70,16 @@ static uint32_t gMpRemoteActionNetId = 0;
 bool MpRemoteActionActive()
 {
     return gMpRemoteActionNetId != 0;
+}
+
+uint32_t MpRemoteActionNetId()
+{
+    return gMpRemoteActionNetId;
+}
+
+void MpSetRemoteActionNetId(uint32_t netId)
+{
+    gMpRemoteActionNetId = netId;
 }
 // The current map's NATURAL entering position, captured on the client right
 // after the map file load. The co-op map metadata overwrites
@@ -1033,7 +1044,7 @@ static int mpClientLoadMap(const NetMapSyncPayload* payload)
     debugFilePrint("MPDBG after map load: rc=%d dude=%p pid=0x%X pt=%d tile=%d elev=%d hidden=%d st=%d carry=%d weight=%d",
         rc, (void*)gDude,
         gDude != nullptr ? gDude->pid : 0,
-        gDude != nullptr ? PID_TYPE(gDude->pid) : -1,
+        gDude != nullptr ? objectTypeFromPid(gDude->pid) : -1,
         gDude != nullptr ? gDude->tile : -1,
         gDude != nullptr ? gDude->elevation : -1,
         gDude != nullptr ? ((gDude->flags & OBJECT_HIDDEN) != 0) : -1,
@@ -1062,7 +1073,7 @@ static void mpDebugDumpWalls(const char* tag, int limit)
     int total = 0;
     int shown = 0;
     for (Object* it = objectFindFirst(); it != nullptr; it = objectFindNext()) {
-        int objType = FID_TYPE(it->fid);
+        int objType = objectTypeFromFid(it->fid);
         if (objType == OBJ_TYPE_WALL || objType == OBJ_TYPE_SCENERY) {
             total++;
             if (shown < limit) {
@@ -1103,7 +1114,7 @@ static void mpDebugSnapshotPreSyncWalls()
 {
     gMpPreSyncWalls.clear();
     for (Object* it = objectFindFirst(); it != nullptr; it = objectFindNext()) {
-        int objType = FID_TYPE(it->fid);
+        int objType = objectTypeFromFid(it->fid);
         if (objType == OBJ_TYPE_WALL || objType == OBJ_TYPE_SCENERY) {
             MpPreSyncWall wall;
             wall.pid = it->pid;
@@ -1120,7 +1131,7 @@ static void mpDebugReportMissingWalls()
     for (const MpPreSyncWall& wall : gMpPreSyncWalls) {
         bool found = false;
         for (Object* it = objectFindFirst(); it != nullptr; it = objectFindNext()) {
-            int objType = FID_TYPE(it->fid);
+            int objType = objectTypeFromFid(it->fid);
             if ((objType == OBJ_TYPE_WALL || objType == OBJ_TYPE_SCENERY)
                 && it->pid == wall.pid && it->tile == wall.tile) {
                 found = true;
@@ -1146,7 +1157,7 @@ static void mpClientApplyMapMetadata()
     const NetMapSyncPayload* metadata = &gMpSession.clientMapMetadata;
     gMapHeader.enteringTile = metadata->enteringTile;
     gMapHeader.enteringElevation = metadata->enteringElevation;
-    gMapHeader.enteringRotation = metadata->enteringRotation;
+    gMapHeader.enteringRotation = static_cast<Rotation>(metadata->enteringRotation);
     gMapHeader.flags = metadata->flags;
     gMapHeader.darkness = metadata->darkness;
 
@@ -1210,7 +1221,7 @@ static void mpClientTryFinishMapSync()
     debugFilePrint("MPDBG sync done: dude=%p pid=0x%X pt=%d fid=0x%X anim=%d tile=%d elev=%d hidden=%d st=%d carry=%d weight=%d center=%d",
         (void*)gDude,
         gDude != nullptr ? gDude->pid : 0,
-        gDude != nullptr ? PID_TYPE(gDude->pid) : -1,
+        gDude != nullptr ? objectTypeFromPid(gDude->pid) : -1,
         gDude != nullptr ? gDude->fid : 0,
         gDude != nullptr ? animationTypeFromFid(gDude->fid) : -1,
         gDude != nullptr ? gDude->tile : -1,
@@ -1291,7 +1302,7 @@ int MpTruncateDestinationAtOccupant(Object* mover, int tile, int elevation)
     bool occupied = false;
     Object* obj = objectFindFirstAtLocation(elevation, tile);
     while (obj != nullptr) {
-        if (obj != mover && FID_TYPE(obj->fid) == OBJ_TYPE_CRITTER && !critterIsDead(obj)) {
+        if (obj != mover && objectTypeFromFid(obj->fid) == OBJ_TYPE_CRITTER && !critterIsDead(obj)) {
             occupied = true;
             break;
         }
@@ -1303,7 +1314,7 @@ int MpTruncateDestinationAtOccupant(Object* mover, int tile, int elevation)
 
     // Walk the straight line toward the destination and stop at the last
     // free tile before the occupant.
-    int rotation = tileGetRotationTo(mover->tile, tile);
+    Rotation rotation = tileGetRotationTo(mover->tile, tile);
     int distance = objectGetDistanceBetweenTiles(mover, mover->tile, mover, tile);
     int lastFree = mover->tile;
     for (int step = 0; step < distance; step++) {
@@ -1314,7 +1325,7 @@ int MpTruncateDestinationAtOccupant(Object* mover, int tile, int elevation)
         bool free = true;
         Object* check = objectFindFirstAtLocation(elevation, next);
         while (check != nullptr) {
-            if (check != mover && FID_TYPE(check->fid) == OBJ_TYPE_CRITTER && !critterIsDead(check)) {
+            if (check != mover && objectTypeFromFid(check->fid) == OBJ_TYPE_CRITTER && !critterIsDead(check)) {
                 free = false;
                 break;
             }
@@ -1385,7 +1396,7 @@ static int mpHostRegisterPlayerMovement(Object* obj, bool isRun, int tile, int e
         : animationRegisterMoveToTile(obj, tile, elevation, -1, 0);
     int endRc = reg_anim_end();
     if (rc != 0 || endRc != 0) {
-        int walkFid = buildFid(FID_TYPE(obj->fid), obj->fid & 0xFFF,
+        int walkFid = buildFid(objectTypeFromFid(obj->fid), obj->fid & 0xFFF,
             isRun ? ANIM_RUNNING : ANIM_WALK, (obj->fid & 0xF000) >> 12, obj->rotation + 1);
         debugFilePrint("MP: movement registration failed netObj=%u run=%d tile=%d rc=%d end=%d objTile=%d objElev=%d hidden=%d busy=%d objFid=0x%X walkFid=0x%X artWalk=%d artRun=%d",
             MpGetObjNetId(obj), isRun ? 1 : 0, tile, rc, endRc,
@@ -1393,9 +1404,23 @@ static int mpHostRegisterPlayerMovement(Object* obj, bool isRun, int tile, int e
             (obj->flags & OBJECT_HIDDEN) != 0 ? 1 : 0,
             animationIsBusy(obj) != 0 ? 1 : 0,
             obj->fid, walkFid,
-            artExists(buildFid(FID_TYPE(obj->fid), obj->fid & 0xFFF, ANIM_WALK, (obj->fid & 0xF000) >> 12, obj->rotation + 1)) ? 1 : 0,
-            artExists(buildFid(FID_TYPE(obj->fid), obj->fid & 0xFFF, ANIM_RUNNING, (obj->fid & 0xF000) >> 12, obj->rotation + 1)) ? 1 : 0);
+            artExists(buildFid(objectTypeFromFid(obj->fid), obj->fid & 0xFFF, ANIM_WALK, (obj->fid & 0xF000) >> 12, obj->rotation + 1)) ? 1 : 0,
+            artExists(buildFid(objectTypeFromFid(obj->fid), obj->fid & 0xFFF, ANIM_RUNNING, (obj->fid & 0xF000) >> 12, obj->rotation + 1)) ? 1 : 0);
         return -1;
+    }
+
+    // Vanilla parity: running cancels sneaking unless the Silent Running perk
+    // (see _dude_run_to_tile). The client already disabled its local dude's
+    // sneak at click time; the host's word here clears the avatar's proto
+    // flag so the next player-state broadcast carries sneak=off and the
+    // client stays out of sneak instead of being re-enabled by the sync.
+    if (isRun && perkGetRank(obj, PERK_SILENT_RUNNING) == 0) {
+        Proto* playerProto = nullptr;
+        if (protoGetProto(obj->pid, &playerProto) == 0
+            && (playerProto->critter.data.flags & (1 << DUDE_STATE_SNEAKING)) != 0) {
+            playerProto->critter.data.flags &= ~(1 << DUDE_STATE_SNEAKING);
+            debugFilePrint("MP: run cancelled sneak netId=%u", MpGetObjNetId(obj));
+        }
     }
 
     // Co-op diagnostic (throttled): remote movement registration. Lets the
@@ -1419,7 +1444,7 @@ static int mpHostRegisterPlayerMovement(Object* obj, bool isRun, int tile, int e
 // tile highlight on the other's screen and ghost the local cursor.
 static bool mpIsLocalUiObject(const Object* obj)
 {
-    return obj != nullptr && FID_TYPE(obj->fid) == OBJ_TYPE_INTERFACE;
+    return obj != nullptr && objectTypeFromFid(obj->fid) == OBJ_TYPE_INTERFACE;
 }
 
 static bool mpBuildObjectState(Object* obj, NetMapFullSyncObjectPayload* state)
@@ -1449,7 +1474,7 @@ static bool mpBuildObjectState(Object* obj, NetMapFullSyncObjectPayload* state)
     state->rotation = obj->rotation;
     state->elevation = obj->elevation;
     state->flags = obj->flags;
-    if (FID_TYPE(obj->fid) == OBJ_TYPE_CRITTER) {
+    if (objectTypeFromFid(obj->fid) == OBJ_TYPE_CRITTER) {
         state->hp = obj->data.critter.hp;
         state->ap = obj->data.critter.combat.ap;
         state->radiation = obj->data.critter.radiation;
@@ -1557,7 +1582,7 @@ static int mpFindPlayerSpawnTile(int preferredTile, int elevation)
     }
 
     for (int distance = 1; distance <= 3; distance++) {
-        for (int rotation = 0; rotation < ROTATION_COUNT; rotation++) {
+        for (Rotation rotation = ROTATION_FIRST; rotation < ROTATION_COUNT; rotation++) {
             int tile = tileGetTileInDirection(preferredTile, rotation, distance);
             if (hexGridTileIsValid(tile) && !_obj_occupied(tile, elevation)) {
                 return tile;
@@ -1578,7 +1603,7 @@ static int mpRandomSpawnAnchor(int preferredTile, int elevation)
         return preferredTile;
     }
     for (int attempt = 0; attempt < 8; attempt++) {
-        int rotation = randomBetween(0, ROTATION_COUNT - 1);
+        Rotation rotation = static_cast<Rotation>(randomBetween(0, ROTATION_COUNT - 1));
         int distance = randomBetween(1, 2);
         int tile = tileGetTileInDirection(preferredTile, rotation, distance);
         if (hexGridTileIsValid(tile) && !_obj_occupied(tile, elevation)) {
@@ -2304,6 +2329,51 @@ static void mpIndicatorHide(int index)
     tileWindowRefreshRect(&rect, gElevation);
 }
 
+// Co-op: is this player avatar currently sneaking? The host's dude uses the
+// vanilla dude-state; every other avatar (host-side or client mirror) carries
+// the sneak bit in its proto flags - synced through the player-state channel.
+static bool mpAvatarIsSneaking(Object* obj)
+{
+    if (obj == gDude) {
+        return dudeHasState(DUDE_STATE_SNEAKING);
+    }
+    Proto* proto;
+    if (protoGetProto(obj->pid, &proto) == -1) {
+        return false;
+    }
+    return (proto->critter.data.flags & (1 << DUDE_STATE_SNEAKING)) != 0;
+}
+
+// Co-op: the roof/wall transparency circle (gEgg) must be punched at every
+// player's position, not just the local dude. Collects the anchor objects the
+// renderers use: the local dude first, then every connected remote avatar with
+// a valid map position. Single-player returns just the local dude, matching
+// the vanilla gEgg behavior exactly.
+int MpGetCircleAnchors(Object** outAnchors, int maxAnchors)
+{
+    int count = 0;
+    if (outAnchors == nullptr || maxAnchors <= 0) {
+        return 0;
+    }
+    if (gDude != nullptr) {
+        outAnchors[count++] = gDude;
+    }
+    if (!gMpActive || gMpSession.players == nullptr) {
+        return count;
+    }
+    for (int index = 0; index < NET_MAX_PLAYERS && count < maxAnchors; index++) {
+        MultiplayerPlayer* player = &gMpSession.players[index];
+        if (!player->isConnected || player->obj == nullptr || player->obj == gDude) {
+            continue;
+        }
+        if (!hexGridTileIsValid(player->obj->tile) || !elevationIsValid(player->obj->elevation)) {
+            continue;
+        }
+        outAnchors[count++] = player->obj;
+    }
+    return count;
+}
+
 void MpDrawPlayerIndicators()
 {
     if (!gMpActive || gMpSession.players == nullptr) {
@@ -2333,8 +2403,10 @@ void MpDrawPlayerIndicators()
             ? (player->obj != nullptr ? player->obj : MpFindObjByNetId(player->objNetId))
             : nullptr;
 
+        // Sneaking players are hidden from the indicators - the sneak state
+        // is the player's own concealment choice.
         if (!wantWindow || obj == nullptr || !hexGridTileIsValid(obj->tile)
-            || !elevationIsValid(obj->elevation)) {
+            || !elevationIsValid(obj->elevation) || mpAvatarIsSneaking(obj)) {
             mpIndicatorHide(index);
             continue;
         }
@@ -2602,6 +2674,10 @@ static void mpGvarOnSnapshot(const NetGvarSnapshotPayload* payload, size_t paylo
     debugFilePrint("MP: gvar snapshot received count=%d applied=%d localLen=%d",
         count, applyCount, gGameGlobalVarsLength);
 }
+
+// Forward declaration: applied in the map-transition section below, called
+// from the packet handler above.
+static void mpApplySessionElevationChange(const MapTransition* transition);
 
 static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t dataLength, void* /*userData*/)
 {
@@ -2920,7 +2996,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                 t.map = in->targetMap;
                 t.tile = in->targetTile;
                 t.elevation = in->targetElevation;
-                t.rotation = in->targetRotation;
+                t.rotation = static_cast<Rotation>(in->targetRotation);
                 MpVoteStart(&t, p->netId);
                 break;
             }
@@ -3262,7 +3338,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             debugFilePrint("MPDBG welcome: dude=%p pid=0x%X pt=%d tile=%d elev=%d hidden=%d st=%d carry=%d weight=%d",
                 (void*)gDude,
                 gDude != nullptr ? gDude->pid : 0,
-                gDude != nullptr ? PID_TYPE(gDude->pid) : -1,
+                gDude != nullptr ? objectTypeFromPid(gDude->pid) : -1,
                 gDude != nullptr ? gDude->tile : -1,
                 gDude != nullptr ? gDude->elevation : -1,
                 gDude != nullptr ? ((gDude->flags & OBJECT_HIDDEN) != 0) : -1,
@@ -3407,6 +3483,13 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             // the old objects.
             MpLootOnClientReset();
             MpApplyMapChanged(&m->map);
+            break;
+        }
+        case NET_PKT_MAP_ELEVATION: {
+            if (payloadLen != sizeof(NetMapElevationPayload)) {
+                return;
+            }
+            MpOnMapElevationChange((const NetMapElevationPayload*)payload);
             break;
         }
         case NET_PKT_MAP_CHANGE_ABORT: {
@@ -3776,7 +3859,7 @@ static void mpCheckAllPlayersDown()
 // critterKill on both sides; only the host decides the game-over check.
 void MpPlayerDown(Object* critter)
 {
-    if (!gMpActive || critter == nullptr || PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
+    if (!gMpActive || critter == nullptr || objectTypeFromPid(critter->pid) != OBJ_TYPE_CRITTER) {
         return;
     }
 
@@ -4029,6 +4112,18 @@ void MpBroadcastPlayerStates()
         s.radiation = o->data.critter.radiation;
         s.poison = o->data.critter.poison;
         s.combatResults = o->data.critter.combat.results;
+        s.flags = 0;
+        if (o == gDude) {
+            if (dudeHasState(DUDE_STATE_SNEAKING)) {
+                s.flags |= 1;
+            }
+        } else {
+            Proto* playerProto;
+            if (protoGetProto(o->pid, &playerProto) == 0
+                && (playerProto->critter.data.flags & (1 << DUDE_STATE_SNEAKING)) != 0) {
+                s.flags |= 1;
+            }
+        }
 
         if (!force
             && p->hasLastState
@@ -4043,7 +4138,8 @@ void MpBroadcastPlayerStates()
             && p->lastAp == s.ap
             && p->lastRadiation == s.radiation
             && p->lastPoison == s.poison
-            && p->lastCombatResults == s.combatResults) {
+            && p->lastCombatResults == s.combatResults
+            && p->lastFlags == s.flags) {
             continue;
         }
         int channel = p->hasLastState ? NET_CHANNEL_UNRELIABLE : NET_CHANNEL_RELIABLE;
@@ -4061,6 +4157,7 @@ void MpBroadcastPlayerStates()
         p->lastRadiation = s.radiation;
         p->lastPoison = s.poison;
         p->lastCombatResults = s.combatResults;
+        p->lastFlags = s.flags;
         p->hasLastState = true;
     }
 }
@@ -4173,7 +4270,7 @@ void MpBroadcastObjectStates()
             if (changed && player == nullptr) {
                 // MPDIAG (temporary): watch critter state broadcasts to verify
                 // the dialogue speaker stays in the object stream.
-                if (FID_TYPE(state.fid) == OBJ_TYPE_CRITTER) {
+                if (objectTypeFromFid(state.fid) == OBJ_TYPE_CRITTER) {
                     static struct { uint32_t netId; uint32_t ms; uint32_t key; } last[32] = {};
                     uint32_t nowMs = getTicks();
                     uint32_t key = state.fid ^ (state.tile << 7) ^ (state.flags << 15) ^ (state.hp << 3);
@@ -4235,7 +4332,7 @@ void MpBroadcastObjectStates()
                     break;
                 }
             }
-            if (!isPlayer && FID_TYPE(oldRecord.state.fid) != OBJ_TYPE_INTERFACE) {
+            if (!isPlayer && objectTypeFromFid(oldRecord.state.fid) != OBJ_TYPE_INTERFACE) {
                 debugFilePrint("MP: object removed broadcast netId=%u pid=0x%X fid=0x%X tile=%d",
                     oldRecord.netId, oldRecord.state.pid, oldRecord.state.fid, oldRecord.state.tile);
                 NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE,
@@ -4635,8 +4732,8 @@ static void mpApplyObjectTransform(Object* obj, int tile, int x, int y, int rota
     if (objectSetFrame(obj, frame, nullptr) != 0) {
         obj->frame = frame;
     }
-    if (objectSetRotation(obj, rotation, nullptr) != 0) {
-        obj->rotation = rotation;
+    if (objectSetRotation(obj, static_cast<Rotation>(rotation), nullptr) != 0) {
+        obj->rotation = static_cast<Rotation>(rotation);
     }
 
     if (obj->tile != tile || obj->elevation != elevation) {
@@ -4673,7 +4770,7 @@ static void mpApplyObjectTransform(Object* obj, int tile, int x, int y, int rota
 
 static void mpApplyCritterState(Object* obj, int hp, int ap, int radiation, int poison, int combatTeam, int combatManeuver, int combatResults)
 {
-    if (obj == nullptr || FID_TYPE(obj->fid) != OBJ_TYPE_CRITTER) {
+    if (obj == nullptr || objectTypeFromFid(obj->fid) != OBJ_TYPE_CRITTER) {
         return;
     }
 
@@ -4738,7 +4835,7 @@ static void mpClearClientMapObjectsForFullSync()
                 // (critters) are host-owned: the vanilla map-load copies must
                 // go — the full sync recreates them with netIds and live
                 // states, and the per-tick channel keeps them in sync.
-                if (FID_TYPE(obj->fid) == OBJ_TYPE_CRITTER) {
+                if (objectTypeFromFid(obj->fid) == OBJ_TYPE_CRITTER) {
                     objects.push_back(obj);
                 } else {
                     keptStaticObjects++;
@@ -4804,7 +4901,7 @@ static Object* mpCreateClientObject(const NetMapFullSyncObjectPayload* state)
 
     Object* obj = nullptr;
     int result;
-    if (FID_TYPE(state->fid) == OBJ_TYPE_CRITTER) {
+    if (objectTypeFromFid(state->fid) == OBJ_TYPE_CRITTER) {
         result = objectCreateWithFidPid(&obj, state->fid, state->pid);
     } else {
         result = objectCreateWithPid(&obj, state->pid);
@@ -4837,7 +4934,7 @@ static Object* mpApplyObjectStateInternal(const NetMapFullSyncObjectPayload* sta
 
     // Local UI helpers (hex cursor etc.) are never sent by the host; a stray
     // INTERFACE-type state is corruption — refuse to materialize it.
-    if (FID_TYPE(state->fid) == OBJ_TYPE_INTERFACE) {
+    if (objectTypeFromFid(state->fid) == OBJ_TYPE_INTERFACE) {
         debugFilePrint("MPDBG: rejected interface-type object state netId=%u pid=0x%X",
             state->netId, state->pid);
         return nullptr;
@@ -4847,7 +4944,7 @@ static Object* mpApplyObjectStateInternal(const NetMapFullSyncObjectPayload* sta
     // state bound to his netId is corruption (it would turn gDude into a wall
     // and zero his stats); refuse to apply it.
     if (player != nullptr && player->isLocal
-        && FID_TYPE(state->fid) != OBJ_TYPE_CRITTER) {
+        && objectTypeFromFid(state->fid) != OBJ_TYPE_CRITTER) {
         debugFilePrint("MPDBG reject non-critter state for local player: netId=%u pid=0x%X fid=0x%X",
             state->netId, state->pid, state->fid);
         return obj;
@@ -4870,6 +4967,26 @@ static Object* mpApplyObjectStateInternal(const NetMapFullSyncObjectPayload* sta
             }
             match = objectFindNextAtLocation();
         }
+
+        // Moved objects (critters that walked before dying, dropped items)
+        // are not at their map-file positions, so the tile+pid match fails
+        // and the client keeps its stale alive map-file copy - a phantom
+        // that stands around and looks like a dead enemy "revived". The full
+        // sync ships every object the host has, so fall back to any
+        // unregistered map-file object with the same pid; each shipped state
+        // then consumes one stale copy and no phantoms survive.
+        if (obj == nullptr) {
+            Object* probe = objectFindFirst();
+            while (probe != nullptr) {
+                if (probe != gDude && MpGetObjNetId(probe) == 0
+                    && probe->pid == state->pid) {
+                    obj = probe;
+                    mpDiagMode = "matched-any";
+                    break;
+                }
+                probe = objectFindNext();
+            }
+        }
     }
 
     // Fate trace: every wall/scenery state during the full sync. If an object
@@ -4885,7 +5002,7 @@ static Object* mpApplyObjectStateInternal(const NetMapFullSyncObjectPayload* sta
 
     // MPDIAG (temporary): watch critter state applies to verify the dialogue
     // speaker keeps a visible mirror on the client.
-    if (player == nullptr && FID_TYPE(state->fid) == OBJ_TYPE_CRITTER) {
+    if (player == nullptr && objectTypeFromFid(state->fid) == OBJ_TYPE_CRITTER) {
         static struct { uint32_t netId; uint32_t ms; uint32_t key; } last[32] = {};
         uint32_t nowMs = getTicks();
         uint32_t key = state->fid ^ (state->tile << 7) ^ (state->flags << 15) ^ (state->hp << 3);
@@ -4919,7 +5036,7 @@ static Object* mpApplyObjectStateInternal(const NetMapFullSyncObjectPayload* sta
     // Keep the local player's critter pid even if a state arrives with a
     // non-critter pid (corruption guard — a wall pid here would make
     // critterGetStat return 0 and render the dude as wall art).
-    if (player == nullptr || !player->isLocal || PID_TYPE(state->pid) == OBJ_TYPE_CRITTER) {
+    if (player == nullptr || !player->isLocal || objectTypeFromPid(state->pid) == OBJ_TYPE_CRITTER) {
         obj->pid = state->pid;
     }
     MpRegisterObjNetId(obj, state->netId);
@@ -5058,6 +5175,28 @@ void MpApplyPlayerState(const NetPlayerStateUpdatePayload* s)
         oldLocalAp = obj->data.critter.combat.ap;
     }
     mpApplyCritterState(obj, s->hp, s->ap, s->radiation, s->poison, obj->data.critter.combat.team, obj->data.critter.combat.maneuver, s->combatResults);
+    // Sneak state: bit 0 of the synced flags is DUDE_STATE_SNEAKING. The
+    // local player toggles its own state at send time; the host's word here
+    // keeps them aligned. Remote mirrors get their proto flag so the sneak
+    // pose renders for other players.
+    if (isLocalPlayer) {
+        if ((s->flags & 1) != 0) {
+            if (!dudeHasState(DUDE_STATE_SNEAKING)) {
+                dudeEnableState(DUDE_STATE_SNEAKING);
+            }
+        } else if (dudeHasState(DUDE_STATE_SNEAKING)) {
+            dudeDisableState(DUDE_STATE_SNEAKING);
+        }
+    } else {
+        Proto* mirrorProto;
+        if (protoGetProto(obj->pid, &mirrorProto) == 0) {
+            if ((s->flags & 1) != 0) {
+                mirrorProto->critter.data.flags |= (1 << DUDE_STATE_SNEAKING);
+            } else {
+                mirrorProto->critter.data.flags &= ~(1 << DUDE_STATE_SNEAKING);
+            }
+        }
+    }
     // The host is authoritative over the local player's HP, but the vanilla
     // HUD only re-renders on local damage events. A hit taken from a remote
     // actor (or host-resolved damage) arrives via this state and would never
@@ -5150,7 +5289,7 @@ void MpApplyLocalDudeSnap(int tile, int elevation)
 // the sprite correct after any apply, join, or load.
 void MpSyncCritterWeaponFid(Object* critter)
 {
-    if (critter == nullptr || PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
+    if (critter == nullptr || objectTypeFromPid(critter->pid) != OBJ_TYPE_CRITTER) {
         return;
     }
 
@@ -5467,6 +5606,33 @@ void MpApplyMapChanged(const NetMapSyncPayload* payload)
     debugFilePrint("MP: apply map changed done state=syncing");
 }
 
+// A passed vote resolved a transition to another tile/elevation of the
+// CURRENT map. The map stays loaded; the whole session switches elevation
+// together. Snap the local dude to the destination, switch the view
+// elevation, and close the passed-vote tally (the same-map transition applied
+// without a MAP_CHANGED).
+void MpOnMapElevationChange(const NetMapElevationPayload* payload)
+{
+    if (!gMpIsClient || payload == nullptr
+        || !hexGridTileIsValid(payload->tile) || !elevationIsValid(payload->elevation)) {
+        return;
+    }
+    debugFilePrint("MP: map elevation change tile=%d elev=%d rot=%d",
+        payload->tile, payload->elevation, payload->rotation);
+    MpVoteHideUI();
+    gVoteSession.state = VOTE_STATE_NONE;
+    if (gDude != nullptr) {
+        gMpSuppressExitGridCheck = true;
+        objectSetLocation(gDude, payload->tile, payload->elevation, nullptr);
+        objectSetRotation(gDude, static_cast<Rotation>(payload->rotation), nullptr);
+        gMpSuppressExitGridCheck = false;
+        mapSetElevation(payload->elevation);
+        objUpdateRoofsForTile(gDude->tile, gDude->elevation);
+        tileSetCenter(gDude->tile,
+            TILE_SET_CENTER_REFRESH_WINDOW | TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // NetId mapping
 // ---------------------------------------------------------------------------
@@ -5592,7 +5758,7 @@ bool MpIsNetworkedCritter(Object* obj)
         for (int index = 0; index < NET_MAX_PLAYERS; index++) {
             MultiplayerPlayer* player = &gMpSession.players[index];
             if (player->isConnected && player->obj == obj
-                && FID_TYPE(obj->fid) == OBJ_TYPE_CRITTER) {
+                && objectTypeFromFid(obj->fid) == OBJ_TYPE_CRITTER) {
                 return true;
             }
         }
@@ -5636,6 +5802,52 @@ void MpClearNetIdMappings()
 // Map transition hook (called from map.cc)
 // ---------------------------------------------------------------------------
 
+// Teleport the whole session to an intra-map destination (an exit grid,
+// ladder or stairs pointing at another tile/elevation of the CURRENT map).
+// Elevation is shared: every player's critter moves together and the map
+// stays loaded — this is a level switch, not a map change. Runs on the host
+// after a passed vote; the clients snap via NET_PKT_MAP_ELEVATION + the
+// player-state channel.
+static void mpApplySessionElevationChange(const MapTransition* transition)
+{
+    if (!gMpIsHost || transition == nullptr
+        || !hexGridTileIsValid(transition->tile) || !elevationIsValid(transition->elevation)) {
+        return;
+    }
+    debugFilePrint("MP: session elevation change tile=%d elev=%d rot=%d",
+        transition->tile, transition->elevation, transition->rotation);
+    for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+        MultiplayerPlayer* player = &gMpSession.players[index];
+        if (!player->isConnected || player->obj == nullptr) {
+            continue;
+        }
+        reg_anim_clear(player->obj);
+        gMpSuppressExitGridCheck = true;
+        objectSetLocation(player->obj, transition->tile, transition->elevation, nullptr);
+        objectSetRotation(player->obj, transition->rotation, nullptr);
+        gMpSuppressExitGridCheck = false;
+        player->lastSafeTile = transition->tile;
+        player->lastSafeElevation = transition->elevation;
+        player->lastSafeRotation = transition->rotation;
+    }
+    mapSetElevation(transition->elevation);
+    if (gDude != nullptr) {
+        // The host's own dude was teleported through objectSetLocation() like
+        // everyone else; run the roof state machine so the roof-clear circle
+        // (and its gEgg anchor) follows him to the new tile/elevation.
+        objUpdateRoofsForTile(gDude->tile, gDude->elevation);
+        tileSetCenter(gDude->tile,
+            TILE_SET_CENTER_REFRESH_WINDOW | TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS);
+    }
+    NetMapElevationPayload p;
+    p.tile = transition->tile;
+    p.elevation = transition->elevation;
+    p.rotation = transition->rotation;
+    NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE,
+        NET_PKT_MAP_ELEVATION, &p, sizeof(p));
+    MpBroadcastPlayerStates();
+}
+
 int MpOnMapTransitionRequested(MapTransition* transition)
 {
     if (!gMpActive) {
@@ -5656,12 +5868,19 @@ int MpOnMapTransitionRequested(MapTransition* transition)
         // tile. This is state application, not a new local transition request.
         return 1;
     }
-    // If a vote concluded PASSED, let the real mapSetTransition proceed —
-    // this is the host's resolve path calling the real transition after the
-    // passed-display beat. FAILED/CANCELLED never start transitions, and
-    // clients never start transitions on their own: their map changes are
-    // always driven by the host's MAP_CHANGED.
+    // If a vote concluded PASSED, this is the host's resolve path calling the
+    // real transition after the passed-display beat. An intra-map destination
+    // (another tile/elevation of the CURRENT map) is applied as a session-wide
+    // elevation change — the map stays loaded and elevation is shared; a
+    // cross-map destination runs the vanilla reload + full-sync flow.
+    // FAILED/CANCELLED never start transitions, and clients never start
+    // transitions on their own: their map changes are always driven by the
+    // host's MAP_CHANGED.
     if (gMpIsHost && gVoteSession.state == VOTE_STATE_PASSED) {
+        if (transition->map == gMapHeader.index) {
+            mpApplySessionElevationChange(transition);
+            return 1;
+        }
         return 0;
     }
     // A vote is already in flight — block further transitions until it

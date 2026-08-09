@@ -315,7 +315,7 @@ void automapShow(bool isInGame, bool isUsingScanner)
 
     FrmImage frmImages[AUTOMAP_FRM_COUNT];
     for (int index = 0; index < AUTOMAP_FRM_COUNT; index++) {
-        int fid = buildFid(OBJ_TYPE_INTERFACE, frmIds[index], 0, 0, 0);
+        int fid = buildFid(OBJ_TYPE_INTERFACE, frmIds[index]);
         if (!frmImages[index].lock(fid)) {
             return;
         }
@@ -538,7 +538,7 @@ static void automapRenderInMapWindow(int window, int elevation, unsigned char* b
             continue;
         }
 
-        int objectType = FID_TYPE(object->fid);
+        ObjectType objectType = objectTypeFromFid(object->fid);
         unsigned char objectColor;
 
         if ((flags & AUTOMAP_IN_GAME) != 0) {
@@ -1104,7 +1104,7 @@ static void _decode_map_data(int elevation)
         if (object->tile != -1 && (object->flags & OBJECT_SEEN) != 0) {
             int contentType;
 
-            int objectType = FID_TYPE(object->fid);
+            ObjectType objectType = objectTypeFromFid(object->fid);
             if (objectType == OBJ_TYPE_SCENERY && object->pid != PROTO_ID_BLOCK_HEX_AUTO_INVISO) {
                 contentType = 2;
             } else if (objectType == OBJ_TYPE_WALL) {

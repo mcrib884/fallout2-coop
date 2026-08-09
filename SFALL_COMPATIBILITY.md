@@ -51,6 +51,7 @@ The following settings were moved into [`<DAT>/config/game.cfg`](files/ce.dat/co
 | `Misc` | `XPTable` | `stats` | `xp_table` |
 | `Misc` | `DisableSpecialMapIDs` | `maps` | `disable_special_map_ids` |
 | `Misc` | `Movie1` - `Movie32` | `movies` | `movie1` - `movie32` |
+| `Misc` | `Fallout1Behavior` movie behavior | `movies` | `endgame_play_after_slideshow`, `endgame_movie_male`, `endgame_movie_female` |
 | `Sound` | `MainMenuMusic` | `sound` | `main_menu_music` |
 | `Sound` | `WorldMapMusic` | `sound` | `worldmap_music` |
 | `Sound` | `WorldMapCarMusic` | `sound` | `worldmap_car_music` |
@@ -62,6 +63,11 @@ The following settings were moved into [`<DAT>/config/game.cfg`](files/ce.dat/co
 
 Unlike sfall, `travel_delay` throttles only world-map travel simulation. Input,
 rendering, and world-map scripts continue at the normal frame rate.
+
+CE does not provide a single `Fallout1Behavior` compatibility switch. The movie
+portion can be configured directly: set `endgame_play_after_slideshow=0`,
+`endgame_movie_male=10`, and `endgame_movie_female=11` for the sfall Fallout 1
+movie sequence. Time-limit and item-weight behavior are separate features.
 
 ## Opcodes / Metarules
 
@@ -99,7 +105,7 @@ See [`https://sfall-team.github.io/sfall/`](https://sfall-team.github.io/sfall/)
 | Arrays / Array functions | create_array<br>temp_array<br>fix_array<br>get/set_array<br>resize_array<br>free_array<br>scan_array<br>len_array<br>save/load_array<br>array_key<br>arrayexpr | ✅ | - |
 | Perks and traits / NPC perks | set_fake_perk_npc<br>set_fake_trait_npc<br>set_selectable_perk_npc<br>has_fake_perk_npc<br>has_fake_trait_npc | not implemented | - |
 | Global scripts / Global script functions | set_global_script_repeat<br>set_global_script_type<br>available_global_script_types | ✅ except available_global_script_types | - |
-| Combat | attack_is_aimed<br>block_combat<br>force_aimed_shots<br>disable_aimed_shots<br>get_attack_type<br>get/set_bodypart_hit_modifier<br>combat_data<br>get/set/reset_critical_table<br>get_last_target<br>get_last_attacker<br>set_critter_burst_disable<br>get/set_critter_current_ap<br>set_spray_settings<br>get/set_combat_free_move | ✅ except block_combat, force_aimed_shots, disable_aimed_shots, get_last_target, get_last_attacker, set_spray_settings | - |
+| Combat | attack_is_aimed<br>block_combat<br>force_aimed_shots<br>disable_aimed_shots<br>get_attack_type<br>get/set_bodypart_hit_modifier<br>combat_data<br>get/set/reset_critical_table<br>get_last_target<br>get_last_attacker<br>set_critter_burst_disable<br>get/set_critter_current_ap<br>set_spray_settings<br>get/set_combat_free_move<br>set_fo1_hit_chance | ✅ except block_combat, force_aimed_shots, disable_aimed_shots, get_last_target, get_last_attacker, set_spray_settings | - |
 | Car | set_car_current_town<br>car_gas_amount<br>set_car_intface_art | ✅ | - |
 | Interface / Windows and images | interface_art_draw<br>interface_print<br>draw_image{_scaled}<br>get_window_under_mouse<br>create_win<br>get_window_attribute<br>message_box<br>set_window_flag<br>win_fill_color<br>interface_overlay<br>dialog_message<br>get_text_width<br>hide_window<br>show_window<br>create_message_window | ✅ except interface_print, interface_overlay | - |
 | Interface / Outline | outlined_object<br>get_outline<br>set_outline | ✅ | - |
@@ -122,6 +128,7 @@ CE defines several metarules that are not supported in Sfall.  Include [ce.h](fi
 
 | Name | Definition |
 | --- | --- |
+| `encounter_intros(toggle)` | Enable or disable the display-monitor random encounter intro message, for example `You encounter: ...`. This does not affect the separate encounter detection dialog. |
 | `rest_option_msgs(base_msg_id)` | Change the base message id used for Pip-Boy rest option labels. CE reads the rest labels from `base_msg_id` through `base_msg_id + 13`; the default Fallout 2 range is 302-315. |
 | `set_party_member_cc_msg_ids(pid, start_msg_id, end_msg_id)` | Override party-member combat-control update messages for a pid. Picks randomly from the inclusive contiguous range. Default fallback ranges are 670-674 for humans and 677-678 for the hardcoded dog pid list. |
 | `set_rest_option(rest_option, value)` | Change the wake hour for Pip-Boy rest options 8-11: morning, noon, evening, and midnight. `value` is an hour from 0-23. Defaults are 8, 12, 18, and 0. |

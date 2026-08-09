@@ -243,10 +243,10 @@ static Object* objectPrepareWhoHitMeForSave(CritterCombatData* combatData)
 }
 
 // 0x6391D0 light_blocked
-static int _light_blocked[6][36];
+static int _light_blocked[ROTATION_COUNT][36];
 
 // 0x639530 light_offsets
-static int _light_offsets[2][6][36];
+static int _light_offsets[2][ROTATION_COUNT][36];
 
 // 0x639BF0 buf_rect
 static Rect gObjectsWindowRect;
@@ -353,7 +353,7 @@ int objectsInit(unsigned char* buf, int width, int height, int pitch)
     gObjectsWindowBufferSize = height * width;
     gObjectsWindowPitch = pitch;
 
-    dudeFid = buildFid(OBJ_TYPE_CRITTER, _art_vault_guy_num, 0, 0, 0);
+    dudeFid = buildFid(OBJ_TYPE_CRITTER, _art_vault_guy_num, ANIM_STAND, WEAPON_ANIMATION_NONE, ROTATION_NE);
     objectCreateWithFidPid(&gDude, dudeFid, 0x1000000);
 
     gDude->flags |= OBJECT_NO_REMOVE;
@@ -367,7 +367,7 @@ int objectsInit(unsigned char* buf, int width, int height, int pitch)
         exit(1);
     }
 
-    eggFid = buildFid(OBJ_TYPE_INTERFACE, 2, 0, 0, 0);
+    eggFid = buildFid(OBJ_TYPE_INTERFACE, 2);
     objectCreateWithFidPid(&gEgg, eggFid, -1);
     gEgg->flags |= OBJECT_NO_REMOVE;
     gEgg->flags |= OBJECT_NO_SAVE;
@@ -438,7 +438,7 @@ int objectRead(Object* obj, File* stream)
     if (fileReadInt32(stream, &(obj->sx)) == -1) return -1;
     if (fileReadInt32(stream, &(obj->sy)) == -1) return -1;
     if (fileReadInt32(stream, &(obj->frame)) == -1) return -1;
-    if (fileReadInt32(stream, &(obj->rotation)) == -1) return -1;
+    if (fileReadInt32Enum<Rotation>(stream, &(obj->rotation)) == -1) return -1;
     if (fileReadInt32(stream, &(obj->fid)) == -1) return -1;
     if (fileReadInt32(stream, &(obj->flags)) == -1) return -1;
     if (fileReadInt32(stream, &(obj->elevation)) == -1) return -1;
@@ -460,15 +460,15 @@ int objectRead(Object* obj, File* stream)
     if (isExitGridPid(obj->pid)) {
         if (obj->data.misc.map <= 0) {
             if ((obj->fid & 0xFFF) < 33) {
-                obj->fid = buildFid(OBJ_TYPE_MISC, (obj->fid & 0xFFF) + 16, animationTypeFromFid(obj->fid), 0, 0);
+                obj->fid = buildFid(OBJ_TYPE_MISC, (obj->fid & 0xFFF) + 16, animationTypeFromFid(obj->fid));
             }
         }
     } else {
-        if (PID_TYPE(obj->pid) == 0 && !(gMapHeader.flags & 0x01)) {
+        if (objectTypeFromPid(obj->pid) == OBJ_TYPE_ITEM && !(gMapHeader.flags & 0x01)) {
             _object_fix_weapon_ammo(obj);
         }
 
-        if (PID_TYPE(obj->pid) == OBJ_TYPE_ITEM
+        if (objectTypeFromPid(obj->pid) == OBJ_TYPE_ITEM
             && itemGetType(obj) == ITEM_TYPE_WEAPON
             && obj->data.item.weapon.ammoQuantity < 0) {
             obj->data.item.weapon.ammoQuantity = 0;
@@ -575,7 +575,7 @@ static int objectLoadAllInternal(File* stream)
 
             _obj_insert(objectListNode);
 
-            if ((objectListNode->obj->flags & OBJECT_NO_REMOVE) && PID_TYPE(objectListNode->obj->pid) == OBJ_TYPE_CRITTER && objectListNode->obj->pid != 18000) {
+            if ((objectListNode->obj->flags & OBJECT_NO_REMOVE) && objectTypeFromPid(objectListNode->obj->pid) == OBJ_TYPE_CRITTER && objectListNode->obj->pid != 18000) {
                 objectListNode->obj->flags &= ~OBJECT_NO_REMOVE;
             }
 
@@ -627,7 +627,7 @@ static int objectLoadAllInternal(File* stream)
 // 0x48911C object_fix_weapon_ammo
 static void _object_fix_weapon_ammo(Object* obj)
 {
-    if (PID_TYPE(obj->pid) != OBJ_TYPE_ITEM) {
+    if (objectTypeFromPid(obj->pid) != OBJ_TYPE_ITEM) {
         return;
     }
 
@@ -649,7 +649,7 @@ static void _object_fix_weapon_ammo(Object* obj)
             obj->data.item.weapon.ammoQuantity = proto->item.data.weapon.ammoCapacity;
         }
     } else {
-        if (PID_TYPE(obj->pid) == OBJ_TYPE_MISC) {
+        if (objectTypeFromPid(obj->pid) == OBJ_TYPE_MISC) {
             // FIXME: looks like this code in unreachable
             charges = obj->data.item.misc.charges;
             if (charges == 0xCCCCCCCC) {
@@ -678,7 +678,7 @@ static int objectWrite(Object* obj, File* stream)
     if (fileWriteInt32(stream, obj->sx) == -1) return -1;
     if (fileWriteInt32(stream, obj->sy) == -1) return -1;
     if (fileWriteInt32(stream, obj->frame) == -1) return -1;
-    if (fileWriteInt32(stream, obj->rotation) == -1) return -1;
+    if (fileWriteInt32Enum<Rotation>(stream, obj->rotation) == -1) return -1;
     if (fileWriteInt32(stream, obj->fid) == -1) return -1;
     if (fileWriteInt32(stream, obj->flags) == -1) return -1;
     if (fileWriteInt32(stream, obj->elevation) == -1) return -1;
@@ -731,7 +731,7 @@ int objectSaveAll(File* stream)
 
                 CritterCombatData* combatData = nullptr;
                 Object* whoHitMe = nullptr;
-                if (PID_TYPE(object->pid) == OBJ_TYPE_CRITTER) {
+                if (objectTypeFromPid(object->pid) == OBJ_TYPE_CRITTER) {
                     combatData = &(object->data.critter.combat);
                     whoHitMe = objectPrepareWhoHitMeForSave(combatData);
                 }
@@ -740,7 +740,7 @@ int objectSaveAll(File* stream)
                     return -1;
                 }
 
-                if (PID_TYPE(object->pid) == OBJ_TYPE_CRITTER) {
+                if (objectTypeFromPid(object->pid) == OBJ_TYPE_CRITTER) {
                     combatData->whoHitMe = whoHitMe;
                 }
 
@@ -943,7 +943,7 @@ int objectCreateWithFidPid(Object** objectPtr, int fid, int pid)
     objectListNode->obj->pid = pid;
     objectListNode->obj->id = scriptsNewObjectId();
 
-    if (pid == -1 || PID_TYPE(pid) == OBJ_TYPE_TILE) {
+    if (pid == -1 || objectTypeFromPid(pid) == OBJ_TYPE_TILE) {
         Inventory* inventory = &(objectListNode->obj->data.inventory);
         inventory->length = 0;
         inventory->items = nullptr;
@@ -1420,7 +1420,7 @@ static bool objTileHasExitGrid(int tile, int elevation)
             break;
         }
         if (o->elevation == elevation
-            && FID_TYPE(o->fid) == OBJ_TYPE_MISC
+            && objectTypeFromFid(o->fid) == OBJ_TYPE_MISC
             && isExitGridPid(o->pid)
             && (o->flags & OBJECT_HIDDEN) == 0) {
             return true;
@@ -1439,7 +1439,7 @@ int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
     // Co-op vote: capture the authoritative player's last safe position before
     // any move. This must cover remote player critters too, because a client
     // can be the one that steps onto an exit grid.
-    if (gMpIsHost && gMpActive && FID_TYPE(obj->fid) == OBJ_TYPE_CRITTER) {
+    if (gMpIsHost && gMpActive && objectTypeFromFid(obj->fid) == OBJ_TYPE_CRITTER) {
         for (int index = 0; index < NET_MAX_PLAYERS; index++) {
             MultiplayerPlayer* player = &gMpSession.players[index];
             if (player->isConnected && player->obj == obj) {
@@ -1501,7 +1501,7 @@ int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
     }
 
     if (isInCombat()) {
-        if (FID_TYPE(obj->fid) == OBJ_TYPE_CRITTER) {
+        if (objectTypeFromFid(obj->fid) == OBJ_TYPE_CRITTER) {
             bool v8 = obj->outline != 0 && (obj->outline & OUTLINE_DISABLED) == 0;
             _combat_update_critter_outline_for_los(obj, v8);
         }
@@ -1532,7 +1532,7 @@ int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
             }
 
             if (elevation == elev) {
-                if (FID_TYPE(obj->fid) == OBJ_TYPE_MISC) {
+                if (objectTypeFromFid(obj->fid) == OBJ_TYPE_MISC) {
                     if (isExitGridPid(obj->pid)) {
                         if ((obj->flags & OBJECT_HIDDEN) != 0) {
                             objectListNode = objectListNode->next;
@@ -1578,12 +1578,12 @@ int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
             int roofY = tile / 200 / 2;
             if (roofX != _obj_last_roof_x || roofY != _obj_last_roof_y || elevation != _obj_last_elev) {
                 int currentSquare = _square[elevation]->field_0[roofX + 100 * roofY];
-                int currentSquareFid = buildFid(OBJ_TYPE_TILE, (currentSquare >> 16) & 0xFFF, 0, 0, 0);
+                int currentSquareFid = buildFid(OBJ_TYPE_TILE, (currentSquare >> 16) & 0xFFF);
                 // CE: Add additional checks for -1 to prevent array lookup at index -101.
                 int previousSquare = _obj_last_roof_x != -1 && _obj_last_roof_y != -1
                     ? _square[elevation]->field_0[_obj_last_roof_x + 100 * _obj_last_roof_y]
                     : 0;
-                bool isEmpty = buildFid(OBJ_TYPE_TILE, 1, 0, 0, 0) == currentSquareFid;
+                bool isEmpty = buildFid(OBJ_TYPE_TILE, 1) == currentSquareFid;
 
                 if (isEmpty != _obj_last_is_empty || (((currentSquare >> 16) & 0xF000) >> 12) != (((previousSquare >> 16) & 0xF000) >> 12)) {
                     if (!_obj_last_is_empty) {
@@ -1606,12 +1606,21 @@ int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
             }
         }
 
-        if (rect != nullptr) {
-            Rect r;
-            objectSetLocation(gEgg, tile, elevation, &r);
-            rectUnion(rect, &r, rect);
-        } else {
-            objectSetLocation(gEgg, tile, elevation, nullptr);
+        // Co-op: the roof-transparency circle (gEgg) must also follow the
+        // LOCAL player only. The flood-fill gate above keeps the roof-hole
+        // state on the local dude, but the circle itself is drawn from gEgg's
+        // position — leaving this ungated would drag the circle onto the tile
+        // of every synced remote avatar that walks through _obj_move_to on the
+        // host (reading on the host's screen as the transparency circle
+        // following the wrong player). Vanilla keeps its last-mover behavior.
+        if (obj == gDude || !gMpActive) {
+            if (rect != nullptr) {
+                Rect r;
+                objectSetLocation(gEgg, tile, elevation, &r);
+                rectUnion(rect, &r, rect);
+            } else {
+                objectSetLocation(gEgg, tile, elevation, nullptr);
+            }
         }
 
         if (elevation != oldElevation) {
@@ -1625,7 +1634,7 @@ int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
             }
         }
     } else {
-        if (elevation != _obj_last_elev && PID_TYPE(obj->pid) == OBJ_TYPE_CRITTER) {
+        if (elevation != _obj_last_elev && objectTypeFromPid(obj->pid) == OBJ_TYPE_CRITTER) {
             _combat_delete_critter(obj);
         }
     }
@@ -1636,8 +1645,8 @@ int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
 // 0x48A9A0 obj_reset_roof
 int _obj_reset_roof()
 {
-    int fid = buildFid(OBJ_TYPE_TILE, (_square[gDude->elevation]->field_0[_obj_last_roof_x + 100 * _obj_last_roof_y] >> 16) & 0xFFF, 0, 0, 0);
-    if (fid != buildFid(OBJ_TYPE_TILE, 1, 0, 0, 0)) {
+    int fid = buildFid(OBJ_TYPE_TILE, (_square[gDude->elevation]->field_0[_obj_last_roof_x + 100 * _obj_last_roof_y] >> 16) & 0xFFF);
+    if (fid != buildFid(OBJ_TYPE_TILE, 1)) {
         tile_fill_roof(_obj_last_roof_x, _obj_last_roof_y, gDude->elevation, 1);
     }
     return 0;
@@ -1653,15 +1662,22 @@ void objUpdateRoofsForTile(int tile, int elevation)
         return;
     }
 
+    // The roof-transparency circle (gEgg) is drawn centered on the local
+    // player's tile. A sync teleport must carry it along, or the circle is
+    // left at the old tile while the roof-fill state below moves ahead.
+    if (gEgg != nullptr && (gEgg->tile != tile || gEgg->elevation != elevation)) {
+        objectSetLocation(gEgg, tile, elevation, nullptr);
+    }
+
     int roofX = tile % 200 / 2;
     int roofY = tile / 200 / 2;
     if (roofX != _obj_last_roof_x || roofY != _obj_last_roof_y || elevation != _obj_last_elev) {
         int currentSquare = _square[elevation]->field_0[roofX + 100 * roofY];
-        int currentSquareFid = buildFid(OBJ_TYPE_TILE, (currentSquare >> 16) & 0xFFF, 0, 0, 0);
+        int currentSquareFid = buildFid(OBJ_TYPE_TILE, (currentSquare >> 16) & 0xFFF);
         int previousSquare = _obj_last_roof_x != -1 && _obj_last_roof_y != -1
             ? _square[elevation]->field_0[_obj_last_roof_x + 100 * _obj_last_roof_y]
             : 0;
-        bool isEmpty = buildFid(OBJ_TYPE_TILE, 1, 0, 0, 0) == currentSquareFid;
+        bool isEmpty = buildFid(OBJ_TYPE_TILE, 1) == currentSquareFid;
 
         if (isEmpty != _obj_last_is_empty || (((currentSquare >> 16) & 0xF000) >> 12) != (((previousSquare >> 16) & 0xF000) >> 12)) {
             if (!_obj_last_is_empty) {
@@ -1827,25 +1843,25 @@ int objectSetPrevFrame(Object* obj, Rect* dirtyRect)
 }
 
 // 0x48ABD4 obj_set_rotation
-int objectSetRotation(Object* obj, int direction, Rect* dirtyRect)
+int objectSetRotation(Object* obj, Rotation rotation, Rect* dirtyRect)
 {
     if (obj == nullptr) {
         return -1;
     }
 
-    if (direction >= ROTATION_COUNT) {
+    if (!rotationIsValid(rotation)) {
         return -1;
     }
 
     if (dirtyRect != nullptr) {
         objectGetRect(obj, dirtyRect);
-        obj->rotation = direction;
+        obj->rotation = rotation;
 
         Rect newRect;
         objectGetRect(obj, &newRect);
         rectUnion(dirtyRect, &newRect, dirtyRect);
     } else {
-        obj->rotation = direction;
+        obj->rotation = rotation;
     }
 
     return 0;
@@ -1854,7 +1870,7 @@ int objectSetRotation(Object* obj, int direction, Rect* dirtyRect)
 // 0x48AC20 obj_inc_rotation
 int objectRotateClockwise(Object* obj, Rect* dirtyRect)
 {
-    int rotation = obj->rotation + 1;
+    Rotation rotation = obj->rotation + 1;
     if (rotation >= ROTATION_COUNT) {
         rotation = ROTATION_NE;
     }
@@ -1865,7 +1881,7 @@ int objectRotateClockwise(Object* obj, Rect* dirtyRect)
 // 0x48AC38 obj_dec_rotation
 int objectRotateCounterClockwise(Object* obj, Rect* dirtyRect)
 {
-    int rotation = obj->rotation - 1;
+    Rotation rotation = obj->rotation - 1;
     if (rotation < 0) {
         rotation = ROTATION_NW;
     }
@@ -2219,13 +2235,13 @@ bool _obj_action_can_use(Object* obj)
 // 0x48B278 obj_action_can_talk_to
 bool _obj_action_can_talk_to(Object* obj)
 {
-    return _proto_action_can_talk_to(obj->pid) && (PID_TYPE(obj->pid) == OBJ_TYPE_CRITTER) && critterIsActive(obj);
+    return _proto_action_can_talk_to(obj->pid) && (objectTypeFromPid(obj->pid) == OBJ_TYPE_CRITTER) && critterIsActive(obj);
 }
 
 // 0x48B2A8 obj_portal_is_walk_thru
 bool _obj_portal_is_walk_thru(Object* obj)
 {
-    if (PID_TYPE(obj->pid) != OBJ_TYPE_SCENERY) {
+    if (objectTypeFromPid(obj->pid) != OBJ_TYPE_SCENERY) {
         return false;
     }
 
@@ -2332,7 +2348,7 @@ Object* objectFindFirst()
         ObjectListNode* objectListNode = gObjectListHeadByTile[gObjectFindTile];
         while (objectListNode != nullptr) {
             Object* object = objectListNode->obj;
-            if (!artIsObjectTypeHidden(FID_TYPE(object->fid))) {
+            if (!artIsObjectTypeHidden(objectTypeFromFid(object->fid))) {
                 gObjectFindLastObjectListNode = objectListNode;
                 return object;
             }
@@ -2365,7 +2381,7 @@ Object* objectFindNext()
 
         while (objectListNode != nullptr) {
             Object* object = objectListNode->obj;
-            if (!artIsObjectTypeHidden(FID_TYPE(object->fid))) {
+            if (!artIsObjectTypeHidden(objectTypeFromFid(object->fid))) {
                 gObjectFindLastObjectListNode = objectListNode;
                 return object;
             }
@@ -2388,7 +2404,7 @@ Object* objectFindFirstAtElevation(int elevation)
         while (objectListNode != nullptr) {
             Object* object = objectListNode->obj;
             if (object->elevation == elevation) {
-                if (!artIsObjectTypeHidden(FID_TYPE(object->fid))) {
+                if (!artIsObjectTypeHidden(objectTypeFromFid(object->fid))) {
                     gObjectFindLastObjectListNode = objectListNode;
                     return object;
                 }
@@ -2423,7 +2439,7 @@ Object* objectFindNextAtElevation()
         while (objectListNode != nullptr) {
             Object* object = objectListNode->obj;
             if (object->elevation == gObjectFindElevation) {
-                if (!artIsObjectTypeHidden(FID_TYPE(object->fid))) {
+                if (!artIsObjectTypeHidden(objectTypeFromFid(object->fid))) {
                     gObjectFindLastObjectListNode = objectListNode;
                     return object;
                 }
@@ -2446,7 +2462,7 @@ Object* objectFindFirstAtLocation(int elevation, int tile)
     while (objectListNode != nullptr) {
         Object* object = objectListNode->obj;
         if (object->elevation == elevation) {
-            if (!artIsObjectTypeHidden(FID_TYPE(object->fid))) {
+            if (!artIsObjectTypeHidden(objectTypeFromFid(object->fid))) {
                 gObjectFindLastObjectListNode = objectListNode;
                 return object;
             }
@@ -2470,7 +2486,7 @@ Object* objectFindNextAtLocation()
     while (objectListNode != nullptr) {
         Object* object = objectListNode->obj;
         if (object->elevation == gObjectFindElevation) {
-            if (!artIsObjectTypeHidden(FID_TYPE(object->fid))) {
+            if (!artIsObjectTypeHidden(objectTypeFromFid(object->fid))) {
                 gObjectFindLastObjectListNode = objectListNode;
                 return object;
             }
@@ -2571,7 +2587,6 @@ Object* _obj_blocking_at(Object* excludeObj, int tile, int elev)
 {
     ObjectListNode* objectListNode;
     Object* obj;
-    int type;
 
     if (!hexGridTileIsValid(tile)) {
         return nullptr;
@@ -2582,7 +2597,7 @@ Object* _obj_blocking_at(Object* excludeObj, int tile, int elev)
         obj = objectListNode->obj;
         if (obj->elevation == elev) {
             if ((obj->flags & OBJECT_HIDDEN) == 0 && (obj->flags & OBJECT_NO_BLOCK) == 0 && obj != excludeObj) {
-                type = FID_TYPE(obj->fid);
+                ObjectType type = objectTypeFromFid(obj->fid);
                 if (type == OBJ_TYPE_CRITTER
                     || type == OBJ_TYPE_SCENERY
                     || type == OBJ_TYPE_WALL) {
@@ -2593,7 +2608,7 @@ Object* _obj_blocking_at(Object* excludeObj, int tile, int elev)
         objectListNode = objectListNode->next;
     }
 
-    for (int rotation = 0; rotation < ROTATION_COUNT; rotation++) {
+    for (Rotation rotation = ROTATION_FIRST; rotation < ROTATION_COUNT; rotation++) {
         int neighboor = tileGetTileInDirection(tile, rotation, 1);
         if (hexGridTileIsValid(neighboor)) {
             objectListNode = gObjectListHeadByTile[neighboor];
@@ -2602,7 +2617,7 @@ Object* _obj_blocking_at(Object* excludeObj, int tile, int elev)
                 if ((obj->flags & OBJECT_MULTIHEX) != 0) {
                     if (obj->elevation == elev) {
                         if ((obj->flags & OBJECT_HIDDEN) == 0 && (obj->flags & OBJECT_NO_BLOCK) == 0 && obj != excludeObj) {
-                            type = FID_TYPE(obj->fid);
+                            ObjectType type = objectTypeFromFid(obj->fid);
                             if (type == OBJ_TYPE_CRITTER
                                 || type == OBJ_TYPE_SCENERY
                                 || type == OBJ_TYPE_WALL) {
@@ -2632,7 +2647,7 @@ Object* _obj_shoot_blocking_at(Object* excludeObj, int tile, int elev)
         if (candidate->elevation == elev) {
             unsigned int flags = candidate->flags;
             if ((flags & OBJECT_HIDDEN) == 0 && ((flags & OBJECT_NO_BLOCK) == 0 || (flags & OBJECT_SHOOT_THRU) == 0) && candidate != excludeObj) {
-                int type = FID_TYPE(candidate->fid);
+                ObjectType type = objectTypeFromFid(candidate->fid);
                 // SFALL: Fix to prevent corpses from blocking line of fire.
                 if ((type == OBJ_TYPE_CRITTER && !critterIsDead(candidate))
                     || type == OBJ_TYPE_SCENERY
@@ -2644,7 +2659,7 @@ Object* _obj_shoot_blocking_at(Object* excludeObj, int tile, int elev)
         objectListItem = objectListItem->next;
     }
 
-    for (int rotation = 0; rotation < ROTATION_COUNT; rotation++) {
+    for (Rotation rotation = ROTATION_FIRST; rotation < ROTATION_COUNT; rotation++) {
         int adjacentTile = tileGetTileInDirection(tile, rotation, 1);
         if (!hexGridTileIsValid(adjacentTile)) {
             continue;
@@ -2657,7 +2672,7 @@ Object* _obj_shoot_blocking_at(Object* excludeObj, int tile, int elev)
             if ((flags & OBJECT_MULTIHEX) != 0) {
                 if (candidate->elevation == elev) {
                     if ((flags & OBJECT_HIDDEN) == 0 && (flags & OBJECT_NO_BLOCK) == 0 && candidate != excludeObj) {
-                        int type = FID_TYPE(candidate->fid);
+                        ObjectType type = objectTypeFromFid(candidate->fid);
                         // SFALL: Fix to prevent corpses from blocking line of
                         // fire.
                         if ((type == OBJ_TYPE_CRITTER && !critterIsDead(candidate))
@@ -2689,7 +2704,7 @@ Object* _obj_ai_blocking_at(Object* excludeObj, int tile, int elevation)
             if ((object->flags & OBJECT_HIDDEN) == 0
                 && (object->flags & OBJECT_NO_BLOCK) == 0
                 && object != excludeObj) {
-                int objectType = FID_TYPE(object->fid);
+                ObjectType objectType = objectTypeFromFid(object->fid);
                 if (objectType == OBJ_TYPE_CRITTER
                     || objectType == OBJ_TYPE_SCENERY
                     || objectType == OBJ_TYPE_WALL) {
@@ -2704,7 +2719,7 @@ Object* _obj_ai_blocking_at(Object* excludeObj, int tile, int elevation)
         objectListNode = objectListNode->next;
     }
 
-    for (int rotation = 0; rotation < ROTATION_COUNT; rotation++) {
+    for (Rotation rotation = ROTATION_FIRST; rotation < ROTATION_COUNT; rotation++) {
         int candidate = tileGetTileInDirection(tile, rotation, 1);
         if (!hexGridTileIsValid(candidate)) {
             continue;
@@ -2718,7 +2733,7 @@ Object* _obj_ai_blocking_at(Object* excludeObj, int tile, int elevation)
                     if ((object->flags & OBJECT_HIDDEN) == 0
                         && (object->flags & OBJECT_NO_BLOCK) == 0
                         && object != excludeObj) {
-                        int objectType = FID_TYPE(object->fid);
+                        ObjectType objectType = objectTypeFromFid(object->fid);
                         if (objectType == OBJ_TYPE_CRITTER
                             || objectType == OBJ_TYPE_SCENERY
                             || objectType == OBJ_TYPE_WALL) {
@@ -2772,7 +2787,7 @@ Object* _obj_sight_blocking_at(Object* excludeObj, int tile, int elevation)
             && (object->flags & OBJECT_HIDDEN) == 0
             && (object->flags & OBJECT_LIGHT_THRU) == 0
             && object != excludeObj) {
-            int objectType = FID_TYPE(object->fid);
+            ObjectType objectType = objectTypeFromFid(object->fid);
             if (objectType == OBJ_TYPE_SCENERY || objectType == OBJ_TYPE_WALL) {
                 return object;
             }
@@ -2849,7 +2864,7 @@ bool objectWithinWalkDistance(Object* critter, Object* target)
 }
 
 // 0x48BC38 obj_create_list
-int objectListCreate(int tile, int elevation, int objectType, Object*** objectListPtr)
+int objectListCreate(int tile, int elevation, ObjectType objectType, Object*** objectListPtr)
 {
     if (objectListPtr == nullptr) {
         return -1;
@@ -2863,7 +2878,7 @@ int objectListCreate(int tile, int elevation, int objectType, Object*** objectLi
                 Object* obj = objectListNode->obj;
                 if ((obj->flags & OBJECT_HIDDEN) == 0
                     && obj->elevation == elevation
-                    && FID_TYPE(obj->fid) == objectType) {
+                    && objectTypeFromFid(obj->fid) == objectType) {
                     count++;
                 }
                 objectListNode = objectListNode->next;
@@ -2875,7 +2890,7 @@ int objectListCreate(int tile, int elevation, int objectType, Object*** objectLi
             Object* obj = objectListNode->obj;
             if ((obj->flags & OBJECT_HIDDEN) == 0
                 && obj->elevation == elevation
-                && FID_TYPE(objectListNode->obj->fid) == objectType) {
+                && objectTypeFromFid(objectListNode->obj->fid) == objectType) {
                 count++;
             }
             objectListNode = objectListNode->next;
@@ -2898,7 +2913,7 @@ int objectListCreate(int tile, int elevation, int objectType, Object*** objectLi
                 Object* obj = objectListNode->obj;
                 if ((obj->flags & OBJECT_HIDDEN) == 0
                     && obj->elevation == elevation
-                    && FID_TYPE(obj->fid) == objectType) {
+                    && objectTypeFromFid(obj->fid) == objectType) {
                     *objects++ = obj;
                 }
                 objectListNode = objectListNode->next;
@@ -2910,7 +2925,7 @@ int objectListCreate(int tile, int elevation, int objectType, Object*** objectLi
             Object* obj = objectListNode->obj;
             if ((obj->flags & OBJECT_HIDDEN) == 0
                 && obj->elevation == elevation
-                && FID_TYPE(obj->fid) == objectType) {
+                && objectTypeFromFid(obj->fid) == objectType) {
                 *objects++ = obj;
             }
             objectListNode = objectListNode->next;
@@ -3141,7 +3156,7 @@ int _obj_intersects_with(Object* object, int x, int y)
                                 flags |= 0x02;
                             }
                         } else {
-                            int type = FID_TYPE(object->fid);
+                            ObjectType type = objectTypeFromFid(object->fid);
                             if (type == OBJ_TYPE_SCENERY || type == OBJ_TYPE_WALL) {
                                 Proto* proto;
                                 protoGetProto(object->pid, &proto);
@@ -3179,7 +3194,7 @@ int _obj_intersects_with(Object* object, int x, int y)
 }
 
 // 0x48C5C4 obj_create_intersect_list
-int _obj_create_intersect_list(int x, int y, int elevation, int objectType, ObjectWithFlags** entriesPtr)
+int _obj_create_intersect_list(int x, int y, int elevation, ObjectType objectType, ObjectWithFlags** entriesPtr)
 {
     int upperLeftTile = tileFromScreenXY(x - 320, y - 240, true);
     *entriesPtr = nullptr;
@@ -3205,7 +3220,7 @@ int _obj_create_intersect_list(int x, int y, int elevation, int objectType, Obje
                 }
 
                 if (object->elevation == elevation
-                    && (objectType == -1 || FID_TYPE(object->fid) == objectType)
+                    && (objectType == OBJ_TYPE_INVALID || objectTypeFromFid(object->fid) == objectType)
                     && object != gEgg) {
                     int flags = _obj_intersects_with(object, x, y);
                     if (flags != 0) {
@@ -3313,7 +3328,7 @@ void _obj_process_seen()
 // 0x48C8E4 object_name
 char* objectGetName(Object* obj)
 {
-    int objectType = FID_TYPE(obj->fid);
+    ObjectType objectType = objectTypeFromFid(obj->fid);
     switch (objectType) {
     case OBJ_TYPE_ITEM:
         return itemGetName(obj);
@@ -3327,7 +3342,7 @@ char* objectGetName(Object* obj)
 // 0x48C914 object_description
 char* objectGetDescription(Object* obj)
 {
-    if (FID_TYPE(obj->fid) == OBJ_TYPE_ITEM) {
+    if (objectTypeFromFid(obj->fid) == OBJ_TYPE_ITEM) {
         return itemGetDescription(obj);
     }
 
@@ -3375,11 +3390,11 @@ void _obj_preload_art_cache(int flags)
     int v11 = gObjectFidsLength;
     int v12 = gObjectFidsLength;
 
-    if (FID_TYPE(gObjectFids[v12 - 1]) == OBJ_TYPE_WALL) {
-        int objectType = OBJ_TYPE_ITEM;
+    if (objectTypeFromFid(gObjectFids[v12 - 1]) == OBJ_TYPE_WALL) {
+        ObjectType objectType = OBJ_TYPE_ITEM;
         do {
             v11--;
-            objectType = FID_TYPE(gObjectFids[v12 - 1]);
+            objectType = objectTypeFromFid(gObjectFids[v12 - 1]);
             v12--;
         } while (objectType == OBJ_TYPE_WALL);
         v11++;
@@ -3400,7 +3415,7 @@ void _obj_preload_art_cache(int flags)
 
     for (int i = 0; i < 4096; i++) {
         if (arr[i] != 0) {
-            int fid = buildFid(OBJ_TYPE_TILE, i, 0, 0, 0);
+            int fid = buildFid(OBJ_TYPE_TILE, i);
             if (artLock(fid, &cache_handle) != nullptr) {
                 artUnlock(cache_handle);
             }
@@ -3634,7 +3649,7 @@ static void _obj_light_table_init()
 {
     for (int s = 0; s < 2; s++) {
         int v4 = gCenterTile + s;
-        for (int i = 0; i < ROTATION_COUNT; i++) {
+        for (Rotation i = ROTATION_FIRST; i < ROTATION_COUNT; i++) {
             int v15 = 8;
             int* p = _light_offsets[v4 & 1][i];
             for (int j = 0; j < 8; j++) {
@@ -3692,7 +3707,7 @@ static int _obj_save_obj(File* stream, Object* object)
 
     CritterCombatData* combatData = nullptr;
     Object* whoHitMe = nullptr;
-    if (PID_TYPE(object->pid) == OBJ_TYPE_CRITTER) {
+    if (objectTypeFromPid(object->pid) == OBJ_TYPE_CRITTER) {
         combatData = &(object->data.critter.combat);
         whoHitMe = objectPrepareWhoHitMeForSave(combatData);
     }
@@ -3701,7 +3716,7 @@ static int _obj_save_obj(File* stream, Object* object)
         return -1;
     }
 
-    if (PID_TYPE(object->pid) == OBJ_TYPE_CRITTER) {
+    if (objectTypeFromPid(object->pid) == OBJ_TYPE_CRITTER) {
         combatData->whoHitMe = whoHitMe;
     }
 
@@ -3823,7 +3838,7 @@ int _obj_load_dude(File* stream)
 {
     int savedTile = gDude->tile;
     int savedElevation = gDude->elevation;
-    int savedRotation = gDude->rotation;
+    Rotation savedRotation = gDude->rotation;
     int savedOid = gDude->id;
 
     scriptsClearDudeScript();
@@ -3847,8 +3862,8 @@ int _obj_load_dude(File* stream)
     int newElevation = gDude->elevation;
     gDude->elevation = savedElevation;
 
-    int newRotation = gDude->rotation;
-    gDude->rotation = newRotation;
+    Rotation newRotation = gDude->rotation;
+    gDude->rotation = savedRotation;
 
     scriptsSetDudeScript();
 
@@ -4056,8 +4071,8 @@ static void _obj_insert(ObjectListNode* objectListNode)
                 }
 
                 if ((obj->flags & OBJECT_FLAT) == (objectListNode->obj->flags & OBJECT_FLAT)) {
-                    if (FID_TYPE(obj->fid) == OBJ_TYPE_CRITTER
-                        && FID_TYPE(objectListNode->obj->fid) == OBJ_TYPE_CRITTER
+                    if (objectTypeFromFid(obj->fid) == OBJ_TYPE_CRITTER
+                        && objectTypeFromFid(objectListNode->obj->fid) == OBJ_TYPE_CRITTER
                         && MpIsNetworkedCritter(obj)
                         && MpIsNetworkedCritter(objectListNode->obj)) {
                         uint32_t currentNetId = MpGetObjNetId(obj);
@@ -4254,7 +4269,7 @@ static int _obj_adjust_light(Object* obj, int a2, Rect* rect)
 
     for (int index = 0; index < 36; index++) {
         if (obj->lightDistance >= _light_distance[index]) {
-            for (int rotation = 0; rotation < ROTATION_COUNT; rotation++) {
+            for (Rotation rotation = ROTATION_FIRST; rotation < ROTATION_COUNT; rotation++) {
                 int v14;
                 int nextRotation = (rotation + 1) % ROTATION_COUNT;
                 int eax;
@@ -4765,7 +4780,7 @@ static int _obj_adjust_light(Object* obj, int a2, Rect* rect)
 
                                     v14 = (objectListNode->obj->flags & OBJECT_LIGHT_THRU) == 0;
 
-                                    if (FID_TYPE(objectListNode->obj->fid) == OBJ_TYPE_WALL) {
+                                    if (objectTypeFromFid(objectListNode->obj->fid) == OBJ_TYPE_WALL) {
                                         if ((objectListNode->obj->flags & OBJECT_FLAT) == 0) {
                                             Proto* proto;
                                             protoGetProto(objectListNode->obj->pid, &proto);
@@ -5096,7 +5111,7 @@ static void objectDrawOutline(Object* object, Rect* rect)
 // 0x48F1B0 obj_render_object
 static void _obj_render_object(Object* object, Rect* rect, int light)
 {
-    int type = FID_TYPE(object->fid);
+    ObjectType type = objectTypeFromFid(object->fid);
     if (artIsObjectTypeHidden(type)) {
         return;
     }
@@ -5167,87 +5182,121 @@ static void _obj_render_object(Object* object, Rect* rect, int light)
             Proto* proto;
             protoGetProto(object->pid, &proto);
 
-            bool v17;
-            int extendedFlags = proto->critter.extendedFlags;
-            if ((extendedFlags & PROTO_EXT_FLAG_HIDDEN) != 0 || (extendedFlags & PROTO_EXT_FLAG_WEST_CORNER) != 0) {
-                // TODO: Verify this visibility branch against the original logic.
-                v17 = tileIsInFrontOf(object->tile, gDude->tile);
-                if (!v17
-                    || !tileIsToRightOf(object->tile, gDude->tile)
-                    || (object->flags & OBJECT_WALL_TRANS_END) == 0) {
-                    // nothing
-                } else {
-                    v17 = false;
-                }
-            } else if ((extendedFlags & PROTO_EXT_FLAG_NORTH_CORNER) != 0) {
-                // NOTE: Original code used bitwise OR here; logical OR is clearer.
-                v17 = tileIsInFrontOf(object->tile, gDude->tile)
-                    || tileIsToRightOf(gDude->tile, object->tile);
-            } else if ((extendedFlags & PROTO_EXT_FLAG_SOUTH_CORNER) != 0) {
-                v17 = tileIsInFrontOf(object->tile, gDude->tile)
-                    && tileIsToRightOf(gDude->tile, object->tile);
-            } else {
-                v17 = tileIsToRightOf(gDude->tile, object->tile);
-                if (v17
-                    && tileIsInFrontOf(gDude->tile, object->tile)
-                    && (object->flags & OBJECT_WALL_TRANS_END) != 0) {
-                    v17 = 0;
-                }
-            }
+            // Co-op: the transparency circle must be punched for every player
+            // this wall hides, not just the local dude. Collect the anchors
+            // (local dude + remote avatars) and run the vanilla behind-wall
+            // test per anchor, punching a circle at each qualifying player.
+            Object* anchors[NET_MAX_PLAYERS + 1];
+            int anchorCount = MpGetCircleAnchors(anchors, NET_MAX_PLAYERS + 1);
 
-            if (v17) {
-                CacheEntry* eggHandle;
-                Art* egg = artLock(gEgg->fid, &eggHandle);
-                if (egg == nullptr) {
-                    return;
-                }
-
+            CacheEntry* eggHandle;
+            Art* egg = artLock(gEgg->fid, &eggHandle);
+            if (egg != nullptr) {
                 int eggWidth;
                 int eggHeight;
-                artGetSize(egg, 0, 0, &eggWidth, &eggHeight);
+                artGetSize(egg, 0, ROTATION_NE, &eggWidth, &eggHeight);
 
-                int eggScreenX;
-                int eggScreenY;
-                tileToScreenXY(gEgg->tile, &eggScreenX, &eggScreenY);
-                eggScreenX += 16;
-                eggScreenY += 8;
+                int extendedFlags = proto->critter.extendedFlags;
 
-                eggScreenX += egg->xOffsets[0];
-                eggScreenY += egg->yOffsets[0];
+                Rect eggRects[NET_MAX_PLAYERS + 1];
+                Rect updatedEggRects[NET_MAX_PLAYERS + 1];
+                bool qualifies[NET_MAX_PLAYERS + 1];
+                for (int a = 0; a < anchorCount; a++) {
+                    qualifies[a] = false;
+                    Object* anchor = anchors[a];
+                    if (anchor == nullptr || (anchor->flags & OBJECT_HIDDEN) != 0
+                        || !hexGridTileIsValid(anchor->tile) || !elevationIsValid(anchor->elevation)) {
+                        continue;
+                    }
 
-                eggScreenX += gEgg->x;
-                eggScreenY += gEgg->y;
+                    bool v17;
+                    if ((extendedFlags & PROTO_EXT_FLAG_HIDDEN) != 0 || (extendedFlags & PROTO_EXT_FLAG_WEST_CORNER) != 0) {
+                        // TODO: Verify this visibility branch against the original logic.
+                        v17 = tileIsInFrontOf(object->tile, anchor->tile);
+                        if (!v17
+                            || !tileIsToRightOf(object->tile, anchor->tile)
+                            || (object->flags & OBJECT_WALL_TRANS_END) == 0) {
+                            // nothing
+                        } else {
+                            v17 = false;
+                        }
+                    } else if ((extendedFlags & PROTO_EXT_FLAG_NORTH_CORNER) != 0) {
+                        // NOTE: Original code used bitwise OR here; logical OR is clearer.
+                        v17 = tileIsInFrontOf(object->tile, anchor->tile)
+                            || tileIsToRightOf(anchor->tile, object->tile);
+                    } else if ((extendedFlags & PROTO_EXT_FLAG_SOUTH_CORNER) != 0) {
+                        v17 = tileIsInFrontOf(object->tile, anchor->tile)
+                            && tileIsToRightOf(anchor->tile, object->tile);
+                    } else {
+                        v17 = tileIsToRightOf(anchor->tile, object->tile);
+                        if (v17
+                            && tileIsInFrontOf(anchor->tile, object->tile)
+                            && (object->flags & OBJECT_WALL_TRANS_END) != 0) {
+                            v17 = 0;
+                        }
+                    }
+                    if (!v17) {
+                        continue;
+                    }
 
-                Rect eggRect;
-                eggRect.left = eggScreenX - eggWidth / 2;
-                eggRect.top = eggScreenY - (eggHeight - 1);
-                eggRect.right = eggRect.left + eggWidth - 1;
-                eggRect.bottom = eggScreenY;
+                    int eggScreenX;
+                    int eggScreenY;
+                    tileToScreenXY(anchor->tile, &eggScreenX, &eggScreenY);
+                    eggScreenX += 16;
+                    eggScreenY += 8;
 
-                gEgg->sx = eggRect.left;
-                gEgg->sy = eggRect.top;
+                    eggScreenX += egg->xOffsets[0];
+                    eggScreenY += egg->yOffsets[0];
 
-                Rect updatedEggRect;
-                if (rectIntersection(&eggRect, &objectRect, &updatedEggRect) == 0) {
+                    eggScreenX += anchor->x;
+                    eggScreenY += anchor->y;
+
+                    Rect eggRect;
+                    eggRect.left = eggScreenX - eggWidth / 2;
+                    eggRect.top = eggScreenY - (eggHeight - 1);
+                    eggRect.right = eggRect.left + eggWidth - 1;
+                    eggRect.bottom = eggScreenY;
+
+                    eggRects[a] = eggRect;
+                    if (anchor == gDude) {
+                        gEgg->sx = eggRect.left;
+                        gEgg->sy = eggRect.top;
+                    }
+
+                    if (rectIntersection(&eggRect, &objectRect, &updatedEggRects[a]) == 0) {
+                        qualifies[a] = true;
+                    }
+                }
+
+                // Phase 1: darken the wall around every qualifying egg circle
+                // (identical to the vanilla per-egg handling, per player).
+                bool anyQualifies = false;
+                for (int a = 0; a < anchorCount; a++) {
+                    if (!qualifies[a]) {
+                        continue;
+                    }
+                    anyQualifies = true;
+                    Rect* updatedEggRect = &updatedEggRects[a];
+                    Rect* eggRect = &eggRects[a];
+
                     Rect rects[4];
-
                     rects[0].left = objectRect.left;
                     rects[0].top = objectRect.top;
                     rects[0].right = objectRect.right;
-                    rects[0].bottom = updatedEggRect.top - 1;
+                    rects[0].bottom = updatedEggRect->top - 1;
 
                     rects[1].left = objectRect.left;
-                    rects[1].top = updatedEggRect.top;
-                    rects[1].right = updatedEggRect.left - 1;
-                    rects[1].bottom = updatedEggRect.bottom;
+                    rects[1].top = updatedEggRect->top;
+                    rects[1].right = updatedEggRect->left - 1;
+                    rects[1].bottom = updatedEggRect->bottom;
 
-                    rects[2].left = updatedEggRect.right + 1;
-                    rects[2].top = updatedEggRect.top;
+                    rects[2].left = updatedEggRect->right + 1;
+                    rects[2].top = updatedEggRect->top;
                     rects[2].right = objectRect.right;
-                    rects[2].bottom = updatedEggRect.bottom;
+                    rects[2].bottom = updatedEggRect->bottom;
 
                     rects[3].left = objectRect.left;
-                    rects[3].top = updatedEggRect.bottom + 1;
+                    rects[3].top = updatedEggRect->bottom + 1;
                     rects[3].right = objectRect.right;
                     rects[3].bottom = objectRect.bottom;
 
@@ -5258,18 +5307,29 @@ static void _obj_render_object(Object* object, Rect* rect, int light)
                             _dark_trans_buf_to_buf(sp, v21->right - v21->left + 1, v21->bottom - v21->top + 1, frameWidth, gObjectsWindowBuffer, v21->left, v21->top, gObjectsWindowPitch, light);
                         }
                     }
+                }
 
-                    unsigned char* mask = artGetFrameData(egg, 0, 0);
-                    _intensity_mask_buf_to_buf(
-                        src + frameWidth * (updatedEggRect.top - objectRect.top) + (updatedEggRect.left - objectRect.left),
-                        updatedEggRect.right - updatedEggRect.left + 1,
-                        updatedEggRect.bottom - updatedEggRect.top + 1,
-                        frameWidth,
-                        gObjectsWindowBuffer + gObjectsWindowPitch * updatedEggRect.top + updatedEggRect.left,
-                        gObjectsWindowPitch,
-                        mask + eggWidth * (updatedEggRect.top - eggRect.top) + (updatedEggRect.left - eggRect.left),
-                        eggWidth,
-                        light);
+                // Phase 2: restore the wall art inside every egg circle from
+                // the original object buffer (the see-through hole).
+                if (anyQualifies) {
+                    unsigned char* mask = artGetFrameData(egg);
+                    for (int a = 0; a < anchorCount; a++) {
+                        if (!qualifies[a]) {
+                            continue;
+                        }
+                        Rect* updatedEggRect = &updatedEggRects[a];
+                        Rect* eggRect = &eggRects[a];
+                        _intensity_mask_buf_to_buf(
+                            src + frameWidth * (updatedEggRect->top - objectRect.top) + (updatedEggRect->left - objectRect.left),
+                            updatedEggRect->right - updatedEggRect->left + 1,
+                            updatedEggRect->bottom - updatedEggRect->top + 1,
+                            frameWidth,
+                            gObjectsWindowBuffer + gObjectsWindowPitch * updatedEggRect->top + updatedEggRect->left,
+                            gObjectsWindowPitch,
+                            mask + eggWidth * (updatedEggRect->top - eggRect->top) + (updatedEggRect->left - eggRect->left),
+                            eggWidth,
+                            light);
+                    }
                     artUnlock(eggHandle);
                     artUnlock(cacheEntry);
                     return;
@@ -5309,7 +5369,7 @@ static void _obj_render_object(Object* object, Rect* rect, int light)
 // 0x48FA14 obj_fix_violence_settings
 void _obj_fix_violence_settings(int* fid)
 {
-    if (FID_TYPE(*fid) != OBJ_TYPE_CRITTER) {
+    if (objectTypeFromFid(*fid) != OBJ_TYPE_CRITTER) {
         return;
     }
 
@@ -5347,7 +5407,7 @@ void _obj_fix_violence_settings(int* fid)
         anim = (anim == ANIM_FALL_BACK_BLOOD_SF)
             ? ANIM_FALL_BACK_SF
             : ANIM_FALL_FRONT_SF;
-        *fid = buildFid(OBJ_TYPE_CRITTER, *fid & 0xFFF, anim, weaponAnimationFromFid(*fid), FID_ROTATION(*fid));
+        *fid = buildFid(OBJ_TYPE_CRITTER, *fid & 0xFFF, anim, weaponAnimationFromFid(*fid), rotationFromFid(*fid));
     }
 
     if (shouldResetViolenceLevel) {
@@ -5361,8 +5421,8 @@ static int _obj_preload_sort(const void* a1, const void* a2)
     int v1 = *(int*)a1;
     int v2 = *(int*)a2;
 
-    int v3 = _cd_order[FID_TYPE(v1)];
-    int v4 = _cd_order[FID_TYPE(v2)];
+    int v3 = _cd_order[objectTypeFromFid(v1)];
+    int v4 = _cd_order[objectTypeFromFid(v2)];
 
     int cmp = v3 - v4;
     if (cmp != 0) {
@@ -5383,11 +5443,11 @@ static int _obj_preload_sort(const void* a1, const void* a2)
     return cmp;
 }
 
-Object* objectTypedFindById(int id, int type)
+Object* objectTypedFindById(int id, ObjectType type)
 {
     Object* obj = objectFindFirst();
     while (obj != nullptr) {
-        if (obj->id == id && PID_TYPE(obj->pid) == type) {
+        if (obj->id == id && objectTypeFromPid(obj->pid) == type) {
             return obj;
         }
         obj = objectFindNext();

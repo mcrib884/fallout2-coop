@@ -32,6 +32,14 @@ int objectUse(Object* user, Object* targetObj);
 int objectUseDoor(Object* user, Object* doorObj, bool animateOnly = false);
 int objectUseContainer(Object* critter, Object* item);
 int objectUseSkillOn(Object* source, Object* target, Skill skill);
+// Co-op: deferred remote-action wrappers around objectUse / objectUseItemOn /
+// objectUseSkillOn. A remote player's action registers a walk animation whose
+// terminal callback runs AFTER the accepting packet handler (and its
+// remote-action scope) exited; these re-open the scope at execution time so
+// the script's monitor feedback relays to the acting player only.
+int mpObjectUseRemote(Object* user, Object* targetObj);
+int mpObjectUseItemOnRemote(Object* user, Object* targetObj, Object* item);
+int mpObjectUseSkillOnRemote(Object* source, Object* target, Skill skill);
 bool objectIsLocked(Object* obj);
 int objectLock(Object* obj);
 int objectUnlock(Object* obj);

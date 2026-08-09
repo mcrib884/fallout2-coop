@@ -555,7 +555,7 @@ namespace {
 
         handled = true;
 
-        switch (PID_TYPE(object->pid)) {
+        switch (objectTypeFromPid(object->pid)) {
         case OBJ_TYPE_CRITTER:
             return getCritterObjectData(object, field);
         case OBJ_TYPE_ITEM:
@@ -588,7 +588,7 @@ namespace {
             return objectSetFrame(object, intValue, nullptr) == 0;
         case ObjectDataField::Rotation:
             if (!intDataValue(data, intValue)) return false;
-            return objectSetRotation(object, intValue, nullptr) == 0;
+            return objectSetRotation(object, static_cast<Rotation>(intValue), nullptr) == 0;
         case ObjectDataField::Fid:
             if (!intDataValue(data, intValue)) return false;
             return objectSetFid(object, intValue, nullptr) == 0;
@@ -750,7 +750,7 @@ namespace {
             return changed;
         }
 
-        switch (PID_TYPE(object->pid)) {
+        switch (objectTypeFromPid(object->pid)) {
         case OBJ_TYPE_CRITTER:
             return setCritterObjectData(object, field, data);
         case OBJ_TYPE_ITEM:
@@ -775,6 +775,7 @@ static void mf_display_stats(OpcodeContext& ctx);
 static void mf_draw_image(OpcodeContext& ctx);
 static void mf_draw_image_scaled(OpcodeContext& ctx);
 static void mf_encounter_detection(OpcodeContext& ctx);
+static void mf_encounter_intros(OpcodeContext& ctx);
 static void mf_get_combat_free_move(OpcodeContext& ctx);
 static void mf_get_cursor_mode(OpcodeContext& ctx);
 static void mf_get_flags(OpcodeContext& ctx);
@@ -811,6 +812,7 @@ static void mf_rest_option_msgs(OpcodeContext& ctx);
 static void mf_set_car_intface_art(OpcodeContext& ctx);
 static void mf_set_combat_free_move(OpcodeContext& ctx);
 static void mf_set_cursor_mode(OpcodeContext& ctx);
+static void mf_set_fo1_hit_chance(OpcodeContext& ctx);
 static void mf_set_flags(OpcodeContext& ctx);
 static void mf_set_iface_tag_text(OpcodeContext& ctx);
 static void mf_set_reaction_thresholds(OpcodeContext& ctx);
@@ -857,6 +859,7 @@ const MetaruleInfo kMetarules[] = {
     { "draw_image", mf_draw_image, 1, 5, -1, { ARG_INTSTR, ARG_INT, ARG_INT, ARG_INT, ARG_INT } },
     { "draw_image_scaled", mf_draw_image_scaled, 1, 6, -1, { ARG_INTSTR, ARG_INT, ARG_INT, ARG_INT, ARG_INT, ARG_INT } },
     { "encounter_detection", mf_encounter_detection, 1, 1, -1, { ARG_INT } },
+    { "encounter_intros", mf_encounter_intros, 1, 1, -1, { ARG_INT } },
     // {"exec_map_update_scripts",   mf_exec_map_update_scripts,   0, 0},
     { "floor2", mf_floor2, 1, 1, 0, { ARG_NUMBER } },
     // {"get_can_rest_on_map",       mf_get_rest_on_map,           2, 2, -1, {ARG_INT, ARG_INT}},
@@ -917,6 +920,7 @@ const MetaruleInfo kMetarules[] = {
     // {"set_fake_perk_npc",         mf_set_fake_perk_npc,         5, 5, -1, {ARG_OBJECT, ARG_STRING, ARG_INT, ARG_INT, ARG_STRING}},
     // {"set_fake_trait_npc",        mf_set_fake_trait_npc,        5, 5, -1, {ARG_OBJECT, ARG_STRING, ARG_INT, ARG_INT, ARG_STRING}},
     { "set_flags", mf_set_flags, 2, 2, -1, { ARG_OBJECT, ARG_INT } },
+    { "set_fo1_hit_chance", mf_set_fo1_hit_chance, 1, 1, -1, { ARG_INT } },
     { "set_iface_tag_text", mf_set_iface_tag_text, 3, 3, -1, { ARG_INT, ARG_STRING, ARG_INT } },
     { "set_ini_setting", mf_set_ini_setting, 2, 2, -1, { ARG_STRING, ARG_INTSTR } },
     // {"set_map_enter_position",    mf_set_map_enter_position,    3, 3, -1, {ARG_INT, ARG_INT, ARG_INT}},
@@ -1055,7 +1059,7 @@ void mf_art_cache_flush(OpcodeContext& ctx)
 void mf_art_frame_data(OpcodeContext& ctx)
 {
     int frame = ctx.numArgs() > 1 ? ctx.arg(1).asInt() : 0;
-    int direction = ctx.numArgs() > 2 ? ctx.arg(2).asInt() : 0;
+    Rotation rotation = ctx.numArgs() > 2 ? static_cast<Rotation>(ctx.arg(2).asInt()) : ROTATION_NE;
 
     if (ctx.arg(0).isInt() && ctx.arg(0).asInt() == -1) {
         ctx.setReturn(-1);
@@ -1065,14 +1069,14 @@ void mf_art_frame_data(OpcodeContext& ctx)
     FrmImage image;
     if (ctx.arg(0).isInt()) {
         int fid = ctx.arg(0).asInt();
-        if (!image.lock(fid, frame, direction)) {
+        if (!image.lock(fid, frame, rotation)) {
             ctx.printError("%s() - cannot load art by FID: %d", ctx.name(), fid);
             ctx.setReturn(-1);
             return;
         }
     } else {
         const char* path = ctx.stringArg(0);
-        if (!image.lock(path, frame, direction)) {
+        if (!image.lock(path, frame, rotation)) {
             ctx.printError("%s() - cannot load art from file: %s", ctx.name(), path);
             ctx.setReturn(-1);
             return;
@@ -1262,7 +1266,7 @@ void mf_get_object_ai_data(OpcodeContext& ctx)
     const int aiParam = ctx.arg(1).asInt();
 
     ProgramValue result(-1);
-    if (PID_TYPE(object->pid) != OBJ_TYPE_CRITTER) {
+    if (objectTypeFromPid(object->pid) != OBJ_TYPE_CRITTER) {
         ctx.setReturn(result);
         return;
     }
@@ -1458,7 +1462,7 @@ void mf_get_window_attribute(OpcodeContext& ctx)
     }
 }
 
-static bool loadSfallArtImage(OpcodeContext& ctx, int artArg, int frame, int direction, FrmImage& image, int& fid)
+static bool loadSfallArtImage(OpcodeContext& ctx, int artArg, int frame, Rotation rotation, FrmImage& image, int& fid)
 {
     if (ctx.arg(artArg).isInt() && ctx.arg(artArg).asInt() == -1) {
         return false;
@@ -1466,23 +1470,23 @@ static bool loadSfallArtImage(OpcodeContext& ctx, int artArg, int frame, int dir
 
     if (ctx.arg(artArg).isInt()) {
         fid = ctx.arg(artArg).asInt();
-        int frameDirection = 0;
+        Rotation frameRotation = ROTATION_NE;
         int lockFid = fid;
-        if (FID_TYPE(fid) == OBJ_TYPE_CRITTER) {
-            frameDirection = direction >= 0 ? direction : FID_ROTATION(fid);
-            if (direction >= 0) {
-                lockFid = (direction << 28) | (fid & 0x0FFFFFFF);
+        if (objectTypeFromFid(fid) == OBJ_TYPE_CRITTER) {
+            frameRotation = rotationIsValid(rotation) ? rotation : rotationFromFid(fid);
+            if (rotationIsValid(rotation)) {
+                lockFid = (rotation << 28) | (fid & 0x0FFFFFFF);
             }
         }
 
-        if (!image.lock(lockFid, frame, frameDirection)) {
+        if (!image.lock(lockFid, frame, frameRotation)) {
             ctx.printError("%s() - cannot load art by FID: %d", ctx.name(), fid);
             return false;
         }
     } else {
         const char* path = ctx.stringArg(artArg);
-        int frameDirection = direction >= 0 ? direction : 0;
-        if (!image.lock(path, frame, frameDirection)) {
+        Rotation frameRotation = rotationIsValid(rotation) ? rotation : ROTATION_NE;
+        if (!image.lock(path, frame, frameRotation)) {
             ctx.printError("%s() - cannot load art from file: %s", ctx.name(), path);
             return false;
         }
@@ -1554,7 +1558,7 @@ static int drawSfallImageToScriptWindow(OpcodeContext& ctx, bool scaled)
 
     FrmImage image;
     int fid = -1;
-    if (!loadSfallArtImage(ctx, 0, frame, -1, image, fid)) {
+    if (!loadSfallArtImage(ctx, 0, frame, ROTATION_INVALID, image, fid)) {
         return -1;
     }
 
@@ -1609,13 +1613,13 @@ static void mf_interface_art_draw(OpcodeContext& ctx)
     }
 
     int frame = ctx.numArgs() > 4 ? ctx.arg(4).asInt() : 0;
-    int direction = -1;
+    Rotation rotation = ROTATION_INVALID;
     int scaledWidth = -1;
     int scaledHeight = -1;
     if (ctx.numArgs() > 5) {
         int arrayId = ctx.arg(5).asInt();
         if (ArrayExists(arrayId)) {
-            direction = GetArray(arrayId, ProgramValue(0), ctx.program()).asInt();
+            rotation = static_cast<Rotation>(GetArray(arrayId, ProgramValue(0), ctx.program()).asInt());
 
             int arrayLength = LenArray(arrayId);
             if (arrayLength > 1) {
@@ -1630,14 +1634,14 @@ static void mf_interface_art_draw(OpcodeContext& ctx)
 
     FrmImage image;
     int fid = -1;
-    if (!loadSfallArtImage(ctx, 1, frame, direction, image, fid)) {
+    if (!loadSfallArtImage(ctx, 1, frame, rotation, image, fid)) {
         ctx.setReturn(-1);
         return;
     }
 
     int xOffset = 0;
     int yOffset = 0;
-    if (ctx.arg(1).isInt() && FID_TYPE(fid) == OBJ_TYPE_CRITTER && direction >= 0) {
+    if (ctx.arg(1).isInt() && objectTypeFromFid(fid) == OBJ_TYPE_CRITTER && rotation >= ROTATION_FIRST) {
         xOffset = image.getXOffset();
         yOffset = image.getYOffset();
     }
@@ -1668,7 +1672,7 @@ void mf_inventory_redraw(OpcodeContext& ctx)
 void mf_item_weight(OpcodeContext& ctx)
 {
     Object* object = ctx.arg(0).asObject();
-    if (PID_TYPE(object->pid) != OBJ_TYPE_ITEM) {
+    if (objectTypeFromPid(object->pid) != OBJ_TYPE_ITEM) {
         ctx.printError("%s() - expected item object.", ctx.name());
         ctx.setReturn(0);
         return;
@@ -1745,7 +1749,7 @@ void mf_obj_under_cursor(OpcodeContext& ctx)
     int onlyCritter = ctx.arg(0).asInt();
     int includeDude = ctx.arg(1).asInt();
 
-    Object* object = gameMouseGetObjectUnderCursor(onlyCritter ? OBJ_TYPE_CRITTER : -1, includeDude, gElevation);
+    Object* object = gameMouseGetObjectUnderCursor(onlyCritter ? OBJ_TYPE_CRITTER : OBJ_TYPE_INVALID, includeDude, gElevation);
 
     ctx.setReturn(object);
 }
@@ -1781,7 +1785,7 @@ static void mf_objects_in_radius(OpcodeContext& ctx)
     int endTile;
     for (int tile = objectsInRadiusFirstTile(sourceTile, radius, &endTile); tile < endTile; tile++) {
         for (Object* object = objectFindFirstAtLocation(elevation, tile); object != nullptr; object = objectFindNextAtLocation()) {
-            if (type != -1 && (object->pid == -1 || PID_TYPE(object->pid) != type)) {
+            if (type != -1 && (object->pid == -1 || objectTypeFromPid(object->pid) != type)) {
                 continue;
             }
 
@@ -1827,6 +1831,11 @@ void mf_set_cursor_mode(OpcodeContext& ctx)
 {
     int mode = ctx.arg(0).asInt();
     gameMouseSetMode(mode);
+}
+
+void mf_set_fo1_hit_chance(OpcodeContext& ctx)
+{
+    combatSetFo1HitChance(ctx.arg(0).asInt() != 0);
 }
 
 void mf_set_flags(OpcodeContext& ctx)
@@ -2009,7 +2018,7 @@ void mf_unwield_slot(OpcodeContext& ctx)
         return;
     }
 
-    if (PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
+    if (objectTypeFromPid(critter->pid) != OBJ_TYPE_CRITTER) {
         ctx.printError("%s() - the object is not a critter.", ctx.name());
         ctx.setReturn(-1);
         return;
@@ -2082,6 +2091,11 @@ static void mf_rest_option_msgs(OpcodeContext& ctx)
 static void mf_encounter_detection(OpcodeContext& ctx)
 {
     wmSetEncounterDetection(ctx.arg(0).asInt() != 0);
+}
+
+static void mf_encounter_intros(OpcodeContext& ctx)
+{
+    wmSetEncounterIntros(ctx.arg(0).asInt() != 0);
 }
 
 static void mf_set_rest_mode(OpcodeContext& ctx)

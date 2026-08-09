@@ -103,6 +103,7 @@ bool mouseDeviceGetData(MouseData* mouseState)
     }
     mouseState->buttons[0] = (buttons & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
     mouseState->buttons[1] = (buttons & SDL_BUTTON(SDL_BUTTON_RIGHT)) != 0;
+    mouseState->buttons[2] = (buttons & SDL_BUTTON(SDL_BUTTON_MIDDLE)) != 0;
     mouseState->wheelX = gMouseWheelDeltaX;
     mouseState->wheelY = gMouseWheelDeltaY;
 

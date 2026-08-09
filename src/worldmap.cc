@@ -250,7 +250,7 @@ typedef struct EntranceInfo {
     int map;
     int elevation;
     int tile;
-    int rotation;
+    Rotation rotation;
 } EntranceInfo;
 
 typedef struct CityInfo {
@@ -276,7 +276,7 @@ typedef struct MapAmbientSoundEffectInfo {
 typedef struct MapStartPointInfo {
     int elevation;
     int tile;
-    int rotation;
+    Rotation rotation;
 } MapStartPointInfo;
 
 typedef struct MapInfo {
@@ -608,20 +608,20 @@ static const int _can_rest_here[ELEVATION_COUNT] = {
 static int wmRestMode = 0;
 
 // 0x4BC86C
-static const int gDayPartEncounterFrequencyModifiers[DAY_PART_COUNT] = {
+static const int dayPartEncounterFrequencyModifiers[DAY_PART_COUNT] = {
     40,
     30,
     0,
 };
 
 // 0x4BC878
-static const char* gWorldmapEncDefaultMsg[2] = {
+static const char* worldmapEncDefaultMsg[2] = {
     "You detect something up ahead.",
     "Do you wish to encounter it?",
 };
 
 // 0x4BC880
-static MessageListItem gWorldmapMessageListItem;
+static MessageListItem worldmapMessageListItem;
 
 // 0x50EE44 aCricket
 static char _aCricket[] = "cricket";
@@ -834,13 +834,13 @@ static char* wmRemapSfxList[2] = {
 };
 
 // 0x672DB8 wmRndTileDirs
-static int wmRndTileDirs[2];
+static Rotation wmRndTileDirs[2];
 
 // 0x672DC0 wmRndCenterTiles
 static int wmRndCenterTiles[2];
 
 // 0x672DC8 wmRndCenterRotations
-static int wmRndCenterRotations[2];
+static Rotation wmRndCenterRotations[2];
 
 // 0x672DD0 wmRndRotOffsets
 static int wmRndRotOffsets[2];
@@ -994,14 +994,15 @@ static int wmMaxEncBaseTypes;
 // 0x67303C wmMaxEncounterInfoTables
 static int wmMaxEncounterInfoTables;
 
-static bool gTownMapHotkeysFix;
-static double gGameTimeIncRemainder = 0.0;
+static bool townMapHotkeysFix;
+static double gameTimeIncRemainder = 0.0;
 static FrmImage _backgroundFrmImage;
 static FrmImage _townFrmImage;
 static bool wmFaded = false;
 static int wmForceEncounterMapId = -1;
 static unsigned int wmForceEncounterFlags = 0;
 static bool wmEncounterDetectionEnabled = true;
+static bool wmEncounterIntrosEnabled = true;
 static int worldmapTravelDelay;
 static unsigned int wmLastTravelTick;
 static int worldmapTrailMarkers;
@@ -1111,7 +1112,7 @@ int wmWorldMap_init()
     wmWorldMapSaveTempData();
 
     // SFALL
-    configGetBool(&gContentConfig, CONTENT_CONFIG_WORLDMAP_SECTION, "town_map_hotkeys_fix", &gTownMapHotkeysFix, true);
+    configGetBool(&gContentConfig, CONTENT_CONFIG_WORLDMAP_SECTION, "town_map_hotkeys_fix", &townMapHotkeysFix, true);
     configGetInt(&gContentConfig, CONTENT_CONFIG_WORLDMAP_SECTION, "travel_delay", &worldmapTravelDelay, 0);
     worldmapTravelDelay = std::clamp(worldmapTravelDelay, 0, 150);
     configGetInt(&gContentConfig, CONTENT_CONFIG_WORLDMAP_SECTION, "trail_markers", &worldmapTrailMarkers, 0);
@@ -1123,7 +1124,7 @@ int wmWorldMap_init()
     // initialize it.
     for (int citySize = 0; citySize < CITY_SIZE_COUNT; citySize++) {
         CitySizeDescription* citySizeDescription = &(wmSphereData[citySize]);
-        citySizeDescription->fid = buildFid(OBJ_TYPE_INTERFACE, 336 + citySize, 0, 0, 0);
+        citySizeDescription->fid = buildFid(OBJ_TYPE_INTERFACE, 336 + citySize);
     }
 
     messageListRepositorySetStandardMessageList(STANDARD_MESSAGE_LIST_WORLDMAP, &wmMsgFile);
@@ -1181,6 +1182,7 @@ static int wmGenDataInit()
     wmForceEncounterMapId = -1;
     wmForceEncounterFlags = 0;
     wmEncounterDetectionEnabled = true;
+    wmEncounterIntrosEnabled = true;
     wmTerrainNameOverrides.clear();
     wmResetTrailMarkers();
     wmTownTitleOverrides.clear();
@@ -1241,6 +1243,7 @@ static int wmGenDataReset()
     wmForceEncounterMapId = -1;
     wmForceEncounterFlags = 0;
     wmEncounterDetectionEnabled = true;
+    wmEncounterIntrosEnabled = true;
     wmTerrainNameOverrides.clear();
     wmResetTrailMarkers();
     carInterfaceArtFrmId = kDefaultCarInterfaceArtFrmId;
@@ -1377,7 +1380,7 @@ int wmWorldMap_reset()
     wmResetTerrainInfo();
 
     // CE: Fix Pathfinder perk.
-    gGameTimeIncRemainder = 0.0;
+    gameTimeIncRemainder = 0.0;
 
     wmWorldMapLoadTempData();
     wmSetStartWorldView();
@@ -1675,7 +1678,7 @@ static int wmConfigInit()
             // NOTE: Uninline.
             wmTileSlotInit(tile);
 
-            tile->fid = buildFid(OBJ_TYPE_INTERFACE, artIndex, 0, 0, 0);
+            tile->fid = buildFid(OBJ_TYPE_INTERFACE, artIndex);
 
             int encounterDifficulty;
             if (configGetInt(&config, section, "encounter_difficulty", &encounterDifficulty)) {
@@ -2012,7 +2015,7 @@ static int wmReadEncBaseType(char* name, int* valuePtr)
 
             for (int index = 0; index < encounter->entriesLength; index++) {
                 EncounterEntry* encounterEntry = &(encounter->entries[index]);
-                if (PID_TYPE(encounterEntry->pid) == OBJ_TYPE_CRITTER) {
+                if (objectTypeFromPid(encounterEntry->pid) == OBJ_TYPE_CRITTER) {
                     encounterEntry->team = team;
                 }
             }
@@ -2778,14 +2781,14 @@ static int wmAreaInit()
             city->areaId = area_idx;
 
             if (num != -1) {
-                num = buildFid(OBJ_TYPE_INTERFACE, num, 0, 0, 0);
+                num = buildFid(OBJ_TYPE_INTERFACE, num);
             }
 
             city->mapFid = num;
 
             if (configGetInt(&cfg, section, "townmap_label_art_idx", &num)) {
                 if (num != -1) {
-                    num = buildFid(OBJ_TYPE_INTERFACE, num, 0, 0, 0);
+                    num = buildFid(OBJ_TYPE_INTERFACE, num);
                 }
 
                 city->labelFid = num;
@@ -2871,9 +2874,12 @@ static int wmAreaInit()
                     return -1;
                 }
 
-                if (strParseInt(&str, &(entrance->rotation)) == -1) {
+                int rotationInt;
+                if (strParseInt(&str, &rotationInt) == -1) {
                     return -1;
                 }
+
+                entrance->rotation = static_cast<Rotation>(rotationInt);
 
                 city->entrancesLength++;
             }
@@ -2921,7 +2927,7 @@ static int wmEntranceSlotInit(EntranceInfo* entrance)
     entrance->map = -1;
     entrance->elevation = 0;
     entrance->tile = 0;
-    entrance->rotation = 0;
+    entrance->rotation = ROTATION_NE;
 
     return 0;
 }
@@ -3113,7 +3119,7 @@ static int wmRStartSlotInit(MapStartPointInfo* rsp)
 {
     rsp->elevation = 0;
     rsp->tile = -1;
-    rsp->rotation = -1;
+    rsp->rotation = ROTATION_INVALID;
 
     return 0;
 }
@@ -3207,6 +3213,11 @@ void wmSetRestMode(int mode)
 void wmSetEncounterDetection(bool enabled)
 {
     wmEncounterDetectionEnabled = enabled;
+}
+
+void wmSetEncounterIntros(bool enabled)
+{
+    wmEncounterIntrosEnabled = enabled;
 }
 
 bool wmRestModeIsDisabled()
@@ -3882,7 +3893,7 @@ static int wmRndEncounterOccurred(int* mapToLoadPtr)
         int modifiers[DAY_PART_COUNT];
 
         // NOTE: I'm not sure why they're copied.
-        memcpy(modifiers, gDayPartEncounterFrequencyModifiers, sizeof(gDayPartEncounterFrequencyModifiers));
+        memcpy(modifiers, dayPartEncounterFrequencyModifiers, sizeof(dayPartEncounterFrequencyModifiers));
 
         frequency -= modifiers[dayPart];
     }
@@ -3942,8 +3953,8 @@ static int wmRndEncounterOccurred(int* mapToLoadPtr)
     if (randomEncounterIsDetected) {
         MessageListItem messageListItem;
 
-        const char* title = gWorldmapEncDefaultMsg[0];
-        const char* body = gWorldmapEncDefaultMsg[1];
+        const char* title = worldmapEncDefaultMsg[0];
+        const char* body = worldmapEncDefaultMsg[1];
 
         title = getmsg(&wmMsgFile, &messageListItem, 2999);
         body = getmsg(&wmMsgFile, &messageListItem, 3000 + 50 * wmGenData.encounterTableId + wmGenData.encounterEntryId);
@@ -4121,13 +4132,15 @@ int wmSetupRandomEncounter()
     EncounterTable* encounterTable = &(wmEncounterTableList[wmGenData.encounterTableId]);
     EncounterTableEntry* encounterTableEntry = &(encounterTable->entries[wmGenData.encounterEntryId]);
 
-    // SFALL: Display encounter description in one line.
-    char formattedText[512];
-    snprintf(formattedText, sizeof(formattedText),
-        "%s %s",
-        getmsg(&wmMsgFile, &messageListItem, 2998),
-        getmsg(&wmMsgFile, &messageListItem, 3000 + 50 * wmGenData.encounterTableId + wmGenData.encounterEntryId));
-    displayMonitorAddMessage(formattedText);
+    if (wmEncounterIntrosEnabled) {
+        // SFALL: Display encounter description in one line.
+        char formattedText[512];
+        snprintf(formattedText, sizeof(formattedText),
+            "%s %s",
+            getmsg(&wmMsgFile, &messageListItem, 2998),
+            getmsg(&wmMsgFile, &messageListItem, 3000 + 50 * wmGenData.encounterTableId + wmGenData.encounterEntryId));
+        displayMonitorAddMessage(formattedText);
+    }
 
     int gameDifficulty = settings.preferences.game_difficulty;
     switch (encounterTableEntry->scenery) {
@@ -4284,13 +4297,13 @@ static int wmSetupCritterObjs(int encounterIndex, Object** critterPtr, int critt
             }
 
             if (*critterPtr == nullptr) {
-                if (PID_TYPE(encounterEntry->pid) == OBJ_TYPE_CRITTER) {
+                if (objectTypeFromPid(encounterEntry->pid) == OBJ_TYPE_CRITTER) {
                     *critterPtr = object;
                 }
             }
 
             if (encounterEntry->team != -1) {
-                if (PID_TYPE(object->pid) == OBJ_TYPE_CRITTER) {
+                if (objectTypeFromPid(object->pid) == OBJ_TYPE_CRITTER) {
                     object->data.critter.combat.team = encounterEntry->team;
                 }
             }
@@ -4310,8 +4323,8 @@ static int wmSetupCritterObjs(int encounterIndex, Object** critterPtr, int critt
                 objectAttemptPlacement(object, tile, 0, 0);
             }
 
-            int direction = tileGetRotationTo(tile, gDude->tile);
-            objectSetRotation(object, direction, nullptr);
+            Rotation rotation = tileGetRotationTo(tile, gDude->tile);
+            objectSetRotation(object, rotation, nullptr);
 
             for (int itemIndex = 0; itemIndex < encounterEntry->itemsLength; itemIndex++) {
                 EncounterItem* encounterItem = &(encounterEntry->items[itemIndex]);
@@ -4360,8 +4373,8 @@ static int wmSetupCritterObjs(int encounterIndex, Object** critterPtr, int critt
 static int wmSetupRndNextTileNumInit(Encounter* encounter)
 {
     for (int index = 0; index < 2; index++) {
-        wmRndCenterRotations[index] = 0;
-        wmRndTileDirs[index] = 0;
+        wmRndCenterRotations[index] = ROTATION_NE;
+        wmRndTileDirs[index] = ROTATION_NE;
         wmRndCenterTiles[index] = -1;
 
         if (index & 1) {
@@ -4376,7 +4389,7 @@ static int wmSetupRndNextTileNumInit(Encounter* encounter)
     switch (encounter->position) {
     case ENCOUNTER_FORMATION_TYPE_SURROUNDING:
         wmRndCenterTiles[0] = gDude->tile;
-        wmRndTileDirs[0] = randomBetween(0, ROTATION_COUNT - 1);
+        wmRndTileDirs[0] = static_cast<Rotation>(randomBetween(ROTATION_FIRST, ROTATION_LAST));
 
         wmRndOriginalCenterTile = wmRndCenterTiles[0];
 
@@ -4397,8 +4410,8 @@ static int wmSetupRndNextTileNumInit(Encounter* encounter)
             wmRndCenterRotations[0] = rsp->rotation;
             wmRndCenterRotations[1] = wmRndCenterRotations[0];
         } else {
-            wmRndCenterRotations[0] = 0;
-            wmRndCenterRotations[1] = 0;
+            wmRndCenterRotations[0] = ROTATION_NE;
+            wmRndCenterRotations[1] = ROTATION_NE;
 
             wmRndCenterTiles[0] = gDude->tile;
             wmRndCenterTiles[1] = gDude->tile;
@@ -4452,19 +4465,20 @@ static int wmSetupRndNextTileNum(Encounter* encounter, EncounterEntry* encounter
                 origin = tileGetTileInDirection(gDude->tile, wmRndTileDirs[0], distance);
             }
 
-            if (++wmRndTileDirs[0] >= ROTATION_COUNT) {
-                wmRndTileDirs[0] = 0;
+            wmRndTileDirs[0]++;
+            if (wmRndTileDirs[0] >= ROTATION_COUNT) {
+                wmRndTileDirs[0] = ROTATION_FIRST;
             }
 
             int randomizedDistance = randomBetween(0, distance / 2);
-            int randomizedRotation = randomBetween(0, ROTATION_COUNT - 1);
+            Rotation randomizedRotation = static_cast<Rotation>(randomBetween(ROTATION_FIRST, ROTATION_LAST));
             tile = tileGetTileInDirection(origin, (randomizedRotation + wmRndTileDirs[0]) % ROTATION_COUNT, randomizedDistance);
             break;
         }
         case ENCOUNTER_FORMATION_TYPE_STRAIGHT_LINE:
             tile = wmRndCenterTiles[wmRndIndex];
             if (wmRndCallCount != 0) {
-                int rotation = (wmRndRotOffsets[wmRndIndex] + wmRndTileDirs[wmRndIndex]) % ROTATION_COUNT;
+                Rotation rotation = (wmRndTileDirs[wmRndIndex] + wmRndRotOffsets[wmRndIndex]) % ROTATION_COUNT;
                 int origin = tileGetTileInDirection(wmRndCenterTiles[wmRndIndex], rotation, encounter->spacing);
                 tile = tileGetTileInDirection(origin, (rotation + wmRndRotOffsets[wmRndIndex]) % ROTATION_COUNT, encounter->spacing);
                 wmRndCenterTiles[wmRndIndex] = tile;
@@ -4474,7 +4488,7 @@ static int wmSetupRndNextTileNum(Encounter* encounter, EncounterEntry* encounter
         case ENCOUNTER_FORMATION_TYPE_DOUBLE_LINE:
             tile = wmRndCenterTiles[wmRndIndex];
             if (wmRndCallCount != 0) {
-                int rotation = (wmRndRotOffsets[wmRndIndex] + wmRndTileDirs[wmRndIndex]) % ROTATION_COUNT;
+                Rotation rotation = (wmRndTileDirs[wmRndIndex] + wmRndRotOffsets[wmRndIndex]) % ROTATION_COUNT;
                 int origin = tileGetTileInDirection(wmRndCenterTiles[wmRndIndex], rotation, encounter->spacing);
                 tile = tileGetTileInDirection(origin, (rotation + wmRndRotOffsets[wmRndIndex]) % ROTATION_COUNT, encounter->spacing);
                 wmRndCenterTiles[wmRndIndex] = tile;
@@ -4484,7 +4498,7 @@ static int wmSetupRndNextTileNum(Encounter* encounter, EncounterEntry* encounter
         case ENCOUNTER_FORMATION_TYPE_WEDGE:
             tile = wmRndCenterTiles[wmRndIndex];
             if (wmRndCallCount != 0) {
-                tile = tileGetTileInDirection(wmRndCenterTiles[wmRndIndex], (wmRndRotOffsets[wmRndIndex] + wmRndTileDirs[wmRndIndex]) % ROTATION_COUNT, encounter->spacing);
+                tile = tileGetTileInDirection(wmRndCenterTiles[wmRndIndex], (wmRndTileDirs[wmRndIndex] + wmRndRotOffsets[wmRndIndex]) % ROTATION_COUNT, encounter->spacing);
                 wmRndCenterTiles[wmRndIndex] = tile;
                 wmRndIndex = 1 - wmRndIndex;
             }
@@ -4633,8 +4647,8 @@ static bool wmGameTimeIncrement(int ticksToAdd)
 
     // SFALL: Fix Pathfinder perk.
     int pathfinderRank = perkGetRank(gDude, PERK_PATHFINDER);
-    double newTicks = static_cast<double>(ticksToAdd) * (1.0 - static_cast<double>(pathfinderRank) * 0.25) * gScriptWorldMapMulti + gGameTimeIncRemainder;
-    gGameTimeIncRemainder = modf(newTicks, &newTicks);
+    double newTicks = static_cast<double>(ticksToAdd) * (1.0 - static_cast<double>(pathfinderRank) * 0.25) * gScriptWorldMapMulti + gameTimeIncRemainder;
+    gameTimeIncRemainder = modf(newTicks, &newTicks);
     ticksToAdd = static_cast<int>(newTicks);
 
     while (ticksToAdd != 0) {
@@ -4975,7 +4989,7 @@ static int wmInterfaceInit()
         return -1;
     }
 
-    fid = buildFid(OBJ_TYPE_INTERFACE, 136, 0, 0, 0);
+    fid = buildFid(OBJ_TYPE_INTERFACE, 136);
     if (!_backgroundFrmImage.lock(fid)) {
         return -1;
     }
@@ -5006,31 +5020,31 @@ static int wmInterfaceInit()
     }
 
     // hotspot1.frm - town map selector shape #1
-    fid = buildFid(OBJ_TYPE_INTERFACE, 168, 0, 0, 0);
+    fid = buildFid(OBJ_TYPE_INTERFACE, 168);
     if (!wmGenData.hotspotNormalFrmImage.lock(fid)) {
         return -1;
     }
 
     // hotspot2.frm - town map selector shape #2
-    fid = buildFid(OBJ_TYPE_INTERFACE, 223, 0, 0, 0);
+    fid = buildFid(OBJ_TYPE_INTERFACE, 223);
     if (!wmGenData.hotspotPressedFrmImage.lock(fid)) {
         return -1;
     }
 
     // wmaptarg.frm - world map move target maker #1
-    fid = buildFid(OBJ_TYPE_INTERFACE, 139, 0, 0, 0);
+    fid = buildFid(OBJ_TYPE_INTERFACE, 139);
     if (!wmGenData.destinationMarkerFrmImage.lock(fid)) {
         return -1;
     }
 
     // wmaploc.frm - world map location marker
-    fid = buildFid(OBJ_TYPE_INTERFACE, 138, 0, 0, 0);
+    fid = buildFid(OBJ_TYPE_INTERFACE, 138);
     if (!wmGenData.locationMarkerFrmImage.lock(fid)) {
         return -1;
     }
 
     for (int index = 0; index < WORLD_MAP_ENCOUNTER_FRM_COUNT; index++) {
-        fid = buildFid(OBJ_TYPE_INTERFACE, wmRndCursorFids[index], 0, 0, 0);
+        fid = buildFid(OBJ_TYPE_INTERFACE, wmRndCursorFids[index]);
         if (!wmGenData.encounterCursorFrmImages[index].lock(fid)) {
             return -1;
         }
@@ -5041,55 +5055,55 @@ static int wmInterfaceInit()
     }
 
     // wmtabs.frm - worldmap town tabs underlay
-    fid = buildFid(OBJ_TYPE_INTERFACE, 364, 0, 0, 0);
+    fid = buildFid(OBJ_TYPE_INTERFACE, 364);
     if (!wmGenData.tabsBackgroundFrmImage.lock(fid)) {
         return -1;
     }
 
     // wmtbedge.frm - worldmap town tabs edging overlay
-    fid = buildFid(OBJ_TYPE_INTERFACE, 367, 0, 0, 0);
+    fid = buildFid(OBJ_TYPE_INTERFACE, 367);
     if (!wmGenData.tabsBorderFrmImage.lock(fid)) {
         return -1;
     }
 
     // wmdial.frm - worldmap night/day dial
-    fid = buildFid(OBJ_TYPE_INTERFACE, 365, 0, 0, 0);
+    fid = buildFid(OBJ_TYPE_INTERFACE, 365);
     wmGenData.dialFrm = artLock(fid, &(wmGenData.dialFrmHandle));
     if (wmGenData.dialFrm == nullptr) {
         return -1;
     }
 
-    wmGenData.dialFrmWidth = artGetWidth(wmGenData.dialFrm, 0, 0);
-    wmGenData.dialFrmHeight = artGetHeight(wmGenData.dialFrm, 0, 0);
+    wmGenData.dialFrmWidth = artGetWidth(wmGenData.dialFrm);
+    wmGenData.dialFrmHeight = artGetHeight(wmGenData.dialFrm);
 
     // wmscreen - worldmap overlay screen
-    fid = buildFid(OBJ_TYPE_INTERFACE, 363, 0, 0, 0);
+    fid = buildFid(OBJ_TYPE_INTERFACE, 363);
     if (!wmGenData.carOverlayFrmImage.lock(fid)) {
         return -1;
     }
 
     // wmglobe.frm - worldmap globe stamp overlay
-    fid = buildFid(OBJ_TYPE_INTERFACE, 366, 0, 0, 0);
+    fid = buildFid(OBJ_TYPE_INTERFACE, 366);
     if (!wmGenData.globeOverlayFrmImage.lock(fid)) {
         return -1;
     }
 
     // lilredup.frm - little red button up
-    fid = buildFid(OBJ_TYPE_INTERFACE, 8, 0, 0, 0);
+    fid = buildFid(OBJ_TYPE_INTERFACE, 8);
     wmGenData.redButtonNormalFrmImage.lock(fid);
 
     // lilreddn.frm - little red button down
-    fid = buildFid(OBJ_TYPE_INTERFACE, 9, 0, 0, 0);
+    fid = buildFid(OBJ_TYPE_INTERFACE, 9);
     wmGenData.redButtonPressedFrmImage.lock(fid);
 
     // months.frm - month strings for pip boy
-    fid = buildFid(OBJ_TYPE_INTERFACE, 129, 0, 0, 0);
+    fid = buildFid(OBJ_TYPE_INTERFACE, 129);
     if (!wmGenData.monthsFrmImage.lock(fid)) {
         return -1;
     }
 
     // numbers.frm - numbers for the hit points and fatigue counters
-    fid = buildFid(OBJ_TYPE_INTERFACE, 82, 0, 0, 0);
+    fid = buildFid(OBJ_TYPE_INTERFACE, 82);
     if (!wmGenData.numbersFrmImage.lock(fid)) {
         return -1;
     }
@@ -5139,7 +5153,7 @@ static int wmInterfaceInit()
         // 200 - uparwon.frm - character editor
         // 199 - uparwoff.frm - character editor
         // SFALL: Fix images for scroll buttons.
-        fid = buildFid(OBJ_TYPE_INTERFACE, 199 + index, 0, 0, 0);
+        fid = buildFid(OBJ_TYPE_INTERFACE, 199 + index);
         if (!wmGenData.scrollUpButtonFrmImages[index].lock(fid)) {
             return -1;
         }
@@ -5149,7 +5163,7 @@ static int wmInterfaceInit()
         // 182 - dnarwon.frm - character editor
         // 181 - dnarwoff.frm - character editor
         // SFALL: Fix images for scroll buttons.
-        fid = buildFid(OBJ_TYPE_INTERFACE, 181 + index, 0, 0, 0);
+        fid = buildFid(OBJ_TYPE_INTERFACE, 181 + index);
         if (!wmGenData.scrollDownButtonFrmImages[index].lock(fid)) {
             return -1;
         }
@@ -5205,8 +5219,8 @@ static int wmInterfaceInit()
             }
         }
 
-        wmGenData.carImageFrmWidth = artGetWidth(wmGenData.carImageFrm, 0, 0);
-        wmGenData.carImageFrmHeight = artGetHeight(wmGenData.carImageFrm, 0, 0);
+        wmGenData.carImageFrmWidth = artGetWidth(wmGenData.carImageFrm);
+        wmGenData.carImageFrmHeight = artGetHeight(wmGenData.carImageFrm);
     }
 
     tickersAdd(wmMouseBkProc);
@@ -5645,7 +5659,7 @@ static int wmTileGrabArt(int tileIdx)
         return 0;
     }
 
-    tile->data = artLockFrameData(tile->fid, 0, 0, &(tile->handle));
+    tile->data = artLockFrameData(tile->fid, 0, ROTATION_NE, &(tile->handle));
     if (tile->data != nullptr) {
         return 0;
     }
@@ -6513,7 +6527,7 @@ static int wmTownMapFunc(int* mapIdxPtr)
 
                 // SFALL: Prevent using number keys to enter unvisited areas on
                 // a town map.
-                if (gTownMapHotkeysFix) {
+                if (townMapHotkeysFix) {
                     if (entrance->state == 0 || entrance->x == -1 || entrance->y == -1) {
                         continue;
                     }
@@ -6756,14 +6770,14 @@ static bool wmLockCarInterfaceArt(int artIndex, Art** artPtr, CacheEntry** handl
     }
 
     CacheEntry* handle = INVALID_CACHE_ENTRY;
-    int fid = buildFid(OBJ_TYPE_INTERFACE, artIndex, 0, 0, 0);
+    int fid = buildFid(OBJ_TYPE_INTERFACE, artIndex);
     Art* art = artLock(fid, &handle);
     if (art == nullptr) {
         return false;
     }
 
-    int width = artGetWidth(art, 0, 0);
-    int height = artGetHeight(art, 0, 0);
+    int width = artGetWidth(art);
+    int height = artGetHeight(art);
     if (width <= 0 || height <= 0 || WM_WINDOW_CAR_X + width > WM_WINDOW_WIDTH || WM_WINDOW_CAR_Y + height > WM_WINDOW_HEIGHT) {
         artUnlock(handle);
         return false;
@@ -6797,8 +6811,8 @@ void wmSetCarInterfaceArt(int artIndex)
     artUnlock(wmGenData.carImageFrmHandle);
     wmGenData.carImageFrmHandle = handle;
     wmGenData.carImageFrm = art;
-    wmGenData.carImageFrmWidth = artGetWidth(wmGenData.carImageFrm, 0, 0);
-    wmGenData.carImageFrmHeight = artGetHeight(wmGenData.carImageFrm, 0, 0);
+    wmGenData.carImageFrmWidth = artGetWidth(wmGenData.carImageFrm);
+    wmGenData.carImageFrmHeight = artGetHeight(wmGenData.carImageFrm);
 
     int frameCount = artGetFrameCount(wmGenData.carImageFrm);
     if (frameCount <= 0 || wmGenData.carImageCurrentFrameIndex >= frameCount) {
@@ -6824,7 +6838,7 @@ int wmCarCurrentArea()
 int wmCarGiveToParty()
 {
     MessageListItem messageListItem;
-    memcpy(&messageListItem, &gWorldmapMessageListItem, sizeof(MessageListItem));
+    memcpy(&messageListItem, &worldmapMessageListItem, sizeof(MessageListItem));
 
     if (wmGenData.carFuel <= 0) {
         // The car is out of power.
@@ -6958,7 +6972,7 @@ static int wmRefreshInterfaceOverlay(bool shouldRefreshWindow)
     wmRefreshInterfaceDial(false);
 
     if (wmGenData.isInCar) {
-        unsigned char* data = artGetFrameData(wmGenData.carImageFrm, wmGenData.carImageCurrentFrameIndex, 0);
+        unsigned char* data = artGetFrameData(wmGenData.carImageFrm, wmGenData.carImageCurrentFrameIndex);
         if (data == nullptr) {
             return -1;
         }
@@ -7204,7 +7218,7 @@ static int wmFreeTabsLabelList(int** quickDestinationsListPtr, int* quickDestina
 // 0x4C5734 wmRefreshInterfaceDial
 static void wmRefreshInterfaceDial(bool shouldRefreshWindow)
 {
-    unsigned char* data = artGetFrameData(wmGenData.dialFrm, wmGenData.dialFrmCurrentFrameIndex, 0);
+    unsigned char* data = artGetFrameData(wmGenData.dialFrm, wmGenData.dialFrmCurrentFrameIndex);
     blitBufferToBufferTrans(data,
         wmGenData.dialFrmWidth,
         wmGenData.dialFrmHeight,

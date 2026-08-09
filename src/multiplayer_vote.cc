@@ -293,7 +293,7 @@ void MpVoteResolve()
                     gVoteSession.initiatorNetId, ip->obj->tile, safeTile, safeElevation);
                 gMpSuppressExitGridCheck = true;
                 objectSetLocation(ip->obj, safeTile, safeElevation, nullptr);
-                objectSetRotation(ip->obj, gVoteSession.lastSafeRotation, nullptr);
+                objectSetRotation(ip->obj, static_cast<Rotation>(gVoteSession.lastSafeRotation), nullptr);
                 gMpSuppressExitGridCheck = false;
             }
         }
@@ -334,7 +334,7 @@ void MpVoteOnVoteStart(const NetVoteStartPayload* payload)
     gVoteSession.transition.map = payload->targetMap;
     gVoteSession.transition.tile = payload->targetTile;
     gVoteSession.transition.elevation = payload->targetElevation;
-    gVoteSession.transition.rotation = payload->targetRotation;
+    gVoteSession.transition.rotation = static_cast<Rotation>(payload->targetRotation);
     gVoteSession.startTime = getTicks();
     gVoteSession.timeoutMs = payload->timeoutMs;
     gVoteSession.totalPlayers = payload->totalPlayers;

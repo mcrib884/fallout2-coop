@@ -449,11 +449,11 @@ int correctFidForRemovedItem(Object* critter, Object* item, int flags)
         }
 
         if (weaponCode == WEAPON_ANIMATION_NONE) {
-            newFid = buildFid(FID_TYPE(fid), fid & 0xFFF, animationTypeFromFid(fid), WEAPON_ANIMATION_NONE, FID_ROTATION(fid));
+            newFid = buildFid(objectTypeFromFid(fid), fid & 0xFFF, animationTypeFromFid(fid), WEAPON_ANIMATION_NONE, rotationFromFid(fid));
         }
     } else {
         if (critter == gDude) {
-            newFid = buildFid(FID_TYPE(fid), _art_vault_guy_num, animationTypeFromFid(fid), weaponCode, FID_ROTATION(fid));
+            newFid = buildFid(objectTypeFromFid(fid), _art_vault_guy_num, animationTypeFromFid(fid), weaponCode, rotationFromFid(fid));
         }
 
         adjustCritterStatsOnArmorChange(critter, item, nullptr);
@@ -507,7 +507,7 @@ static void opPlaySfx(Program* program)
 // 0x454314 op_set_map_start
 static void opSetMapStart(Program* program)
 {
-    int rotation = programStackPopInteger(program);
+    Rotation rotation = programStackPopEnum<Rotation>(program);
     int elevation = programStackPopInteger(program);
     int y = programStackPopInteger(program);
     int x = programStackPopInteger(program);
@@ -532,7 +532,7 @@ static void opOverrideMapStart(Program* program)
 {
     program->flags |= PROGRAM_FLAG_CHILD_CALL;
 
-    int rotation = programStackPopInteger(program);
+    Rotation rotation = programStackPopEnum<Rotation>(program);
     int elevation = programStackPopInteger(program);
     int y = programStackPopInteger(program);
     int x = programStackPopInteger(program);
@@ -571,7 +571,7 @@ static void opHasSkill(Program* program)
 
     int result = 0;
     if (object != nullptr) {
-        if (PID_TYPE(object->pid) == OBJ_TYPE_CRITTER) {
+        if (objectTypeFromPid(object->pid) == OBJ_TYPE_CRITTER) {
             // Co-op: dialogue skill reads use the highest participant skill.
             result = MpDialogGetSkillValue(object, skill);
         }
@@ -611,7 +611,7 @@ static void opRollVsSkill(Program* program)
 
     int roll = ROLL_CRITICAL_FAILURE;
     if (object != nullptr) {
-        if (PID_TYPE(object->pid) == OBJ_TYPE_CRITTER) {
+        if (objectTypeFromPid(object->pid) == OBJ_TYPE_CRITTER) {
             int sid = scriptGetSid(program);
 
             Script* script;
@@ -849,7 +849,7 @@ static void opMoveTo(Program* program)
             Rect before;
             objectGetRect(object, &before);
 
-            if (object->elevation != elevation && PID_TYPE(object->pid) == OBJ_TYPE_CRITTER) {
+            if (object->elevation != elevation && objectTypeFromPid(object->pid) == OBJ_TYPE_CRITTER) {
                 _combat_delete_critter(object);
             }
 
@@ -914,13 +914,15 @@ static void opCreateObject(Program* program)
 
     if (sid != -1) {
         int scriptType = 0;
-        switch (PID_TYPE(object->pid)) {
+        switch (objectTypeFromPid(object->pid)) {
         case OBJ_TYPE_CRITTER:
             scriptType = SCRIPT_TYPE_CRITTER;
             break;
         case OBJ_TYPE_ITEM:
         case OBJ_TYPE_SCENERY:
             scriptType = SCRIPT_TYPE_ITEM;
+            break;
+        default:
             break;
         }
 
@@ -970,7 +972,7 @@ static void opDestroyObject(Program* program)
         return;
     }
 
-    if (PID_TYPE(object->pid) == OBJ_TYPE_CRITTER) {
+    if (objectTypeFromPid(object->pid) == OBJ_TYPE_CRITTER) {
         if (_isLoadingGame()) {
             debugPrint("\nError: attempt to destroy critter in load/save-game: %s!", program->name);
             program->flags &= ~PROGRAM_FLAG_CHILD_CALL;
@@ -980,7 +982,7 @@ static void opDestroyObject(Program* program)
 
     bool isSelf = object == scriptGetSelf(program);
 
-    if (PID_TYPE(object->pid) == OBJ_TYPE_CRITTER) {
+    if (objectTypeFromPid(object->pid) == OBJ_TYPE_CRITTER) {
         _combat_delete_critter(object);
     }
 
@@ -1148,7 +1150,7 @@ static void opGetDude(Program* program)
         int sid = scriptGetSid(program);
         Script* script = nullptr;
         if (scriptGetScript(sid, &script) != -1 && script->target != nullptr
-            && FID_TYPE(script->target->fid) == OBJ_TYPE_CRITTER
+            && objectTypeFromFid(script->target->fid) == OBJ_TYPE_CRITTER
             && !MpCombatIsPlayerCritter(script->target)) {
             Object* nearest = MpCombatGetNearestPlayerTo(script->target);
             if (nearest != nullptr) {
@@ -1314,9 +1316,9 @@ static void opGetObjectType(Program* program)
 {
     Object* object = static_cast<Object*>(programStackPopPointer(program));
 
-    int objectType = -1;
+    ObjectType objectType = OBJ_TYPE_INVALID;
     if (object != nullptr) {
-        objectType = FID_TYPE(object->fid);
+        objectType = objectTypeFromFid(object->fid);
     }
 
     programStackPushInteger(program, objectType);
@@ -1330,7 +1332,7 @@ static void opGetItemType(Program* program)
 
     ItemType itemType = ITEM_TYPE_INVALID;
     if (obj != nullptr) {
-        if (PID_TYPE(obj->pid) == OBJ_TYPE_ITEM) {
+        if (objectTypeFromPid(obj->pid) == OBJ_TYPE_ITEM) {
             Proto* proto;
             if (protoGetProto(obj->pid, &proto) != -1) {
                 itemType = itemGetType(obj);
@@ -1592,13 +1594,13 @@ static void opGetObjectTile(Program* program)
 static void opGetTileInDirection(Program* program)
 {
     int distance = programStackPopInteger(program);
-    int rotation = programStackPopInteger(program);
+    Rotation rotation = programStackPopEnum<Rotation>(program);
     int origin = programStackPopInteger(program);
 
     int tile = -1;
 
     if (origin != -1) {
-        if (rotation >= ROTATION_FIRST && rotation < ROTATION_COUNT) {
+        if (rotationIsValid(rotation)) {
             if (distance != 0) {
                 tile = tileGetTileInDirection(origin, rotation, distance);
                 if (tile < -1) {
@@ -1774,7 +1776,7 @@ static void opWieldItem(Program* program)
         return;
     }
 
-    if (PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
+    if (objectTypeFromPid(critter->pid) != OBJ_TYPE_CRITTER) {
         scriptPredefinedError(program, "wield_obj_critter", SCRIPT_ERROR_FOLLOWS);
         debugPrint(" Only works for critters!  ERROR ERROR ERROR!");
         return;
@@ -1853,7 +1855,7 @@ static void opUseObject(Program* program)
         return;
     }
 
-    if (PID_TYPE(self->pid) == OBJ_TYPE_CRITTER) {
+    if (objectTypeFromPid(self->pid) == OBJ_TYPE_CRITTER) {
         if (actor == nullptr) {
             scriptPredefinedError(program, "use_obj", SCRIPT_ERROR_OBJECT_IS_NULL);
             return;
@@ -1998,7 +2000,7 @@ static void opStartGameDialog(Program* program)
     }
 
     gGameDialogHeadFid = -1;
-    if (PID_TYPE(obj->pid) == OBJ_TYPE_CRITTER) {
+    if (objectTypeFromPid(obj->pid) == OBJ_TYPE_CRITTER) {
         Proto* proto;
         if (protoGetProto(obj->pid, &proto) == -1) {
             return;
@@ -2006,7 +2008,7 @@ static void opStartGameDialog(Program* program)
     }
 
     if (headId != -1) {
-        gGameDialogHeadFid = buildFid(OBJ_TYPE_HEAD, headId, 0, 0, 0);
+        gGameDialogHeadFid = buildFid(OBJ_TYPE_HEAD, headId);
     }
 
     gameDialogSetBackground(backgroundId);
@@ -2114,7 +2116,7 @@ static void opMetarule3(Program* program)
 
             Object* object = objectFindFirstAtLocation(elevation, tile);
             while (object != nullptr) {
-                if (PID_TYPE(object->pid) == OBJ_TYPE_CRITTER) {
+                if (objectTypeFromPid(object->pid) == OBJ_TYPE_CRITTER) {
                     if (critterFound) {
                         result.opcode = VALUE_TYPE_PTR;
                         result.pointerValue = object;
@@ -2135,11 +2137,11 @@ static void opMetarule3(Program* program)
             Object* obj = static_cast<Object*>(param1.pointerValue);
             int frmId = param2.integerValue;
 
-            int fid = buildFid(FID_TYPE(obj->fid),
+            int fid = buildFid(objectTypeFromFid(obj->fid),
                 frmId,
                 animationTypeFromFid(obj->fid),
                 weaponAnimationFromFid(obj->fid),
-                FID_ROTATION(obj->fid));
+                rotationFromFid(obj->fid));
 
             Rect updatedRect;
             objectSetFid(obj, fid, &updatedRect);
@@ -2205,7 +2207,7 @@ static void opSetObjectVisibility(Program* program)
 
             Rect rect;
             if (objectHide(obj, &rect) != -1) {
-                if (PID_TYPE(obj->pid) == OBJ_TYPE_CRITTER) {
+                if (objectTypeFromPid(obj->pid) == OBJ_TYPE_CRITTER) {
                     obj->flags |= OBJECT_NO_BLOCK;
                 }
 
@@ -2214,7 +2216,7 @@ static void opSetObjectVisibility(Program* program)
         }
     } else {
         if ((obj->flags & OBJECT_HIDDEN) != 0) {
-            if (PID_TYPE(obj->pid) == OBJ_TYPE_CRITTER) {
+            if (objectTypeFromPid(obj->pid) == OBJ_TYPE_CRITTER) {
                 obj->flags &= ~OBJECT_NO_BLOCK;
             }
 
@@ -2260,7 +2262,7 @@ static void opLoadMap(Program* program)
         transition.map = mapIndex;
         transition.elevation = -1;
         transition.tile = -1;
-        transition.rotation = -1;
+        transition.rotation = ROTATION_INVALID;
         mapSetTransition(&transition);
     }
 }
@@ -2592,7 +2594,7 @@ static void opCritterDamage(Program* program)
         return;
     }
 
-    if (PID_TYPE(object->pid) != OBJ_TYPE_CRITTER) {
+    if (objectTypeFromPid(object->pid) != OBJ_TYPE_CRITTER) {
         scriptPredefinedError(program, "critter_damage", SCRIPT_ERROR_FOLLOWS);
         debugPrint(" Can't call on non-critters!");
         return;
@@ -2688,12 +2690,12 @@ static void opHasTrait(Program* program)
         case CRITTER_TRAIT_OBJECT:
             switch (param) {
             case CRITTER_TRAIT_OBJECT_AI_PACKET:
-                if (PID_TYPE(object->pid) == OBJ_TYPE_CRITTER) {
+                if (objectTypeFromPid(object->pid) == OBJ_TYPE_CRITTER) {
                     result = object->data.critter.combat.aiPacket;
                 }
                 break;
             case CRITTER_TRAIT_OBJECT_TEAM:
-                if (PID_TYPE(object->pid) == OBJ_TYPE_CRITTER) {
+                if (objectTypeFromPid(object->pid) == OBJ_TYPE_CRITTER) {
                     result = object->data.critter.combat.team;
                 }
                 break;
@@ -2800,7 +2802,7 @@ static void opGameDialogSystemEnter(Program* program)
         return;
     }
 
-    if (PID_TYPE(self->pid) == OBJ_TYPE_CRITTER) {
+    if (objectTypeFromPid(self->pid) == OBJ_TYPE_CRITTER) {
         if (!critterIsActive(self)) {
             return;
         }
@@ -2842,7 +2844,7 @@ static void opGetCritterState(Program* program)
     Object* critter = static_cast<Object*>(programStackPopPointer(program));
 
     int state = CRITTER_STATE_DEAD;
-    if (critter != nullptr && PID_TYPE(critter->pid) == OBJ_TYPE_CRITTER) {
+    if (critter != nullptr && objectTypeFromPid(critter->pid) == OBJ_TYPE_CRITTER) {
         if (critterIsActive(critter)) {
             state = CRITTER_STATE_NORMAL;
 
@@ -2928,7 +2930,7 @@ static void opCritterAttemptPlacement(Program* program)
         return;
     }
 
-    if (elevation != critter->elevation && PID_TYPE(critter->pid) == OBJ_TYPE_CRITTER) {
+    if (elevation != critter->elevation && objectTypeFromPid(critter->pid) == OBJ_TYPE_CRITTER) {
         _combat_delete_critter(critter);
     }
 
@@ -2972,7 +2974,7 @@ static void opCritterAddTrait(Program* program)
     Object* object = static_cast<Object*>(programStackPopPointer(program));
 
     if (object != nullptr) {
-        if (PID_TYPE(object->pid) == OBJ_TYPE_CRITTER) {
+        if (objectTypeFromPid(object->pid) == OBJ_TYPE_CRITTER) {
             switch (kind) {
             case CRITTER_TRAIT_PERK:
                 if (1) {
@@ -3048,7 +3050,7 @@ static void opCritterRemoveTrait(Program* program)
         return;
     }
 
-    if (PID_TYPE(object->pid) == OBJ_TYPE_CRITTER) {
+    if (objectTypeFromPid(object->pid) == OBJ_TYPE_CRITTER) {
         switch (kind) {
         case CRITTER_TRAIT_PERK: {
             Perk perk = static_cast<Perk>(param);
@@ -3121,7 +3123,7 @@ static void opCritterGetInventoryObject(Program* program)
     int type = programStackPopInteger(program);
     Object* critter = static_cast<Object*>(programStackPopPointer(program));
 
-    if (PID_TYPE(critter->pid) == OBJ_TYPE_CRITTER) {
+    if (objectTypeFromPid(critter->pid) == OBJ_TYPE_CRITTER) {
         if (type == kInvenSlotInvCount) {
             programStackPushInteger(program, critter->data.inventory.length);
             return;
@@ -3434,13 +3436,13 @@ static void opMetarule(Program* program)
     case METARULE_WEAPON_DAMAGE_TYPE:
         if (1) {
             Object* object = static_cast<Object*>(param.pointerValue);
-            if (PID_TYPE(object->pid) == OBJ_TYPE_ITEM) {
+            if (objectTypeFromPid(object->pid) == OBJ_TYPE_ITEM) {
                 if (itemGetType(object) == ITEM_TYPE_WEAPON) {
                     result = weaponGetDamageType(nullptr, object);
                     break;
                 }
             } else {
-                if (buildFid(OBJ_TYPE_MISC, 10, 0, 0, 0) == object->fid) {
+                if (buildFid(OBJ_TYPE_MISC, 10) == object->fid) {
                     result = DAMAGE_TYPE_EXPLOSION;
                     break;
                 }
@@ -3453,7 +3455,7 @@ static void opMetarule(Program* program)
     case METARULE_CRITTER_BARTERS:
         if (1) {
             Object* object = static_cast<Object*>(param.pointerValue);
-            if (PID_TYPE(object->pid) == OBJ_TYPE_CRITTER) {
+            if (objectTypeFromPid(object->pid) == OBJ_TYPE_CRITTER) {
                 Proto* proto;
                 protoGetProto(object->pid, &proto);
                 if ((proto->critter.data.flags & CRITTER_BARTER) != 0) {
@@ -3520,7 +3522,7 @@ static void opAnim(Program* program)
     if (animationTypeIsValid(animOrInt)) {
         AnimationType anim = static_cast<AnimationType>(animOrInt);
         CritterCombatData* combatData = nullptr;
-        if (PID_TYPE(obj->pid) == OBJ_TYPE_CRITTER) {
+        if (objectTypeFromPid(obj->pid) == OBJ_TYPE_CRITTER) {
             combatData = &(obj->data.critter.combat);
         }
 
@@ -3532,7 +3534,7 @@ static void opAnim(Program* program)
         if (frame == 0) { // ANIMATE_FORWARD
             animationRegisterAnimate(obj, anim, 0);
             if (anim >= ANIM_FALL_BACK && anim <= ANIM_FALL_FRONT_BLOOD) {
-                int fid = buildFid(OBJ_TYPE_CRITTER, obj->fid & 0xFFF, anim + 28, weaponAnimationFromFid(obj->fid), FID_ROTATION(obj->fid));
+                int fid = buildFid(OBJ_TYPE_CRITTER, obj->fid & 0xFFF, anim + 28, weaponAnimationFromFid(obj->fid), rotationFromFid(obj->fid));
                 animationRegisterSetFid(obj, fid, -1);
             }
 
@@ -3540,13 +3542,13 @@ static void opAnim(Program* program)
                 combatData->results &= ~DAM_KNOCKED_DOWN;
             }
         } else { // ANIMATE_REVERSE == 1
-            int fid = buildFid(FID_TYPE(obj->fid), obj->fid & 0xFFF, anim, weaponAnimationFromFid(obj->fid), FID_ROTATION(obj->fid));
+            int fid = buildFid(objectTypeFromFid(obj->fid), obj->fid & 0xFFF, anim, weaponAnimationFromFid(obj->fid), rotationFromFid(obj->fid));
             animationRegisterAnimateReversed(obj, anim, 0);
 
             if (anim == ANIM_PRONE_TO_STANDING) {
-                fid = buildFid(FID_TYPE(obj->fid), obj->fid & 0xFFF, ANIM_FALL_FRONT_SF, weaponAnimationFromFid(obj->fid), FID_ROTATION(obj->fid));
+                fid = buildFid(objectTypeFromFid(obj->fid), obj->fid & 0xFFF, ANIM_FALL_FRONT_SF, weaponAnimationFromFid(obj->fid), rotationFromFid(obj->fid));
             } else if (anim == ANIM_BACK_TO_STANDING) {
-                fid = buildFid(FID_TYPE(obj->fid), obj->fid & 0xFFF, ANIM_FALL_BACK_SF, weaponAnimationFromFid(obj->fid), FID_ROTATION(obj->fid));
+                fid = buildFid(objectTypeFromFid(obj->fid), obj->fid & 0xFFF, ANIM_FALL_BACK_SF, weaponAnimationFromFid(obj->fid), rotationFromFid(obj->fid));
             }
 
             if (combatData != nullptr) {
@@ -3560,7 +3562,7 @@ static void opAnim(Program* program)
     } else if (animOrInt == 1000) {
         if (frame < ROTATION_COUNT) {
             Rect rect;
-            objectSetRotation(obj, frame, &rect);
+            objectSetRotation(obj, static_cast<Rotation>(frame), &rect);
             tileWindowRefreshRect(&rect, gElevation);
         }
     } else if (animOrInt == 1010) {
@@ -4071,7 +4073,7 @@ static void opGetPoison(Program* program)
 
     int poison = 0;
     if (obj != nullptr) {
-        if (PID_TYPE(obj->pid) == OBJ_TYPE_CRITTER) {
+        if (objectTypeFromPid(obj->pid) == OBJ_TYPE_CRITTER) {
             poison = critterGetPoison(obj);
         } else {
             debugPrint("\nScript Error: get_poison: who is not a critter!");
@@ -4383,7 +4385,7 @@ static void _op_anim_action_frame(Program* program)
     int actionFrame = 0;
 
     if (object != nullptr) {
-        int fid = buildFid(FID_TYPE(object->fid), object->fid & 0xFFF, anim, 0, object->rotation);
+        int fid = buildFid(objectTypeFromFid(object->fid), object->fid & 0xFFF, anim, WEAPON_ANIMATION_NONE, object->rotation);
         CacheEntry* frmHandle;
         Art* frm = artLock(fid, &frmHandle);
         if (frm != nullptr) {
@@ -4426,7 +4428,7 @@ static void opCritterModifySkill(Program* program)
     Object* critter = static_cast<Object*>(programStackPopPointer(program));
 
     if (critter != nullptr && points != 0) {
-        if (PID_TYPE(critter->pid) == OBJ_TYPE_CRITTER) {
+        if (objectTypeFromPid(critter->pid) == OBJ_TYPE_CRITTER) {
             if (critter == gDude) {
                 int normalizedPoints = abs(points);
                 if (skillIsTagged(skill)) {
@@ -4627,7 +4629,7 @@ static void opDestroyMultipleObjects(Program* program)
 
     int result = 0;
 
-    if (PID_TYPE(object->pid) == OBJ_TYPE_CRITTER) {
+    if (objectTypeFromPid(object->pid) == OBJ_TYPE_CRITTER) {
         _combat_delete_critter(object);
     }
 
@@ -4706,7 +4708,7 @@ static void opUseObjectOnObject(Program* program)
         return;
     }
 
-    if (PID_TYPE(self->pid) == OBJ_TYPE_CRITTER) {
+    if (objectTypeFromPid(self->pid) == OBJ_TYPE_CRITTER) {
         _action_use_an_item_on_object(self, target, item);
     } else {
         objectUseItemOn(self, target, item);
@@ -4798,6 +4800,7 @@ static void opMoveObjectInventoryToObject(Program* program)
 static void opEndgameMovie(Program* program)
 {
     program->flags |= PROGRAM_FLAG_CHILD_CALL;
+    scriptsHandlePendingEndgameSlideshow();
     endgamePlayMovie();
     program->flags &= ~PROGRAM_FLAG_CHILD_CALL;
 }
@@ -4843,7 +4846,7 @@ static void opGetRotationToTile(Program* program)
     int tile2 = programStackPopInteger(program);
     int tile1 = programStackPopInteger(program);
 
-    int rotation = tileGetRotationTo(tile1, tile2);
+    Rotation rotation = tileGetRotationTo(tile1, tile2);
     programStackPushInteger(program, rotation);
 }
 
@@ -4941,7 +4944,7 @@ static void opTerminateCombat(Program* program)
         _game_user_wants_to_quit = GAME_QUIT_REQUEST_END_COMBAT;
         Object* self = scriptGetSelf(program);
         if (self != nullptr) {
-            if (PID_TYPE(self->pid) == OBJ_TYPE_CRITTER) {
+            if (objectTypeFromPid(self->pid) == OBJ_TYPE_CRITTER) {
                 self->data.critter.combat.maneuver |= CRITTER_MANEUVER_DISENGAGING;
                 self->data.critter.combat.whoHitMe = nullptr;
                 aiInfoSetLastTarget(self, nullptr);

@@ -111,6 +111,11 @@ bool MpCombatAnyPlayerHasJinxed();
 // Returns the player netId if the critter is a REMOTE player's critter on the
 // host (0 otherwise). The host's round loop uses this to hand the turn over.
 uint8_t MpCombatGetCritterPlayerNetId(Object* critter);
+// Host: send a display-monitor line to ONE player only (the acting remote
+// player whose action produced the line). The line is first-person feedback
+// for that player — the host and the other clients would each read "you" as
+// themselves.
+void MpCombatSendMonitorMessageToPlayer(uint32_t netId, const char* text);
 // Network pump + deferred-queue drain + state broadcasts. Safe inside the
 // blocking combat loops; must NEVER run scripts/map transitions.
 void MpCombatPump();

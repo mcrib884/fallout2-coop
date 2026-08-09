@@ -183,8 +183,8 @@ static int gDynamiteMaxDamage;
 static int gPlasticExplosiveMinDamage;
 static int gPlasticExplosiveMaxDamage;
 static std::vector<ExplosiveDescription> gExplosives;
-static int gExplosionStartRotation;
-static int gExplosionEndRotation;
+static Rotation gExplosionStartRotation;
+static Rotation gExplosionEndRotation;
 static int gExplosionFrm;
 static int gExplosionRadius;
 static DamageType gExplosionDamageType;
@@ -260,7 +260,7 @@ int itemAttemptAdd(Object* owner, Object* itemToAdd, int quantity)
         return -1;
     }
 
-    int parentType = FID_TYPE(owner->fid);
+    ObjectType parentType = objectTypeFromFid(owner->fid);
     if (parentType == OBJ_TYPE_ITEM) {
         ItemType itemType = itemGetType(owner);
         if (itemType == ITEM_TYPE_CONTAINER) {
@@ -276,7 +276,7 @@ int itemAttemptAdd(Object* owner, Object* itemToAdd, int quantity)
 
             Object* containerOwner = objectGetOwner(owner);
             if (containerOwner != nullptr) {
-                if (FID_TYPE(containerOwner->fid) == OBJ_TYPE_CRITTER) {
+                if (objectTypeFromFid(containerOwner->fid) == OBJ_TYPE_CRITTER) {
                     int weightToAdd = itemGetWeight(itemToAdd);
                     weightToAdd *= quantity;
 
@@ -577,10 +577,11 @@ int itemDestroyAllHidden(Object* owner)
     Inventory* inventory = &(owner->data.inventory);
     for (int index = 0; index < inventory->length;) {
         InventoryItem* inventoryItem = &(inventory->items[index]);
+        Object* item = inventoryItem->item;
         // NOTE: Uninline.
-        if (itemIsHidden(inventoryItem->item)) {
-            itemRemoveWithReason(owner, inventoryItem->item, 1, RemoveInventoryObjectHookReason::ItemDestroyed);
-            objectDestroy(inventoryItem->item);
+        if (itemIsHidden(item)) {
+            itemRemoveWithReason(owner, item, 1, RemoveInventoryObjectHookReason::ItemDestroyed);
+            objectDestroy(item);
         } else {
             index++;
         }
@@ -665,7 +666,7 @@ int itemDropAll(Object* critter, int tile)
 
     if (hasEquippedItems) {
         Rect updatedRect;
-        int fid = buildFid(OBJ_TYPE_CRITTER, frmId, animationTypeFromFid(critter->fid), 0, FID_ROTATION(critter->fid));
+        int fid = buildFid(OBJ_TYPE_CRITTER, frmId, animationTypeFromFid(critter->fid), WEAPON_ANIMATION_NONE, rotationFromFid(critter->fid));
         objectSetFid(critter, fid, &updatedRect);
         if (animationTypeFromFid(critter->fid) == ANIM_STAND) {
             tileWindowRefreshRect(&updatedRect, gElevation);
@@ -763,7 +764,7 @@ ItemType itemGetType(Object* item)
         return ITEM_TYPE_MISC;
     }
 
-    if (PID_TYPE(item->pid) != OBJ_TYPE_ITEM) {
+    if (objectTypeFromPid(item->pid) != OBJ_TYPE_ITEM) {
         return ITEM_TYPE_MISC;
     }
 
@@ -946,7 +947,7 @@ int objectGetCost(Object* obj)
         }
     }
 
-    if (FID_TYPE(obj->fid) == OBJ_TYPE_CRITTER) {
+    if (objectTypeFromFid(obj->fid) == OBJ_TYPE_CRITTER) {
         Object* item2 = critterGetItem2(obj);
         if (item2 != nullptr && (item2->flags & OBJECT_IN_RIGHT_HAND) == 0) {
             cost += itemGetCost(item2);
@@ -984,7 +985,7 @@ int objectGetInventoryWeight(Object* obj)
         weight += itemGetWeight(item) * inventoryItem->quantity;
     }
 
-    if (FID_TYPE(obj->fid) == OBJ_TYPE_CRITTER) {
+    if (objectTypeFromFid(obj->fid) == OBJ_TYPE_CRITTER) {
         Object* item2 = critterGetItem2(obj);
         if (item2 != nullptr) {
             if ((item2->flags & OBJECT_IN_RIGHT_HAND) == 0) {
@@ -1188,7 +1189,7 @@ Object* itemReplace(Object* owner, Object* itemToReplace, int flags)
 // 0x478244
 bool itemIsHidden(Object* item)
 {
-    if (PID_TYPE(item->pid) != OBJ_TYPE_ITEM) {
+    if (objectTypeFromPid(item->pid) != OBJ_TYPE_ITEM) {
         return false;
     }
 
@@ -2999,7 +3000,7 @@ int drugEffectEventProcess(Object* obj, void* data)
         return 0;
     }
 
-    if (PID_TYPE(obj->pid) != OBJ_TYPE_CRITTER) {
+    if (objectTypeFromPid(obj->pid) != OBJ_TYPE_CRITTER) {
         return 0;
     }
 
@@ -3169,7 +3170,7 @@ int withdrawalEventWrite(File* stream, void* data)
 // 0x47A4C4
 static void performWithdrawalStart(Object* obj, Perk perk, int pid)
 {
-    if (PID_TYPE(obj->pid) != OBJ_TYPE_CRITTER) {
+    if (objectTypeFromPid(obj->pid) != OBJ_TYPE_CRITTER) {
         debugPrint("\nERROR: perform_withdrawal_start: Was called on non-critter!");
         return;
     }
@@ -3203,7 +3204,7 @@ static void performWithdrawalStart(Object* obj, Perk perk, int pid)
 // 0x47A558
 static void performWithdrawalEnd(Object* obj, Perk perk)
 {
-    if (PID_TYPE(obj->pid) != OBJ_TYPE_CRITTER) {
+    if (objectTypeFromPid(obj->pid) != OBJ_TYPE_CRITTER) {
         debugPrint("\nERROR: perform_withdrawal_end: Was called on non-critter!");
         return;
     }
@@ -3651,7 +3652,7 @@ bool explosiveGetDamage(int pid, int* minDamagePtr, int* maxDamagePtr)
 
 void explosionSettingsReset()
 {
-    gExplosionStartRotation = 0;
+    gExplosionStartRotation = ROTATION_FIRST;
     gExplosionEndRotation = ROTATION_COUNT;
     gExplosionFrm = -1;
     gExplosionRadius = -1;
@@ -3659,13 +3660,13 @@ void explosionSettingsReset()
     gExplosionMaxTargets = 6;
 }
 
-void explosionGetPattern(int* startRotationPtr, int* endRotationPtr)
+void explosionGetPattern(Rotation* startRotationPtr, Rotation* endRotationPtr)
 {
     *startRotationPtr = gExplosionStartRotation;
     *endRotationPtr = gExplosionEndRotation;
 }
 
-void explosionSetPattern(int startRotation, int endRotation)
+void explosionSetPattern(Rotation startRotation, Rotation endRotation)
 {
     gExplosionStartRotation = startRotation;
     gExplosionEndRotation = endRotation;

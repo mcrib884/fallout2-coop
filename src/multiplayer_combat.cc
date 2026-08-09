@@ -36,6 +36,7 @@
 #include "memory.h"
 #include "multiplayer.h"
 #include "multiplayer_dialog.h"
+#include "multiplayer_loot.h"
 #include "multiplayer_vote.h"
 #include "object.h"
 #include "perk.h"
@@ -306,6 +307,11 @@ void MpCombatOnStarted()
         debugFilePrint("MPCOMBAT: start rejected (already in combat)");
         return;
     }
+    // A client can be mid-loot when the host's script starts combat. The
+    // client's own loot modal closes itself (combat-active check in
+    // MpLootLoopTick), but release the host-side session now so a lost END
+    // can never strand the session across the fight.
+    MpLootHostCloseAllSessions();
     gMpCombat.inCombat = true;
     gMpCombat.whoseTurn = 0;
     gMpCombat.waitingForTurnEnd = 0;
@@ -648,11 +654,12 @@ static void mpCombatDrainEndRequest()
 
 void MpCombatPump()
 {
-    // Off-screen player indicators: the blocking combat loops suspend the
-    // main loop (which normally drives them), so pump them here too — before
-    // the client early-return below, since the client's blocking turn loop
-    // is exactly where the main loop is suspended.
+    // Off-screen player indicators and the camera drag: the blocking combat
+    // loops suspend the main loop (which normally drives both), so pump them
+    // here too — before the client early-return below, since the client's
+    // blocking turn loop is exactly where the main loop is suspended.
     MpDrawPlayerIndicators();
+    gameMouseCameraDragTick();
 
     if (!gMpActive || gMpSession.enetHost == nullptr) {
         return;
@@ -1225,6 +1232,26 @@ void MpCombatBroadcastMonitorMessage(const char* text)
         NET_PKT_COMBAT_MESSAGE, buffer, length);
 }
 
+void MpCombatSendMonitorMessageToPlayer(uint32_t netId, const char* text)
+{
+    if (!gMpIsHost || !gMpActive || gMpSession.enetHost == nullptr || text == nullptr) {
+        return;
+    }
+    if (netId == 0 || netId > NET_MAX_PLAYERS) {
+        return;
+    }
+    MultiplayerPlayer* p = &gMpSession.players[netId - 1];
+    if (p == nullptr || !p->isConnected || p->peer == nullptr) {
+        return;
+    }
+    char buffer[MP_COMBAT_MESSAGE_MAX_LENGTH + 1];
+    strncpy(buffer, text, MP_COMBAT_MESSAGE_MAX_LENGTH);
+    buffer[MP_COMBAT_MESSAGE_MAX_LENGTH] = '\0';
+    size_t length = strlen(buffer) + 1; // include the NUL
+    NetSendPacket(p->peer, NET_CHANNEL_RELIABLE,
+        NET_PKT_COMBAT_MESSAGE, buffer, length);
+}
+
 void MpCombatOnMonitorMessage(const char* text, size_t textLength)
 {
     if (!gMpIsClient || !gMpActive || text == nullptr || textLength == 0) {
@@ -1489,9 +1516,15 @@ void MpCombatTick()
             mpCombatDrainEndRequest();
         }
     } else {
-        // Deferred blocking turn (from COMBAT_TURN_START).
+        // Deferred blocking turn (from COMBAT_TURN_START). Never run it while
+        // the client's loot modal is open: MpLootLoopTick pumps MpTick inside
+        // the loot window, so the turn loop would nest inside the modal and
+        // the player would be stuck in the loot screen through the combat.
+        // MpLootLoopTick closes the session when combat turns active, then the
+        // next top-level tick runs the deferred turn here.
         if (gMpCombat.turnStartPending && gMpCombat.inCombat
-            && gMpCombat.whoseTurn == gMpSession.localNetId) {
+            && gMpCombat.whoseTurn == gMpSession.localNetId
+            && !MpLootSessionOpen()) {
             MpCombatClientTurnLoop();
         }
     }

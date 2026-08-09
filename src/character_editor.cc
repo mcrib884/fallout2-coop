@@ -596,6 +596,8 @@ static char gCharacterEditorFolderCardString[256];
 // 0x56FC60 skillsav
 static int gCharacterEditorSkillsBackup[SKILL_COUNT];
 
+static int tagSkill4LevelBase = -1;
+
 // 0x56FCA8 editor_message_file
 static MessageList gCharacterEditorMessageList;
 
@@ -824,6 +826,7 @@ int characterEditorShow(bool isCreationMode)
     const char* lines[] = { line2 };
 
     gCharacterEditorIsCreationMode = isCreationMode;
+    tagSkill4LevelBase = -1;
 
     characterEditorSavePlayer();
 
@@ -1310,7 +1313,7 @@ static int characterEditorWindowInit()
         return -1;
     }
 
-    fid = buildFid(OBJ_TYPE_INTERFACE, (gCharacterEditorIsCreationMode ? 169 : 177), 0, 0, 0);
+    fid = buildFid(OBJ_TYPE_INTERFACE, (gCharacterEditorIsCreationMode ? 169 : 177));
     if (!_editorBackgroundFrmImage.lock(fid)) {
         messageListFree(&gCharacterEditorMessageList);
         return -1;
@@ -1333,7 +1336,7 @@ static int characterEditorWindowInit()
     soundContinueAll();
 
     for (i = 0; i < EDITOR_GRAPHIC_COUNT; i++) {
-        fid = buildFid(OBJ_TYPE_INTERFACE, gCharacterEditorFrmIds[i], 0, 0, 0);
+        fid = buildFid(OBJ_TYPE_INTERFACE, gCharacterEditorFrmIds[i]);
         if (!_editorFrmImages[i].lock(fid)) {
             break;
         }
@@ -4938,6 +4941,8 @@ static void characterEditorRestorePlayer()
 
     cur_hp = critterGetHitPoints(gDude);
     critterAdjustHitPoints(gDude, gCharacterEditorHitPointsBackup - cur_hp);
+
+    tagSkill4LevelBase = -1;
 }
 
 // 0x43A9CC itostndn
@@ -4979,7 +4984,7 @@ static char* _itostndn(int value, char* dest)
 static int characterEditorDrawCardWithOptions(int graphicId, const char* name, const char* attributes, char* description)
 {
     FrmImage frmImage;
-    int fid = buildFid(OBJ_TYPE_SKILLDEX, graphicId, 0, 0, 0);
+    int fid = buildFid(OBJ_TYPE_SKILLDEX, graphicId);
     if (!frmImage.lock(fid)) {
         return -1;
     }
@@ -5279,7 +5284,12 @@ static void characterEditorHandleAdjustSkillButtonPressed(int keyCode)
                     rc = -1;
                 }
             } else if (keyCode == 523) {
-                if (skillGetValue(gDude, gCharacterEditorCurrentSkill) <= gCharacterEditorSkillsBackup[gCharacterEditorCurrentSkill]) {
+                int minimumSkillValue = gCharacterEditorSkillsBackup[gCharacterEditorCurrentSkill];
+                if (tagSkill4LevelBase != -1 && gCharacterEditorCurrentSkill == gCharacterEditorTempTaggedSkills[NUM_TAGGED_SKILLS - 1]) {
+                    minimumSkillValue = tagSkill4LevelBase;
+                }
+
+                if (skillGetValue(gDude, gCharacterEditorCurrentSkill) <= minimumSkillValue) {
                     rc = 0;
                 } else {
                     if (skillSub(gDude, gCharacterEditorCurrentSkill) == -2) {
@@ -5856,7 +5866,7 @@ static int perkDialogShow()
     gPerkDialogCardTitle[0] = '\0';
     gPerkDialogCardDrawn = false;
 
-    int backgroundFid = buildFid(OBJ_TYPE_INTERFACE, 86, 0, 0, 0);
+    int backgroundFid = buildFid(OBJ_TYPE_INTERFACE, 86);
     if (!_perkDialogBackgroundFrmImage.lock(backgroundFid)) {
         debugPrint("\n *** Error running perks dialog window ***\n");
         return -1;
@@ -6572,11 +6582,14 @@ static bool perkDialogHandleTagPerk()
     if (rc != 1) {
         memcpy(gCharacterEditorTempTaggedSkills, gCharacterEditorTaggedSkillsBackup, sizeof(gCharacterEditorTempTaggedSkills));
         skillsSetTagged(gCharacterEditorTaggedSkillsBackup, NUM_TAGGED_SKILLS);
+        tagSkill4LevelBase = -1;
         return false;
     }
 
-    gCharacterEditorTempTaggedSkills[NUM_TAGGED_SKILLS - 1] = static_cast<Skill>(gPerkDialogOptionList[gPerkDialogTopLine + gPerkDialogCurrentLine].value);
+    Skill tagSkill = static_cast<Skill>(gPerkDialogOptionList[gPerkDialogTopLine + gPerkDialogCurrentLine].value);
+    gCharacterEditorTempTaggedSkills[NUM_TAGGED_SKILLS - 1] = tagSkill;
     skillsSetTagged(gCharacterEditorTempTaggedSkills, NUM_TAGGED_SKILLS);
+    tagSkill4LevelBase = skillGetValue(gDude, tagSkill);
 
     return true;
 }
@@ -6697,7 +6710,7 @@ static int perkDialogOptionCompare(const void* a1, const void* a2)
 static int perkDialogDrawCard(int frmId, const char* name, const char* rank, char* description)
 {
     FrmImage frmImage;
-    int fid = buildFid(OBJ_TYPE_SKILLDEX, frmId, 0, 0, 0);
+    int fid = buildFid(OBJ_TYPE_SKILLDEX, frmId);
     if (!frmImage.lock(fid)) {
         return -1;
     }

@@ -58,6 +58,9 @@ static int main_loadgame_new();
 static void main_unload_new();
 static void mainParseCommandLineArguments(int argc, char** argv);
 static bool mainTryParseDevLoadGameSlot(const char* value, int* slotPtr);
+static void mainHandleDevEndgameRequests();
+static void mainRequestDevEndgameIfNeeded();
+static void mainRunDevEndgameMovieIfNeeded();
 static void mainLoop();
 static void showDeath();
 static void _main_death_voiceover_callback();
@@ -77,6 +80,8 @@ static bool _main_show_death_scene = false;
 static bool _main_death_voiceover_done;
 
 static int commandLineDevLoadGameSlot = -1;
+static bool commandLineDevEndgame = false;
+static bool commandLineDevEndgameMovie = false;
 
 // 0x48099C
 int falloutMain(int argc, char** argv)
@@ -211,7 +216,7 @@ mp_run_new_game:
                             win_timed_msg("Could not join co-op session", COLOR_RED);
                         }
                     }
-
+                    mainHandleDevEndgameRequests();
                     mainLoop();
                     paletteFadeTo(gPaletteWhite);
 
@@ -291,6 +296,7 @@ mp_run_load_game:
                                 win_timed_msg("Could not join co-op session", COLOR_RED);
                             }
                         }
+                        mainHandleDevEndgameRequests();
                         mainLoop();
                         paletteFadeTo(gPaletteWhite);
                     } else {
@@ -455,6 +461,10 @@ static void mainParseCommandLineArguments(int argc, char** argv)
             gMpPendingClientAddress[sizeof(gMpPendingClientAddress) - 1] = '\0';
             debugPrint("MAIN: --coop-join pending client start after load address='%s'\n",
                 gMpPendingClientAddress);
+        } else if (strcmp(argv[arg], "--dev-endgame") == 0) {
+            commandLineDevEndgame = true;
+        } else if (strcmp(argv[arg], "--dev-endgame-movie") == 0) {
+            commandLineDevEndgameMovie = true;
         }
     }
 }
@@ -473,6 +483,40 @@ static bool mainTryParseDevLoadGameSlot(const char* value, int* slotPtr)
 
     *slotPtr = static_cast<int>(slotNumber - 1);
     return true;
+}
+
+static void mainHandleDevEndgameRequests()
+{
+    if (commandLineDevEndgame && commandLineDevEndgameMovie) {
+        commandLineDevEndgame = false;
+        commandLineDevEndgameMovie = false;
+        endgamePlaySlideshow();
+        endgamePlayMovie();
+        return;
+    }
+
+    mainRequestDevEndgameIfNeeded();
+    mainRunDevEndgameMovieIfNeeded();
+}
+
+static void mainRequestDevEndgameIfNeeded()
+{
+    if (!commandLineDevEndgame) {
+        return;
+    }
+
+    commandLineDevEndgame = false;
+    scriptsRequestEndgame();
+}
+
+static void mainRunDevEndgameMovieIfNeeded()
+{
+    if (!commandLineDevEndgameMovie) {
+        return;
+    }
+
+    commandLineDevEndgameMovie = false;
+    endgamePlayMovie();
 }
 
 // NOTE: Inlined.
@@ -645,6 +689,9 @@ static void mainLoop()
         // Co-op: edge indicators for remote players outside the viewport.
         MpDrawPlayerIndicators();
 
+        // Co-op: middle-mouse camera drag (frame-rate pan, map bounds apply).
+        gameMouseCameraDragTick();
+
         gMainLastSection = 6;
         if (_main_game_paused != 0) {
             _main_game_paused = 0;
@@ -705,7 +752,7 @@ static void showDeath()
 
             // DEATH.FRM
             FrmImage backgroundFrmImage;
-            int fid = buildFid(OBJ_TYPE_INTERFACE, 309, 0, 0, 0);
+            int fid = buildFid(OBJ_TYPE_INTERFACE, 309);
             if (!backgroundFrmImage.lock(fid)) {
                 break;
             }

@@ -686,7 +686,7 @@ Object* scriptGetSelf(Program* program)
     }
 
     Object* object;
-    int fid = buildFid(OBJ_TYPE_INTERFACE, 3, 0, 0, 0);
+    int fid = buildFid(OBJ_TYPE_INTERFACE, 3);
     objectCreateWithFidPid(&object, fid, -1);
     objectHide(object, nullptr);
     _obj_toggle_flat(object, nullptr);
@@ -1197,7 +1197,7 @@ static void scriptsCloseNearbyElevatorDoors()
     Object* elevatorDoors = objectFindFirstAtElevation(gDude->elevation);
     while (elevatorDoors != nullptr) {
         int pid = elevatorDoors->pid;
-        if (PID_TYPE(pid) == OBJ_TYPE_SCENERY
+        if (objectTypeFromPid(pid) == OBJ_TYPE_SCENERY
             && (pid == PROTO_ID_BROTHERHOOD_DOOR || pid == PROTO_ID_ELEVATOR_DOOR || pid == PROTO_ID_ELEVATOR_DOOR_ALT)
             && tileDistanceBetween(elevatorDoors->tile, gDude->tile) <= 4) {
             break;
@@ -1319,10 +1319,10 @@ int scriptsHandleRequests()
         gameDialogEnter(gScriptsRequestedDialogWith, 0);
     }
 
-    if ((gScriptsRequests & SCRIPT_REQUEST_ENDGAME) != 0) {
-        gScriptsRequests &= ~SCRIPT_REQUEST_ENDGAME;
-        endgamePlaySlideshow();
-        endgamePlayMovie();
+    if (scriptsHandlePendingEndgameSlideshow()) {
+        if (endgameShouldPlayMovieAfterSlideshow()) {
+            endgamePlayMovie();
+        }
     }
 
     if ((gScriptsRequests & SCRIPT_REQUEST_LOOTING) != 0) {
@@ -1338,6 +1338,17 @@ int scriptsHandleRequests()
     DeleteAllTempArrays();
 
     return 0;
+}
+
+bool scriptsHandlePendingEndgameSlideshow()
+{
+    if ((gScriptsRequests & SCRIPT_REQUEST_ENDGAME) == 0) {
+        return false;
+    }
+
+    gScriptsRequests &= ~SCRIPT_REQUEST_ENDGAME;
+    endgamePlaySlideshow();
+    return true;
 }
 
 // 0x4A43A0
@@ -3101,7 +3112,7 @@ char* _scr_get_msg_str_speech(int messageListId, int messageId, int shouldStartS
         return nullptr;
     }
 
-    if (FID_TYPE(gGameDialogHeadFid) != OBJ_TYPE_HEAD) {
+    if (objectTypeFromFid(gGameDialogHeadFid) != OBJ_TYPE_HEAD) {
         shouldStartSpeech = 0;
     }
 

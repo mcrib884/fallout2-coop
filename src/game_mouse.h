@@ -81,6 +81,11 @@ void _gmouse_disable(int allowScrolling);
 void _gmouse_enable_scrolling();
 void _gmouse_disable_scrolling();
 bool gmouse_scrolling_is_enabled();
+// Co-op: middle-mouse camera drag. gameMouseCameraDragTick() runs once per
+// frame from the main loop; gameMouseCameraDragActive() tells the edge-scroll
+// handler to stand down while a drag is in progress.
+void gameMouseCameraDragTick();
+bool gameMouseCameraDragActive();
 int _gmouse_is_scrolling();
 bool _gmouse_get_click_to_scroll();
 void _gmouse_set_click_to_scroll(bool value);
@@ -88,7 +93,7 @@ void gameMouseRefresh();
 void _gmouse_handle_event(int mouseX, int mouseY, int mouseState);
 int gameMouseSetCursor(int cursor);
 int gameMouseGetCursor();
-Object* gameMouseGetObjectUnderCursor(int objectType, bool includeDude, int elevation);
+Object* gameMouseGetObjectUnderCursor(ObjectType objectType, bool includeDude, int elevation);
 void gmouse_set_mapper_mode(int mode);
 void gameMouseSetMode(int mode);
 int gameMouseGetMode();

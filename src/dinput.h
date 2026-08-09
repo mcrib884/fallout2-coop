@@ -8,7 +8,7 @@ namespace fallout {
 typedef struct MouseData {
     int x;
     int y;
-    unsigned char buttons[2];
+    unsigned char buttons[3]; // 0 = left, 1 = right, 2 = middle
     int wheelX;
     int wheelY;
 } MouseData;

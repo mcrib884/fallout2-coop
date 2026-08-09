@@ -30,6 +30,7 @@
 #include "inventory.h"
 #include "item.h"
 #include "multiplayer.h"
+#include "multiplayer_combat.h"
 #include "multiplayer_profile.h"
 #include "net.h"
 #include "object.h"
@@ -277,7 +278,7 @@ static void mpLootHostMove(uint8_t netId, uint32_t pid, int32_t qty)
     // rule the vanilla window uses to decide _gIsSteal (stealing from a
     // container is plain looting).
     bool doRoll = s->isSteal
-        && PID_TYPE(target->pid) == OBJ_TYPE_CRITTER
+        && objectTypeFromPid(target->pid) == OBJ_TYPE_CRITTER
         && critterIsActive(target);
     if (doRoll) {
         s->stealCount++;
@@ -338,7 +339,7 @@ static void mpLootHostMove(uint8_t netId, uint32_t pid, int32_t qty)
             if (!plant && (item->flags & OBJECT_IN_RIGHT_HAND) != 0) {
                 // Vanilla parity: stripping an equipped weapon refreshes the
                 // critter's display art.
-                target->fid = buildFid(FID_TYPE(target->fid), target->fid & 0xFFF,
+                target->fid = buildFid(objectTypeFromFid(target->fid), target->fid & 0xFFF,
                     animationTypeFromFid(target->fid), 0, target->rotation + 1);
             }
             target->flags &= ~OBJECT_EQUIPPED;
@@ -435,7 +436,7 @@ void MpLootHostStart(uint8_t netId, Object* target, bool isSteal)
         if (isInCombat()) {
             return;
         }
-        if (PID_TYPE(target->pid) != OBJ_TYPE_ITEM && PID_TYPE(target->pid) != OBJ_TYPE_CRITTER) {
+        if (objectTypeFromPid(target->pid) != OBJ_TYPE_ITEM && objectTypeFromPid(target->pid) != OBJ_TYPE_CRITTER) {
             return;
         }
     }
@@ -681,11 +682,21 @@ void MpLootOnClientPacket(const void* data, size_t dataLength)
             return;
         }
         mirror->flags |= (OBJECT_HIDDEN | OBJECT_NO_SAVE);
+        // Vanilla parity: the loot window silently refuses to open a
+        // container whose art has multiple frames while the object sits at
+        // frame 0 ("closed") — inventoryOpenLooting's gate. Vanilla reaches
+        // the window only after objectUseContainer animated the chest open;
+        // the host's container is already open when the OPEN state is sent.
+        // Open the mirror to match, or the window never appears.
+        if (objectTypeFromFid(mirror->fid) == OBJ_TYPE_ITEM
+            && itemGetType(mirror) == ITEM_TYPE_CONTAINER) {
+            mirror->frame = 1;
+        }
         mpLootClientMirrorPopulate(mirror, items, p->targetItemCount);
 
         gLootClient.active = true;
         gLootClient.isSteal = p->isSteal != 0
-            && PID_TYPE(mirror->pid) == OBJ_TYPE_CRITTER
+            && objectTypeFromPid(mirror->pid) == OBJ_TYPE_CRITTER
             && critterIsActive(mirror);
         gLootClient.mirror = mirror;
         gLootClient.targetNetId = p->targetNetId;
@@ -777,6 +788,18 @@ bool MpLootLoopTick()
         // (and the local dude deltas it references) is stale; close the
         // session now, the modal tail destroys the mirror.
         mpLootClientCloseSession();
+        return false;
+    }
+    // Combat started (or is already running) while the loot window was open:
+    // the host may start combat from a script at any moment, and the client's
+    // blocking turn loop must run at the top level — not nested inside this
+    // modal (MpCombatTick defers the turn while the loot session is open).
+    // Break the modal WITHOUT closing the session: the modal tail
+    // (MpLootLoopEnded) sends END to the host and destroys the mirror, and
+    // the deferred turn runs on the next top-level tick.
+    if (MpCombatIsActive()) {
+        debugFilePrint("MPLOOT client session closing (combat active) netId=%u",
+            gMpSession.localNetId);
         return false;
     }
     return true;

@@ -83,6 +83,7 @@ enum NetPacketType {
     NET_PKT_FLOAT_MESSAGE = 53,   // host -> clients: script float_msg relay (combat chatter)
     NET_PKT_GVAR_SNAPSHOT = 54,   // host -> joining client: full gvar table (quest state)
     NET_PKT_GVAR_CHANGE = 55,     // host -> clients: one live gvar write
+    NET_PKT_MAP_ELEVATION = 56,   // host -> clients: shared elevation change (same-map transition)
 };
 
 enum NetUnreliablePacketType {
@@ -166,6 +167,16 @@ typedef struct NetMapSyncPayload {
     int32_t darkness;
     int32_t ambientIntensity;
 } NetMapSyncPayload;
+
+// Host -> clients: a passed vote resolved a transition to another elevation
+// of the CURRENT map (intra-map link). The map stays loaded; the session
+// switches elevation together and every player's critter snaps to the
+// destination tile.
+typedef struct NetMapElevationPayload {
+    int32_t tile;
+    int32_t elevation;
+    int32_t rotation;
+} NetMapElevationPayload;
 
 typedef struct NetWelcomePayload {
     uint8_t assignedNetId;
@@ -352,6 +363,7 @@ typedef struct NetPlayerStateUpdatePayload {
     int32_t radiation;
     int32_t poison;
     int32_t combatResults;
+    uint8_t flags; // bit 0 = DUDE_STATE_SNEAKING (avatar proto flag)
 } NetPlayerStateUpdatePayload;
 
 typedef struct NetMapFullSyncObjectPayload {

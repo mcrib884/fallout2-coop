@@ -45,6 +45,8 @@ bool _mouse_in(int left, int top, int right, int bottom);
 bool _mouse_click_in(int left, int top, int right, int bottom);
 void mouseGetRect(Rect* rect);
 void mouseGetPosition(int* out_x, int* out_y);
+bool mouseGetMiddleButton();
+bool mouseGetRightButton();
 void _mouse_set_position(int x, int y);
 int mouseGetEvent();
 bool cursorIsHidden();

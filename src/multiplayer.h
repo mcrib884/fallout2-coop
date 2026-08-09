@@ -54,6 +54,7 @@ typedef struct MultiplayerPlayer {
     // delta-sync bookkeeping (host)
     int32_t lastTile, lastX, lastY, lastRotation, lastFid, lastFrame, lastElevation;
     int32_t lastHp, lastAp, lastRadiation, lastPoison, lastCombatResults;
+    uint8_t lastFlags;
     bool hasLastState;
     int32_t lastSafeTile, lastSafeElevation, lastSafeRotation;
     bool hasSafePosition;
@@ -149,9 +150,20 @@ void MpSendPlayerAction(uint8_t action, uint32_t targetNetId, int32_t tile, int3
 // multiplayer.cc gMpRemoteActionNetId). Lets feedback relay and the elevator
 // guard attribute script-side effects to a remote player's action.
 bool MpRemoteActionActive();
+// The netId of the remote player whose action is currently executing on the
+// host (0 when none). The deferred walk/animation callbacks re-open the
+// window via MpSetRemoteActionNetId when the script runs after the accepting
+// packet handler exited.
+uint32_t MpRemoteActionNetId();
+void MpSetRemoteActionNetId(uint32_t netId);
 // Per-frame edge indicators pointing at off-screen remote players. Called
 // from the main loop after MpTick, before renderPresent.
 void MpDrawPlayerIndicators();
+
+// Collects the objects (local dude + every connected remote avatar) at whose
+// positions the roof/wall transparency circle must be punched. Single-player
+// returns just the local dude. Fills outAnchors up to maxAnchors.
+int MpGetCircleAnchors(Object** outAnchors, int maxAnchors);
 
 // broadcast (host -> clients)
 void MpBroadcastPlayerStates();
@@ -165,6 +177,10 @@ void MpFinishHostMapChange();
 
 // apply (client)
 void MpApplyPlayerState(const NetPlayerStateUpdatePayload* payload);
+// A passed vote resolved a transition to another tile/elevation of the
+// CURRENT map: snap the local dude and switch the shared elevation (no map
+// reload). See multiplayer.cc mpApplySessionElevationChange.
+void MpOnMapElevationChange(const NetMapElevationPayload* payload);
 // The client's current map-entrance snapshot (natural entering position from
 // the map file, captured before the co-op metadata overwrites the header).
 // Used by the save redirect so client saves never carry a session position.

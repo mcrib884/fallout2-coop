@@ -20,7 +20,10 @@ namespace fallout {
 // Bumped when the wire layout changes (sectioned body in v2).
 constexpr uint16_t MP_PROFILE_SCHEMA_VERSION = 2;
 constexpr size_t MP_PROFILE_NAME_LENGTH = 32;
-constexpr size_t MP_PROFILE_MAX_BYTES = 16 * 1024 * 1024;
+// 32MB: a critter model's full animation/weapon/rotation frame set can exceed
+// 8MB once the character equips armor with its own art (e.g. the vault suit);
+// the model half-cap (MP_PROFILE_MAX_BYTES/2) must fit the largest set.
+constexpr size_t MP_PROFILE_MAX_BYTES = 32 * 1024 * 1024;
 constexpr size_t MP_PROFILE_MAX_INVENTORY_NODES = 4096;
 constexpr size_t MP_PROFILE_MAX_INVENTORY_DEPTH = 32;
 

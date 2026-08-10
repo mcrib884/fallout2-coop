@@ -925,7 +925,8 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
         soundPlayFile("ib1p1xx1");
         // Co-op: the host saves a vanilla full save (avatars carry
         // OBJECT_NO_SAVE, so no synthetic protos are serialized); the client
-        // is redirected to its join slot inside lsgSaveGame.
+        // gets the vanilla slot picker and saves a full singleplayer-style
+        // snapshot (character + current map layer).
         if (lsgSaveGame(1) == -1) {
             debugPrint("\n ** Error calling SaveGame()! **\n");
         }

@@ -1036,6 +1036,11 @@ static int mpClientLoadMap(const NetMapSyncPayload* payload)
     // the initial WELCOME map load (the host never reloads its map at join,
     // which is why only the client's inventory vanished).
     mpSetDudeInventoryProtected(true);
+    // Defer the map-enter script until the full sync arrives: the cutscene
+    // (e.g. the temple exit's vault-suit scene) checks globals/objects that
+    // only exist once the host's state is applied. Running it now returns
+    // instantly and the client skips the cutscene.
+    gMpClientDeferMapEnterScript = true;
     int rc = mapLoadByName(mapName);
     if (rc == -1 && strstr(mapName, ".MAP") == nullptr && strstr(mapName, ".SAV") == nullptr) {
         // Bare map name: resolve it against the .MAP file (loose or in the
@@ -1045,6 +1050,7 @@ static int mpClientLoadMap(const NetMapSyncPayload* payload)
         snprintf(extName, sizeof(extName), "%s.MAP", mapName);
         rc = mapLoadByName(extName);
     }
+    gMpClientDeferMapEnterScript = false;
     mpSetDudeInventoryProtected(false);
     debugFilePrint("MPDBG after map load: rc=%d dude=%p pid=0x%X pt=%d tile=%d elev=%d hidden=%d st=%d carry=%d weight=%d",
         rc, (void*)gDude,
@@ -1255,6 +1261,25 @@ static void mpClientTryFinishMapSync()
     if (gDude != nullptr && hexGridTileIsValid(gDude->tile)) {
         tileSetCenter(gDude->tile,
             TILE_SET_CENTER_REFRESH_WINDOW | TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS);
+    }
+    // Run the deferred map-enter script now that the full sync (globals,
+    // objects, tiles, player states) is applied, mirroring the vanilla
+    // map-load prologue. A cutscene like the temple exit's vault-suit scene
+    // needs this state to evaluate its conditions.
+    //
+    // Co-op: the script must NOT run inline here - this function executes
+    // inside the network receive path (packet handlers). A cutscene that
+    // opens a dialog, waits on timed events, or blocks in any way would
+    // deadlock: while scriptExecProc blocks, the receive handler never
+    // returns, so no further packets, script requests, or queue drains can
+    // be serviced. Instead we mark the run pending and let MpTick execute it
+    // on the next top-level tick, where the full main-loop services (input,
+    // dialog modal pumping, timed-event queue) are available.
+    if (gMpClientDeferredMapEnterPending) {
+        gMpClientDeferredMapEnterPending = false;
+        gMpClientDeferredMapEnterRun = true;
+        debugFilePrint("MAP: client deferred map enter queued sid=%d (exec from MpTick)",
+            gMapSid);
     }
     tileWindowRefreshFull();
     gMpSession.state = MP_STATE_CLIENT_PLAYING;
@@ -2537,6 +2562,35 @@ void MpTick()
     // Co-op combat: deferred starts/turns, end-request drain, card refresh.
     MpCombatTick();
 
+    // Co-op: the client's deferred map-enter cutscene runs here, on a
+    // top-level tick — never inside the receive path. By now the deferred
+    // packet drain above and the receive pump have completed, so the script
+    // can open dialogs, schedule timed events, and block without starving
+    // the network handler. The escape hatch is cleared immediately after.
+    if (gMpIsClient && gMpClientDeferredMapEnterRun) {
+        gMpClientDeferredMapEnterRun = false;
+        debugFilePrint("MAP: client deferred map enter run sid=%d dudeTile=%d dudeElev=%d enteringTile=%d enteringElev=%d gameTime=%d",
+            gMapSid,
+            gDude != nullptr ? gDude->tile : -999,
+            gDude != nullptr ? gDude->elevation : -999,
+            gMpClientMapEnteringTile,
+            gMpClientMapEnteringElevation,
+            gameTimeGetTime());
+        _scr_spatials_disable();
+        // Co-op: this is the only place a client may execute a script - the
+        // map-enter cutscene. The flag is cleared immediately after.
+        gMpAllowClientScriptExec = true;
+        scriptExecProc(gMapSid, SCRIPT_PROC_MAP_ENTER);
+        gMpAllowClientScriptExec = false;
+        _scr_spatials_enable();
+        debugFilePrint("MAP: client deferred map script enter done sid=%d", gMapSid);
+        debugFilePrint("MAPDBG ambient after client deferred map script enter=%d",
+            lightGetAmbientIntensity());
+        if (wmSetupRandomEncounter() == -1) {
+            debugPrint("\nError: couldn't set up random encounter after deferred client map enter!");
+        }
+    }
+
     if (gMpIsHost) {
         if (gVoteSession.state == VOTE_STATE_ACTIVE
             && gVoteSession.initiatorNetId >= 1
@@ -2581,6 +2635,18 @@ void MpTick()
         if (logFirstHostTick) {
             debugFilePrint("MP: first host tick after player broadcast");
             gMpHostFirstTickPending = false;
+        }
+        // Authoritative game clock: clients advance a local mirror between
+        // syncs, but the host's value is truth. Throttled to ~1 Hz — the
+        // client's own tick keeps it roughly in lockstep in between.
+        static uint32_t gMpLastGameTimeSyncTick = 0;
+        uint32_t nowTick = getTicks();
+        if (nowTick - gMpLastGameTimeSyncTick >= 1000) {
+            gMpLastGameTimeSyncTick = nowTick;
+            NetGameTimePayload timePayload;
+            timePayload.time = (int32_t)gameTimeGetTime();
+            NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE,
+                NET_PKT_GAME_TIME, &timePayload, sizeof(timePayload));
         }
         // Vote housekeeping: check timeout and resolve the vote if its
         // window has elapsed.
@@ -3562,6 +3628,13 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                 return;
             }
             MpOnItemRemove((const NetItemRemovePayload*)payload);
+            break;
+        }
+        case NET_PKT_GAME_TIME: {
+            if (payloadLen != sizeof(NetGameTimePayload)) {
+                return;
+            }
+            MpOnGameTime((const NetGameTimePayload*)payload);
             break;
         }
         case NET_PKT_MAP_CHANGE_ABORT: {
@@ -5248,13 +5321,20 @@ void MpApplyPlayerState(const NetPlayerStateUpdatePayload* s)
         }
     }
     if (!isLocalPlayer) {
-        // The host's FID model index is process-local (custom models may
-        // resolve to different indices per machine). Remap through the
-        // profile's locally-resolved model index; animation/weapon/rotation
+        // The host's FID model index is process-local ONLY for session
+        // custom models (appended past the vanilla art list); vanilla models
+        // — including armor/equipment models like the vault suit — resolve
+        // to the same index on every machine and must pass through untouched,
+        // or an equipped armor would be reverted to the profile's base model.
+        // Remap through the profile's locally-resolved model index only when
+        // the received model is a session model; animation/weapon/rotation
         // bits are machine-independent.
         MpPlayerRuntime* runtime = MpProfileGetRuntime(s->netId);
         if (runtime != nullptr && runtime->profile.localModelIndex >= 0) {
-            obj->fid = (obj->fid & ~0xFFF) | runtime->profile.localModelIndex;
+            int receivedModel = obj->fid & 0xFFF;
+            if (receivedModel >= gArtCritterBaseLength) {
+                obj->fid = (obj->fid & ~0xFFF) | runtime->profile.localModelIndex;
+            }
         }
     }
     int oldLocalHp = 0;
@@ -5795,38 +5875,47 @@ void MpHostMirrorInventoryMove(Object* sourceAvatar, Object* destContainer,
     }
 
     // The vanilla move already stripped the SOURCE avatar's inventory into the
-    // container. Two things remain: (1) if the source is a REMOTE player's
-    // avatar, that player's local inventory must drop the same items; (2) the
-    // strip is a party strip in co-op — every other player avatar loses the
-    // same gear into the same container, and each owning client drops it too.
+    // container. In co-op the strip is a PARTY strip: every connected player
+    // loses their gear into the same container (matching the vanilla
+    // move_obj_inven_to_obj semantics, which moves the whole inventory), each
+    // owning client drops the same items locally, and every affected avatar's
+    // sprite is corrected to the unarmed/armor-less fid.
     for (int index = 0; index < NET_MAX_PLAYERS; index++) {
         MultiplayerPlayer* player = &gMpSession.players[index];
-        if (!player->isConnected || player->obj == nullptr || player->peer == nullptr) {
+        // Local players have peer == nullptr (the host's own entry); they must
+        // still be stripped.
+        if (!player->isConnected || player->obj == nullptr
+            || (player->peer == nullptr && !player->isLocal)) {
             continue;
         }
 
-        if (player->obj == sourceAvatar) {
-            // Source avatar already moved by the vanilla opcode; relay to its
-            // owner so the local inventory matches.
-            if (!player->isLocal) {
-                for (int i = 0; i < count; i++) {
-                    NetItemRemovePayload payload;
-                    payload.pid = pids[i];
-                    payload.quantity = qtys[i];
-                    debugFilePrint("MP: item strip relay netId=%u pid=0x%X qty=%d",
-                        player->netId, pids[i], qtys[i]);
-                    NetSendPacket(player->peer, NET_CHANNEL_RELIABLE, NET_PKT_ITEM_REMOVE,
-                        &payload, sizeof(payload));
+        bool isSource = (player->obj == sourceAvatar);
+        bool isLocalDude = (player->obj == gDude) && player->isLocal;
+
+        // Snapshot the gear this avatar is about to lose. The source avatar was
+        // already stripped by the vanilla opcode, so relay the caller's
+        // snapshot; every other avatar is stripped here.
+        std::vector<int> losePids;
+        std::vector<int> loseQtys;
+        if (isSource) {
+            for (int i = 0; i < count; i++) {
+                losePids.push_back(pids[i]);
+                loseQtys.push_back(qtys[i]);
+            }
+        } else {
+            for (int itemIndex = 0; itemIndex < player->obj->data.inventory.length; itemIndex++) {
+                Object* stripItem = player->obj->data.inventory.items[itemIndex].item;
+                if (stripItem != nullptr) {
+                    losePids.push_back(stripItem->pid);
+                    loseQtys.push_back(player->obj->data.inventory.items[itemIndex].quantity);
                 }
             }
+        }
+        if (losePids.empty()) {
             continue;
         }
 
-        // Party strip: find the same-pid gear on this avatar and move it into
-        // the same container, then relay to the owning client. When the avatar
-        // is the host's own dude (the script targeted a remote avatar), the
-        // vanilla opcode's gDude cleanup never runs — replicate it here.
-        bool isLocalDude = (player->obj == gDude) && player->isLocal;
+        // Capture the old weapon/armor for the fid/stat cleanup after the move.
         Object* oldWeapon = nullptr;
         Object* oldArmor = nullptr;
         if (isLocalDude) {
@@ -5834,42 +5923,38 @@ void MpHostMirrorInventoryMove(Object* sourceAvatar, Object* destContainer,
                 ? critterGetItem2(player->obj)
                 : critterGetItem1(player->obj);
             oldArmor = critterGetArmor(player->obj);
+        } else {
+            oldWeapon = critterGetItem2(player->obj);
+            if (oldWeapon == nullptr) {
+                oldWeapon = critterGetItem1(player->obj);
+            }
         }
-        for (int i = 0; i < count; i++) {
-            Object* remoteItem = nullptr;
-            for (int itemIndex = 0; itemIndex < player->obj->data.inventory.length; itemIndex++) {
-                Object* candidate = player->obj->data.inventory.items[itemIndex].item;
-                if (candidate != nullptr && candidate->pid == pids[i]) {
-                    remoteItem = candidate;
-                    break;
-                }
-            }
-            if (remoteItem == nullptr) {
-                continue;
-            }
-            int remoteQty = qtys[i];
-            int have = itemGetQuantity(player->obj, remoteItem);
-            if (remoteQty > have) {
-                remoteQty = have;
-            }
-            if (remoteQty <= 0) {
-                continue;
-            }
-            itemMoveForce(player->obj, destContainer, remoteItem, remoteQty);
-            if (!player->isLocal) {
+
+        if (!isSource) {
+            itemMoveAll(player->obj, destContainer);
+        }
+
+        // Relay every removed item to the owning client so the local inventory
+        // matches.
+        if (!player->isLocal) {
+            for (size_t i = 0; i < losePids.size(); i++) {
                 NetItemRemovePayload payload;
-                payload.pid = remoteItem->pid;
-                payload.quantity = remoteQty;
-                debugFilePrint("MP: item strip spread netId=%u pid=0x%X qty=%d",
-                    player->netId, remoteItem->pid, remoteQty);
+                payload.pid = losePids[i];
+                payload.quantity = loseQtys[i];
+                debugFilePrint("MP: item strip %s netId=%u pid=0x%X qty=%d",
+                    isSource ? "relay" : "spread",
+                    player->netId, losePids[i], loseQtys[i]);
                 NetSendPacket(player->peer, NET_CHANNEL_RELIABLE, NET_PKT_ITEM_REMOVE,
                     &payload, sizeof(payload));
             }
         }
 
-        // The vanilla opcode's gDude branch (scriptHooks_InvenWield before the
-        // move, armor/gender/interface refresh after) never runs when the
-        // script targeted a remote avatar — replicate the post-move cleanup.
+        // Correct the avatar's sprite: the vanilla opcode only ran its gDude
+        // cleanup when the script targeted the host's own dude — for every
+        // avatar actually stripped here (remote avatars AND the local dude when
+        // the script targeted a remote avatar), replicate it. The source
+        // avatar's fid was already corrected by the vanilla opcode; the others
+        // are corrected here.
         if (isLocalDude) {
             if (oldWeapon != nullptr) {
                 int flags = 0;
@@ -5888,6 +5973,27 @@ void MpHostMirrorInventoryMove(Object* sourceAvatar, Object* destContainer,
             bool animated = !gameUiIsDisabled();
             interfaceUpdateItems(animated, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
             debugFilePrint("MP: item strip local dude cleaned up");
+        } else if (!isSource && oldWeapon != nullptr) {
+            int flags = 0;
+            if ((oldWeapon->flags & OBJECT_IN_LEFT_HAND) != 0) {
+                flags |= OBJECT_IN_LEFT_HAND;
+            }
+            if ((oldWeapon->flags & OBJECT_IN_RIGHT_HAND) != 0) {
+                flags |= OBJECT_IN_RIGHT_HAND;
+            }
+            correctFidForRemovedItem(player->obj, oldWeapon, flags);
+            // Vanilla's non-gDude correction only un-arms right-hand weapons;
+            // force the unarmed fid when no hand weapon remains so the owning
+            // client's sprite doesn't stay armed.
+            if (weaponAnimationFromFid(player->obj->fid) != WEAPON_ANIMATION_NONE
+                && critterGetItem1(player->obj) == nullptr
+                && critterGetItem2(player->obj) == nullptr) {
+                Rect unarmRect;
+                objectSetFid(player->obj, buildFid(objectTypeFromFid(player->obj->fid),
+                    player->obj->fid & 0xFFF, animationTypeFromFid(player->obj->fid),
+                    WEAPON_ANIMATION_NONE, rotationFromFid(player->obj->fid)), &unarmRect);
+            }
+            debugFilePrint("MP: item strip avatar fid corrected netId=%u", player->netId);
         }
     }
 }
@@ -5920,25 +6026,57 @@ void MpOnItemRemove(const NetItemRemovePayload* payload)
     }
     bool updateFlags = false;
     int flags = 0;
-    if ((item->flags & OBJECT_EQUIPPED) != 0) {
-        if ((item->flags & OBJECT_IN_LEFT_HAND) != 0) {
-            flags |= OBJECT_IN_LEFT_HAND;
-        }
-        if ((item->flags & OBJECT_IN_RIGHT_HAND) != 0) {
-            flags |= OBJECT_IN_RIGHT_HAND;
-        }
-        if ((item->flags & OBJECT_WORN) != 0) {
-            flags |= OBJECT_WORN;
-        }
-        updateFlags = true;
+    RemoveInventoryObjectHookReason removeReason = RemoveInventoryObjectHookReason::ItemRemoved;
+    // Detect equipped status by pointer comparison against the current hand
+    // and armor slots, NOT by the item's flags — the stripped copy may not
+    // carry OBJECT_EQUIPPED, and the unequip action (which updates the sprite
+    // fid) only fires when the equipped removal reason is used.
+    if (item == critterGetItem1(gDude) || (item->flags & OBJECT_IN_LEFT_HAND) != 0) {
+        flags |= OBJECT_IN_LEFT_HAND;
+        removeReason = RemoveInventoryObjectHookReason::LeftHandEquipped;
     }
-    if (itemRemoveWithReason(gDude, item, quantity, RemoveInventoryObjectHookReason::ItemRemoved) == 0) {
+    if (item == critterGetItem2(gDude) || (item->flags & OBJECT_IN_RIGHT_HAND) != 0) {
+        flags |= OBJECT_IN_RIGHT_HAND;
+        removeReason = RemoveInventoryObjectHookReason::RightHandEquipped;
+    }
+    if (item == critterGetArmor(gDude) || (item->flags & OBJECT_WORN) != 0) {
+        flags |= OBJECT_WORN;
+        if (removeReason == RemoveInventoryObjectHookReason::ItemRemoved) {
+            removeReason = RemoveInventoryObjectHookReason::ArmorEquipped;
+        }
+    }
+    updateFlags = (flags & (OBJECT_IN_ANY_HAND | OBJECT_WORN)) != 0;
+    if (itemRemoveWithReason(gDude, item, quantity, removeReason) == 0) {
         if (updateFlags) {
             correctFidForRemovedItem(gDude, item, flags);
+        }
+        // Belt-and-suspenders: if the dude's fid still shows a weapon
+        // animation but no hand weapon remains, force the unarmed fid —
+        // mirrors the host-side strip cleanup and covers ambiguous slot state.
+        if (weaponAnimationFromFid(gDude->fid) != WEAPON_ANIMATION_NONE
+            && critterGetItem1(gDude) == nullptr
+            && critterGetItem2(gDude) == nullptr) {
+            Rect unarmRect;
+            objectSetFid(gDude, buildFid(objectTypeFromFid(gDude->fid),
+                gDude->fid & 0xFFF, animationTypeFromFid(gDude->fid),
+                WEAPON_ANIMATION_NONE, rotationFromFid(gDude->fid)), &unarmRect);
+            debugFilePrint("MP: item remove client force-unarmed pid=0x%X", payload->pid);
         }
         bool animated = !gameUiIsDisabled();
         interfaceUpdateItems(animated, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
     }
+}
+
+void MpOnGameTime(const NetGameTimePayload* payload)
+{
+    if (payload == nullptr || payload->time <= 0) {
+        return;
+    }
+    // Adopt the host's authoritative clock. Between syncs the client's own
+    // tick advances the mirror (see _script_chk_timed_events), so this keeps
+    // time-gated scripts roughly in lockstep with the host without spamming.
+    debugFilePrint("MP: game time sync %u -> %u", gameTimeGetTime(), payload->time);
+    gameTimeSetTime((unsigned int)payload->time);
 }
 
 // ---------------------------------------------------------------------------

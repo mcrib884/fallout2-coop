@@ -150,7 +150,11 @@ static int* _anon_alias;
 // artCritterFidShouldRunData
 // 0x56CAF0 artCritterFidShouldRunData
 static int* gArtCritterFidShoudRunData;
-static int gArtCritterBaseLength = 0;
+// Length of the vanilla critter art list; session-registered custom models
+// are appended after it, so indices >= this are machine-local and must be
+// remapped between peers, while vanilla indices (including armor models)
+// are identical on every machine.
+int gArtCritterBaseLength = 0;
 static std::unordered_map<int, std::string> gSessionCritterModelRoots;
 
 static std::unordered_map<std::string, std::shared_ptr<NamedCacheEntry>> gNamedArtCache;

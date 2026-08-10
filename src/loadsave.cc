@@ -436,44 +436,13 @@ int lsgSaveGame(int mode)
     debugFilePrint("LOADSAVE: save game begin mode=%d co-op=%d", mode, gMpActive ? 1 : 0);
     ScopedGameMode gm(GameMode::kSaveGame);
 
-    // Co-op: the save menu is gone for host and client alike. Every save
-    // (F4/Ctrl-S, F6, options menu — all funnel through here) silently writes
-    // into the slot the session was built from — never a slot picker. The
-    // session slot is the client's own SP slot when they joined by loading
-    // one, the next empty slot for new-game sessions, or the hidden co-op
-    // slot for in-game joins.
-    if (gMpActive && gMpSessionSlot >= 0) {
-        debugFilePrint("LOADSAVE: co-op save redirected to session slot=%d", gMpSessionSlot);
-        if (gMpIsClient) {
-            // A client save must not carry a session position: write the map's
-            // natural entrance into the dude's serialized transform instead.
-            // The load path would place the dude at the map entrance anyway,
-            // but this keeps the file explicitly position-free.
-            int entranceTile = -1;
-            int entranceElevation = -1;
-            int entranceRotation = -1;
-            MpGetClientMapEnteringPosition(&entranceTile, &entranceElevation, &entranceRotation);
-            if (gDude != nullptr && hexGridTileIsValid(entranceTile)) {
-                Object* dude = gDude;
-                const int oldTile = dude->tile;
-                const int oldElevation = dude->elevation;
-                const Rotation oldRotation = dude->rotation;
-                const int elevation = elevationIsValid(entranceElevation)
-                    ? entranceElevation
-                    : oldElevation;
-                const Rotation rotation = entranceRotation >= 0 && entranceRotation < ROTATION_COUNT
-                    ? static_cast<Rotation>(entranceRotation)
-                    : oldRotation;
-                objectSetLocation(dude, entranceTile, elevation, nullptr);
-                objectSetRotation(dude, rotation, nullptr);
-                const int rc = lsgQuickSaveGameInternal(gMpSessionSlot);
-                objectSetLocation(dude, oldTile, oldElevation, nullptr);
-                objectSetRotation(dude, oldRotation, nullptr);
-                debugFilePrint("LOADSAVE: client save position stripped (entrance=%d)",
-                    entranceTile);
-                return rc;
-            }
-        }
+    // Co-op: the HOST's save is the session's save — silently written to the
+    // slot the session was built from, never a slot picker. A CLIENT keeps the
+    // vanilla slot picker below so the player chooses where their save lands,
+    // and the save carries a full singleplayer-style snapshot (character +
+    // current map layer written by _map_save_in_game).
+    if (gMpActive && !gMpIsClient && gMpSessionSlot >= 0) {
+        debugFilePrint("LOADSAVE: co-op host save redirected to session slot=%d", gMpSessionSlot);
         return lsgQuickSaveGameInternal(gMpSessionSlot);
     }
 
@@ -624,6 +593,14 @@ int lsgSaveGame(int mode)
 
         unsigned int tick = getTicks();
         int keyCode = inputGetInput();
+        // Co-op: a client choosing a save slot keeps the session alive by
+        // pumping the network, scripts and map transitions while the picker
+        // is open (same pump the options menu uses).
+        if (gMpActive && gMpIsClient) {
+            MpTick();
+            scriptsHandleRequests();
+            mapHandleTransition();
+        }
         bool selectionChanged = false;
         int scrollDirection = LOAD_SAVE_SCROLL_DIRECTION_NONE;
 

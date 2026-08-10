@@ -74,6 +74,21 @@ extern int gMapLocalVarsLength;
 extern int gMapGlobalVarsLength;
 extern int gElevation;
 
+// Co-op: deferred map-enter script. The host sets gMpDeferMapEnterScript
+// around mapLoadById so the enter script (e.g. a cutscene) runs after the
+// MAP_CHANGED + full sync broadcast instead of blocking clients on the old
+// map; gMpDeferredMapEnterPending is consumed by mapHandleTransition's
+// deferred-run block. The client sets gMpClientDeferMapEnterScript around
+// its map load and consumes gMpClientDeferredMapEnterPending after the full
+// sync so the cutscene's conditions (globals, objects) are present.
+extern bool gMpDeferMapEnterScript;
+extern bool gMpDeferredMapEnterPending;
+extern bool gMpClientDeferMapEnterScript;
+extern bool gMpClientDeferredMapEnterPending;
+// Client: set when the deferred map-enter cutscene is ready to run; consumed
+// by MpTick (top-level tick, never the receive path).
+extern bool gMpClientDeferredMapEnterRun;
+
 extern MessageList gMapMessageList;
 extern MapHeader gMapHeader;
 extern TileData* _square[ELEVATION_COUNT];

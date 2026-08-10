@@ -683,13 +683,24 @@ void MpDialogHostEnd()
     }
 
     debugFilePrint("MPDIALOG end session=%u normal", gMpDialog.sessionId);
-
     NetDialogEndPayload p;
     p.sessionId = gMpDialog.sessionId;
     p.reason = NET_DIALOG_END_NORMAL;
     NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE, NET_PKT_DIALOG_END, &p, sizeof(p));
 
     mpDialogHostClearSession();
+}
+
+void MpDialogHostAbortCombat()
+{
+    if (!gMpActive || !gMpIsHost || !gMpDialog.active) {
+        return;
+    }
+    // Combat is taking over the main loop: the director tick can no longer
+    // run (the blocking combat pump owns it), so the session must be closed
+    // here or every client's dialogue modal hangs forever on the dead node,
+    // deferring all combat packets.
+    mpDialogHostAbort(NET_DIALOG_END_COMBAT);
 }
 
 void MpDialogSetPendingInitiator(uint8_t netId)

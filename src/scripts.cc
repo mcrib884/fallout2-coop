@@ -986,12 +986,16 @@ static void _doBkProcesses()
 
     scriptWindowUpdateAll();
 
-    if (gScriptsEnabled && !gMpIsClient && gCritterProcessingEnabled) {
+    if (gScriptsEnabled && gCritterProcessingEnabled) {
         // SFALL: Fix to prevent the execution of critter_p_proc and game events
         // when playing movies. Co-op: the world keeps ticking behind a
         // synchronized dialogue (the host's script is paused at dialog_go).
+        // The client still needs the timed-event queue serviced: its deferred
+        // map-enter cutscene schedules timed waits that only fire here.
         if ((!_gdialogActive() || MpDialogAllowWorldTick()) && !gameMovieIsPlaying()) {
-            _script_chk_critters();
+            if (!gMpIsClient) {
+                _script_chk_critters();
+            }
             _script_chk_timed_events();
         }
     }
@@ -1046,8 +1050,29 @@ static void _script_chk_critters()
 // 0x4A3D84
 static void _script_chk_timed_events()
 {
-    // Co-op: clients don't run timed event scripts.
-    if (gMpIsClient) return;
+    // Co-op: the host owns the timed-event queue, but the client must still
+    // advance its game clock or every time-gated script (cutscenes, quest
+    // gates, timed encounters) evaluates against a frozen value. The host
+    // periodically syncs the authoritative time (NET_PKT_GAME_TIME).
+    if (gMpIsClient) {
+        int currentTime = _get_bk_time();
+        if (getTicksBetween(currentTime, gLastQueueProcessingTime) >= 100) {
+            gLastQueueProcessingTime = currentTime;
+            if (!isInCombat()) {
+                gGameTime += 1;
+            }
+            // The client runs deferred cutscene scripts locally (map-enter);
+            // those scripts schedule timed events (waits) that must fire for
+            // the script to progress — otherwise scriptExecProc blocks inside
+            // the cutscene forever. Drain the local queue like the host does.
+            if (!isInCombat()) {
+                while (!queueIsEmpty() && gameTimeGetTime() >= queueGetNextEventTime()) {
+                    queueProcessEvents();
+                }
+            }
+        }
+        return;
+    }
 
     int currentTime = _get_bk_time();
 
@@ -1266,6 +1291,9 @@ static int scriptsHandleElevatorRequest(bool closeDoorsBeforeMapTransition)
 int scriptsHandleRequests()
 {
     if (gMpIsClient) {
+        if (gScriptsRequests != 0) {
+            debugFilePrint("MPSCR: client clearing script requests flags=0x%X", gScriptsRequests);
+        }
         scriptsClearPendingRequests();
         return 0;
     }
@@ -1509,6 +1537,10 @@ int scriptsRequestExplosion(int tile, int elevation, int minDamage, int maxDamag
 // 0x4A4754
 void scriptsRequestDialog(Object* obj)
 {
+    if (gMpIsClient) {
+        debugFilePrint("MPSCR: client dialog request obj=%p pid=0x%X", (void*)obj,
+            obj != nullptr ? obj->pid : 0);
+    }
     gScriptsRequestedDialogWith = obj;
     gScriptsRequests |= SCRIPT_REQUEST_DIALOG;
 }
@@ -1545,11 +1577,16 @@ void _script_make_path(char* path)
 }
 
 // 0x4A4810 exec_script_proc
+// Co-op: clients normally never execute scripts - the host owns the world.
+// gMpAllowClientScriptExec is a narrow escape hatch set only around the
+// deferred map-enter script (cutscene) after a client's full sync.
+bool gMpAllowClientScriptExec = false;
+
 int scriptExecProc(int sid, int proc)
 {
     assert(proc >= 0 && proc < SCRIPT_PROC_COUNT);
 
-    if (gMpIsClient) {
+    if (gMpIsClient && !gMpAllowClientScriptExec) {
         return 0;
     }
 
@@ -1658,6 +1695,10 @@ int scriptExecProc(int sid, int proc)
 
     executedScript->source = nullptr;
     executedScript->action = 0;
+
+    if (gMpIsClient) {
+        debugFilePrint("MPSCR: client script exec done sid=%d proc=%d", sid, proc);
+    }
 
     return 0;
 }

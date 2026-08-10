@@ -227,6 +227,12 @@ void scriptsRequestEndgame();
 int scriptsRequestLooting(Object* looter, Object* container);
 int scriptsRequestStealing(Object* thief, Object* target);
 void _script_make_path(char* path);
+// Co-op: when set on the client, scriptExecProc is allowed to actually run a
+// script. Everything else that would call scriptExecProc on the client is
+// already gated at its own call site, so this only lets the deferred map-enter
+// script (cutscene) execute after the full sync. Set and clear around the
+// single call; never leave it enabled.
+extern bool gMpAllowClientScriptExec;
 int scriptExecProc(int sid, int proc);
 bool scriptHasProc(int sid, int proc);
 int _scr_find_str_run_info(int scriptIndex, int* unused, int sid);

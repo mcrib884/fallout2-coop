@@ -40,6 +40,7 @@
 #include "multiplayer_vote.h"
 #include "object.h"
 #include "perk.h"
+#include "proto.h"
 #include "scripts.h"
 #include "tile.h"
 #include "skill.h"
@@ -312,6 +313,11 @@ void MpCombatOnStarted()
     // MpLootLoopTick), but release the host-side session now so a lost END
     // can never strand the session across the fight.
     MpLootHostCloseAllSessions();
+    // Same for an active dialogue: the blocking combat pump takes over the
+    // host loop and the director tick never runs again, so broadcast the END
+    // here or every client's dialogue modal stays open and defers all combat
+    // packets (stuck convo, dead buttons).
+    MpDialogHostAbortCombat();
     gMpCombat.inCombat = true;
     gMpCombat.whoseTurn = 0;
     gMpCombat.waitingForTurnEnd = 0;
@@ -506,6 +512,21 @@ static void mpCombatResolveMove(MultiplayerPlayer* player, const NetCombatCmdPay
         animationRegisterMoveToTile(critter, targetTile, cmd->elevation, ap, 0);
     }
     reg_anim_end();
+
+    // Vanilla parity: running cancels sneaking unless the Silent Running perk
+    // (same rule as mpHostRegisterPlayerMovement). Combat move intents flow
+    // through here, not through the free-move path, so the avatar's proto
+    // flag must be cleared here too — otherwise the player-state broadcast
+    // keeps re-enabling the client's sneak every frame.
+    if (isRun && perkGetRank(critter, PERK_SILENT_RUNNING) == 0) {
+        Proto* playerProto = nullptr;
+        if (protoGetProto(critter->pid, &playerProto) == 0
+            && (playerProto->critter.data.flags & (1 << DUDE_STATE_SNEAKING)) != 0) {
+            playerProto->critter.data.flags &= ~(1 << DUDE_STATE_SNEAKING);
+            debugFilePrint("MPCOMBAT: run cancelled sneak netId=%u", player->netId);
+        }
+    }
+
     mpCombatSendMoveResult(player, targetTile, cmd->elevation);
     debugFilePrint("MPCOMBAT: move resolved netId=%u tile=%d elev=%d run=%d ap=%d free=%d",
         player->netId, targetTile, cmd->elevation, isRun ? 1 : 0,

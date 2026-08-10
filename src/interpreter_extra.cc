@@ -4779,6 +4779,13 @@ static void opMoveObjectInventoryToObject(Program* program)
         }
     } else {
         oldWeapon = critterGetItem2(object1);
+        if (oldWeapon == nullptr) {
+            // Co-op: player avatar mirrors may not carry the right-hand flag
+            // consistently (profile capture preserves OBJECT_IN_ANY_HAND, but
+            // a left-handed weapon is common) — check both hands so the sprite
+            // is un-armed after the strip instead of staying armed on screen.
+            oldWeapon = critterGetItem1(object1);
+        }
     }
 
     if (object1 == gDude) {
@@ -4829,6 +4836,21 @@ static void opMoveObjectInventoryToObject(Program* program)
 
     if (gMpIsHost && gMpActive && !stripPids.empty()) {
         MpHostMirrorInventoryMove(object1, object2, stripPids.data(), stripQtys.data(), (int)stripPids.size());
+    }
+
+    // Co-op: when the stripped source is a remote player avatar, the vanilla
+    // non-gDude correction above only un-arms RIGHT-hand weapons. Force the
+    // unarmed fid if no hand weapon remains so the player-state broadcast no
+    // longer re-arms the owning client's sprite every frame.
+    if (gMpIsHost && gMpActive && MpIsPlayerObject(object1)
+        && weaponAnimationFromFid(object1->fid) != WEAPON_ANIMATION_NONE
+        && critterGetItem1(object1) == nullptr
+        && critterGetItem2(object1) == nullptr) {
+        Rect unarmRect;
+        objectSetFid(object1, buildFid(objectTypeFromFid(object1->fid),
+            object1->fid & 0xFFF, animationTypeFromFid(object1->fid),
+            WEAPON_ANIMATION_NONE, rotationFromFid(object1->fid)), &unarmRect);
+        debugFilePrint("MP: strip source force-unarmed netId=%u", MpGetObjNetId(object1));
     }
 
     if (object1 == gDude) {

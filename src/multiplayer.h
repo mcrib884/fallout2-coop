@@ -190,6 +190,10 @@ void MpOnMapElevationChange(const NetMapElevationPayload* payload);
 // temple warrior strip): drop the matching item from the local dude inventory.
 // (client)
 void MpOnItemRemove(const NetItemRemovePayload* payload);
+// The host's authoritative game clock arrived: adopt it so time-gated
+// scripts (cutscenes, quest gates, timed encounters) evaluate against a
+// live value. (client)
+void MpOnGameTime(const NetGameTimePayload* payload);
 // A script removed an item from a player avatar's inventory on the host:
 // relay the removal to the owning client so its LOCAL inventory matches.
 // (host; called from the script removal opcodes)

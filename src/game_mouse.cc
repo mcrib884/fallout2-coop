@@ -412,7 +412,6 @@ int gameMouseInit()
 #define MP_CAMERA_DRAG_SCALE 2
 #define MP_CAMERA_DRAG_STEP_X 32
 #define MP_CAMERA_DRAG_STEP_Y 24
-#define MP_CAMERA_DRAG_MAX_STEPS 24
 // Movement required (pixels) before a held right-click becomes a drag; a
 // press that stays inside this box is still a mode-cycle click.
 #define MP_CAMERA_DRAG_START_DIST 10
@@ -1297,6 +1296,10 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                         // The repeated-destination rule lives in the shared
                         // movement helper, so prediction and the host receive
                         // the same walk/run decision.
+                        debugFilePrint("MPCLICK: move tile=%d elev=%d mode=%d shift=%d run=%d rc=%d sneak=%d",
+                            tile, gDude->elevation, usesMoveMode ? 1 : 0, shiftHeld ? 1 : 0,
+                            isRun ? 1 : 0, movementRc,
+                            dudeHasState(DUDE_STATE_SNEAKING) ? 1 : 0);
                         MpSendPlayerAction(isRun ? NET_PLAYER_ACTION_RUN : NET_PLAYER_ACTION_WALK,
                             0, tile, gDude->elevation);
                     }

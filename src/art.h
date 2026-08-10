@@ -36,6 +36,10 @@ typedef struct ArtFrame {
 extern int _art_vault_guy_num;
 extern int _art_vault_person_nums[DUDE_NATIVE_LOOK_COUNT][GENDER_COUNT];
 
+// Length of the vanilla critter art list; session-registered custom models
+// are appended after it, so indices >= this are machine-local (see art.cc).
+extern int gArtCritterBaseLength;
+
 extern Cache gArtCache;
 
 int artInit();

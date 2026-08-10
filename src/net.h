@@ -85,6 +85,7 @@ enum NetPacketType {
     NET_PKT_GVAR_CHANGE = 55,     // host -> clients: one live gvar write
     NET_PKT_MAP_ELEVATION = 56,   // host -> clients: shared elevation change (same-map transition)
     NET_PKT_ITEM_REMOVE = 57,     // host -> client: script removed an item from the player's inventory
+    NET_PKT_GAME_TIME = 58,       // host -> clients: authoritative game clock (client keeps a mirror)
 };
 
 enum NetUnreliablePacketType {
@@ -184,9 +185,17 @@ typedef struct NetMapElevationPayload {
 // strip). Carries the proto pid + quantity so the client can drop the same
 // item from its local dude inventory.
 typedef struct NetItemRemovePayload {
-    int32_t pid;
-    int32_t quantity;
+int32_t pid;
+int32_t quantity;
 } NetItemRemovePayload;
+
+// Authoritative game clock relay (host -> clients). The client advances its
+// own mirror between syncs so time-gated scripts (cutscenes, quest gates,
+// timed encounters) evaluate against a live value instead of the frozen
+// join-time clock.
+typedef struct NetGameTimePayload {
+int32_t time;
+} NetGameTimePayload;
 
 typedef struct NetWelcomePayload {
     uint8_t assignedNetId;

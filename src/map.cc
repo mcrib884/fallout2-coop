@@ -130,6 +130,19 @@ int gMapGlobalVarsLength = 0;
 // 0x519578 map_elevation
 int gElevation = 0;
 
+// Co-op: set by the host before mapLoadById during a networked map change so
+// the map-enter script (which can block on a cutscene) runs after the
+// MAP_CHANGED broadcast instead of inside the load. The pending flag is
+// consumed by mapHandleTransition right after the broadcast + full sync.
+bool gMpDeferMapEnterScript = false;
+bool gMpDeferredMapEnterPending = false;
+bool gMpClientDeferMapEnterScript = false;
+bool gMpClientDeferredMapEnterPending = false;
+// Client: set when the deferred map-enter cutscene is ready to run; consumed
+// by MpTick (top-level tick, never the receive path) so the script can open
+// dialogs and wait on timed events without deadlocking the network handler.
+bool gMpClientDeferredMapEnterRun = false;
+
 // 0x51957C errMapName
 static char* _errMapName = byte_50B058;
 
@@ -1073,14 +1086,33 @@ static int mapLoad(File* stream)
         script->ownerId = object->id;
         script->owner = object;
         _scr_spatials_disable();
-        scriptExecProc(gMapSid, SCRIPT_PROC_MAP_ENTER);
-        _scr_spatials_enable();
-        debugFilePrint("MAP: load map script enter done sid=%d", gMapSid);
-        debugFilePrint("MAPDBG ambient after map script enter=%d", lightGetAmbientIntensity());
+        if (gMpDeferMapEnterScript || gMpClientDeferMapEnterScript) {
+            // Co-op: the map-enter script (e.g. the temple exit runs the
+            // vault-suit cutscene) can block for seconds. On the host it is
+            // deferred until after MAP_CHANGED + full sync are broadcast so
+            // clients load the new map in parallel; on the client it is
+            // deferred until after the full sync arrives so the cutscene's
+            // conditions (globals, objects) are in place. Its effects flow to
+            // clients through the regular object/player-state channels on
+            // subsequent ticks.
+            if (gMpClientDeferMapEnterScript) {
+                gMpClientDeferredMapEnterPending = true;
+                debugFilePrint("MAP: load map script enter deferred (client) sid=%d", gMapSid);
+            } else {
+                gMpDeferredMapEnterPending = true;
+                debugFilePrint("MAP: load map script enter deferred sid=%d", gMapSid);
+            }
+            _scr_spatials_enable();
+        } else {
+            scriptExecProc(gMapSid, SCRIPT_PROC_MAP_ENTER);
+            _scr_spatials_enable();
+            debugFilePrint("MAP: load map script enter done sid=%d", gMapSid);
+            debugFilePrint("MAPDBG ambient after map script enter=%d", lightGetAmbientIntensity());
 
-        error = "Error Setting up random encounter";
-        if (wmSetupRandomEncounter() == -1) {
-            goto err;
+            error = "Error Setting up random encounter";
+            if (wmSetupRandomEncounter() == -1) {
+                goto err;
+            }
         }
     }
 
@@ -1408,8 +1440,13 @@ int mapHandleTransition()
 
                 if (gMpIsHost) {
                     MpPrepareForMapChange();
+                    // Defer the map-enter script (cutscene) until the clients
+                    // have been told about the map change — otherwise they sit
+                    // on the old map for the whole cutscene.
+                    gMpDeferMapEnterScript = true;
                 }
                 int mapLoadResult = mapLoadById(gMapTransition.map);
+                gMpDeferMapEnterScript = false;
                 if (mapLoadResult != 0) {
                     if (gMpIsHost) {
                         // The load failed; players were already detached by
@@ -1453,6 +1490,22 @@ int mapHandleTransition()
                 MpFinishHostMapChange();
                 MpBroadcastMapChanged(gMapHeader.index);
                 MpBroadcastMapFullSync(nullptr);
+                // Run the map-enter script (e.g. the vault-suit cutscene) now
+                // that clients are loading the new map in parallel. Its effects
+                // reach them through the object/player-state channels on the
+                // next ticks.
+                if (gMpDeferredMapEnterPending) {
+                    gMpDeferredMapEnterPending = false;
+                    _scr_spatials_disable();
+                    scriptExecProc(gMapSid, SCRIPT_PROC_MAP_ENTER);
+                    _scr_spatials_enable();
+                    debugFilePrint("MAP: deferred map script enter done sid=%d", gMapSid);
+                    debugFilePrint("MAPDBG ambient after deferred map script enter=%d",
+                        lightGetAmbientIntensity());
+                    if (wmSetupRandomEncounter() == -1) {
+                        debugPrint("\nError: couldn't set up random encounter after deferred map enter!");
+                    }
+                }
             }
         }
     }
@@ -1606,10 +1659,12 @@ int _map_save_in_game(bool isLeavingMap)
     // The .SAV write itself is role-split: the HOST's save is the world's
     // save (character + world + position), so it writes the current map's
     // layer — the reload then restores the session's world state (killed
-    // critters stay dead). A CLIENT's save never touches the map layer: the
-    // MAPS\*.SAV files keep their singleplayer data, and maps that only
-    // existed inside a session simply have no layer (the savegame loader
-    // falls back to the fresh .MAP for those).
+    // critters stay dead). A CLIENT's save is a full singleplayer-style
+    // snapshot of the world as the client sees it — the mirrored objects are
+    // real protos (player avatars carry OBJECT_NO_SAVE and are skipped), so
+    // writing the layer captures the world state (killed critters stay dead,
+    // opened doors stay open). Only the leaving-map teardown stays skipped
+    // for co-op (mapLoad owns it).
     bool coOpActive = gMpActive;
 
     if (gMapHeader.name[0] == '\0') {
@@ -1635,11 +1690,6 @@ int _map_save_in_game(bool isLeavingMap)
 
         gameTimeScheduleUpdateEvent();
         _obj_reset_roof();
-    }
-
-    if (coOpActive && gMpIsClient) {
-        debugFilePrint("MAP: save in game skipped in co-op (client)");
-        return 0;
     }
 
     gMapHeader.flags |= 0x01;

@@ -376,12 +376,15 @@ void MpVoteOnVoteResult(const NetVoteResultPayload* payload)
         gMpSession.initiatorFrozen = false;
     }
     if (payload->passed) {
-        // Keep the modal up showing the final tally. It closes when the host's
-        // MAP_CHANGED actually arrives (MpApplyMapChanged hides the window),
-        // so the player sees the updated number right up until the map change.
+        // The host can be held inside a blocking map-load script after the
+        // vote passes (e.g. the temple exit runs the vault-suit cutscene
+        // inside mapLoadById), so MAP_CHANGED may not arrive for a long time.
+        // Close the modal immediately; the client waits in normal play and
+        // applies the map change when the host finishes it.
         gVoteSession.yesCount = payload->yesCount;
         gVoteSession.totalPlayers = payload->totalCount;
-        gVoteSession.state = VOTE_STATE_PASSED;
+        gVoteSession.state = VOTE_STATE_NONE;
+        MpVoteHideUI();
     } else {
         MpVoteHideUI();
         // The host owns positions; clients will receive the corrective

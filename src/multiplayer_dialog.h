@@ -61,6 +61,11 @@ void MpDialogHostNodeReady(const MpDialogNodeData* node);
 
 // The dialogue script ended normally (called from _gdialogExitFromScript).
 void MpDialogHostEnd();
+// Abort the active host session for an external interruption (combat start).
+// Broadcasts NET_PKT_DIALOG_END with reason=COMBAT so every client closes its
+// dialogue modal and drains deferred combat packets. Safe no-op when no
+// session is active.
+void MpDialogHostAbortCombat();
 
 // Called every frame of the host's blocking dialogue loop: pumps the network
 // and world, resolves votes, runs the host barter modal, and handles

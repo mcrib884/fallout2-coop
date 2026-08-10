@@ -33,6 +33,7 @@
 #include "multiplayer_debug.h"
 #include "multiplayer_dialog.h"
 #include "multiplayer_loot.h"
+#include "multiplayer_perf.h"
 #include "multiplayer_profile.h"
 #include "queue.h"
 #include "random.h"
@@ -126,6 +127,21 @@ struct MpHostObjectRecord {
 };
 
 static std::vector<MpHostObjectRecord> gMpHostObjectRecords;
+
+// Set by MpCombatPump (which runs inside inputGetInput) when it performed
+// the host's object/player state broadcasts. MpTick reads this to avoid a
+// second identical sweep in the same main-loop frame.
+static uint32_t gMpLastHostBroadcastTick = 0;
+
+void MpNoteHostBroadcastTick()
+{
+    gMpLastHostBroadcastTick = getTicks();
+}
+
+static bool mpHostBroadcastDoneThisTick(uint32_t nowTick)
+{
+    return nowTick == gMpLastHostBroadcastTick;
+}
 static std::vector<int32_t> gMpHostTileBaseline;
 static bool gMpHostFirstTickPending = false;
 static MpPlayerProfile gMpPendingClientProfile;
@@ -2034,7 +2050,9 @@ static uint32_t gMpDropDiagLastDump = 0;
 void MpPumpNetwork()
 {
     if (gMpActive && gMpSession.enetHost != nullptr) {
-        NetHostService(gMpSession.enetHost, mpOnNetEvent, nullptr);
+    MpPerfBegin(MP_PERF_MPTICK_NET);
+    NetHostService(gMpSession.enetHost, mpOnNetEvent, nullptr);
+    MpPerfEnd(MP_PERF_MPTICK_NET);
     }
 }
 
@@ -2603,38 +2621,57 @@ void MpTick()
                 reg_anim_clear(initiator->obj);
             }
         }
+        MpPerfBegin(MP_PERF_MPTICK_ASSIGN);
         MpAssignNetIdsToAllObjects();
-        if (logFirstHostTick) {
-            debugFilePrint("MP: first host tick after object assignment");
-        }
-        MpBroadcastObjectStates();
-        if (logFirstHostTick) {
-            debugFilePrint("MP: first host tick after object broadcast");
-        }
-        mpHostSyncProfiles();
-        if (!gMpHostTileBaseline.empty()) {
-            bool tilesChanged = false;
-            for (int elevation = 0; elevation < ELEVATION_COUNT && !tilesChanged; elevation++) {
-                if (_square[elevation] == nullptr) {
-                    continue;
-                }
-                const int32_t* tiles = _square[elevation]->field_0;
-                size_t offset = (size_t)elevation * SQUARE_GRID_SIZE;
-                for (int tile = 0; tile < SQUARE_GRID_SIZE; tile++) {
-                    if (gMpHostTileBaseline[offset + tile] != tiles[tile]) {
-                        tilesChanged = true;
-                        break;
+        MpPerfEnd(MP_PERF_MPTICK_ASSIGN);
+        // MpCombatPump (inputGetInput) may have already swept the state this
+        // same frame - a second sweep is pure duplicate work (~30ms each at
+        // map size, the host's dominant cost). MpCombatPump still covers the
+        // blocking loops (combat turns, modals) where MpTick never runs.
+        uint32_t mpTickNowTick = getTicks();
+        if (!mpHostBroadcastDoneThisTick(mpTickNowTick)) {
+            MpPerfBegin(MP_PERF_MPTICK_OBJECTS);
+            MpBroadcastObjectStates();
+            MpPerfEnd(MP_PERF_MPTICK_OBJECTS);
+            if (logFirstHostTick) {
+                debugFilePrint("MP: first host tick after object broadcast");
+            }
+            MpPerfBegin(MP_PERF_MPTICK_PROFILES);
+            mpHostSyncProfiles();
+            MpPerfEnd(MP_PERF_MPTICK_PROFILES);
+            if (!gMpHostTileBaseline.empty()) {
+                bool tilesChanged = false;
+                MpPerfBegin(MP_PERF_MPTICK_TILES);
+                for (int elevation = 0; elevation < ELEVATION_COUNT && !tilesChanged; elevation++) {
+                    if (_square[elevation] == nullptr) {
+                        continue;
+                    }
+                    const int32_t* tiles = _square[elevation]->field_0;
+                    size_t offset = (size_t)elevation * SQUARE_GRID_SIZE;
+                    for (int tile = 0; tile < SQUARE_GRID_SIZE; tile++) {
+                        if (gMpHostTileBaseline[offset + tile] != tiles[tile]) {
+                            tilesChanged = true;
+                            break;
+                        }
                     }
                 }
+                MpPerfEnd(MP_PERF_MPTICK_TILES);
+                if (tilesChanged) {
+                    MpBroadcastMapFullSync(nullptr);
+                }
             }
-            if (tilesChanged) {
-                MpBroadcastMapFullSync(nullptr);
+            MpPerfBegin(MP_PERF_MPTICK_PLAYERS);
+            MpBroadcastPlayerStates();
+            MpPerfEnd(MP_PERF_MPTICK_PLAYERS);
+            if (logFirstHostTick) {
+                debugFilePrint("MP: first host tick after player broadcast");
+                gMpHostFirstTickPending = false;
             }
-        }
-        MpBroadcastPlayerStates();
-        if (logFirstHostTick) {
-            debugFilePrint("MP: first host tick after player broadcast");
-            gMpHostFirstTickPending = false;
+        } else {
+            if (logFirstHostTick) {
+                debugFilePrint("MP: first host tick (broadcast already done in input pump)");
+                gMpHostFirstTickPending = false;
+            }
         }
         // Authoritative game clock: clients advance a local mirror between
         // syncs, but the host's value is truth. Throttled to ~1 Hz — the
@@ -4322,6 +4359,7 @@ void MpBroadcastPlayerStates()
         int channel = p->hasLastState ? NET_CHANNEL_UNRELIABLE : NET_CHANNEL_RELIABLE;
         NetBroadcastPacket(gMpSession.enetHost, channel,
             NET_PKT_PLAYER_STATE_UPDATE, &s, sizeof(s));
+        MpPerfAddCounter(MP_PERF_CNT_PLAYER_PKTS, 1);
         p->lastTile = s.tile;
         p->lastX = s.x;
         p->lastY = s.y;
@@ -4432,15 +4470,26 @@ void MpBroadcastObjectStates()
     mpDropDiagDump();
 
     std::vector<MpHostObjectRecord> currentRecords;
+    // Index the previous sweep's records once; per-object linear scans of
+    // ~4551 records were the host's main per-frame cost (the meter showed
+    // remCmp in the hundreds of millions per window).
+    std::unordered_map<uint32_t, int> recordIndex;
+    recordIndex.reserve(gMpHostObjectRecords.size());
+    for (int r = 0; r < (int)gMpHostObjectRecords.size(); r++) {
+        recordIndex.emplace(gMpHostObjectRecords[r].netId, r);
+    }
+    currentRecords.reserve(gMpHostObjectRecords.size());
     Object* obj = objectFindFirst();
     while (obj != nullptr) {
+        MpPerfAddCounter(MP_PERF_CNT_OBJ_SCANNED, 1);
         if (mpHostFindPlayerByObject(obj) != nullptr) {
             obj = objectFindNext();
             continue;
         }
         NetMapFullSyncObjectPayload state;
         if (mpBuildObjectState(obj, &state)) {
-            int oldIndex = mpHostFindObjectRecord(state.netId);
+            auto foundRecord = recordIndex.find(state.netId);
+            int oldIndex = foundRecord != recordIndex.end() ? foundRecord->second : -1;
             bool changed = oldIndex < 0
                 || memcmp(&gMpHostObjectRecords[oldIndex].state, &state, sizeof(state)) != 0;
             MultiplayerPlayer* player = mpHostFindPlayerByObject(obj);
@@ -4479,6 +4528,8 @@ void MpBroadcastObjectStates()
                 }
                 NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_UNRELIABLE,
                     NET_PKT_OBJECT_STATE_UPDATE, &state, sizeof(state));
+                MpPerfAddCounter(MP_PERF_CNT_OBJ_CHANGED, 1);
+                MpPerfAddCounter(MP_PERF_CNT_OBJ_PKTS, 1);
             }
 
             MpHostObjectRecord record;
@@ -4489,32 +4540,36 @@ void MpBroadcastObjectStates()
         obj = objectFindNext();
     }
 
+    MpPerfSetCounter(MP_PERF_CNT_OBJ_RECORDS, (uint32_t)currentRecords.size());
+
     // An object that disappeared from the host map must not remain visible on
     // clients. Player critters have their own PLAYER_LEFT packet and are
-    // intentionally excluded from this generic removal path.
+    // intentionally excluded from this generic removal path. Membership via a
+    // set: the previous nested old x current scan was O(n^2) and dominated
+    // the host frame (remCmp reached hundreds of millions per window).
+    std::unordered_set<uint32_t> currentNetIds;
+    currentNetIds.reserve(currentRecords.size());
+    for (const MpHostObjectRecord& currentRecord : currentRecords) {
+        currentNetIds.insert(currentRecord.netId);
+    }
     for (const MpHostObjectRecord& oldRecord : gMpHostObjectRecords) {
-        bool stillPresent = false;
-        for (const MpHostObjectRecord& currentRecord : currentRecords) {
-            if (currentRecord.netId == oldRecord.netId) {
-                stillPresent = true;
+        MpPerfAddCounter(MP_PERF_CNT_OBJ_REM_CMP, 1);
+        if (currentNetIds.find(oldRecord.netId) != currentNetIds.end()) {
+            continue;
+        }
+        bool isPlayer = false;
+        for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+            MultiplayerPlayer* player = &gMpSession.players[index];
+            if (player->isConnected && player->objNetId == oldRecord.netId) {
+                isPlayer = true;
                 break;
             }
         }
-        if (!stillPresent) {
-            bool isPlayer = false;
-            for (int index = 0; index < NET_MAX_PLAYERS; index++) {
-                MultiplayerPlayer* player = &gMpSession.players[index];
-                if (player->isConnected && player->objNetId == oldRecord.netId) {
-                    isPlayer = true;
-                    break;
-                }
-            }
-            if (!isPlayer && objectTypeFromFid(oldRecord.state.fid) != OBJ_TYPE_INTERFACE) {
-                debugFilePrint("MP: object removed broadcast netId=%u pid=0x%X fid=0x%X tile=%d",
-                    oldRecord.netId, oldRecord.state.pid, oldRecord.state.fid, oldRecord.state.tile);
-                NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE,
-                    NET_PKT_OBJECT_REMOVED, &oldRecord.netId, sizeof(oldRecord.netId));
-            }
+        if (!isPlayer && objectTypeFromFid(oldRecord.state.fid) != OBJ_TYPE_INTERFACE) {
+            debugFilePrint("MP: object removed broadcast netId=%u pid=0x%X fid=0x%X tile=%d",
+                oldRecord.netId, oldRecord.state.pid, oldRecord.state.fid, oldRecord.state.tile);
+            NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE,
+                NET_PKT_OBJECT_REMOVED, &oldRecord.netId, sizeof(oldRecord.netId));
         }
     }
 

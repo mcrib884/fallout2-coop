@@ -173,6 +173,12 @@ bool MpIsPlayerObject(const Object* obj);
 // broadcast (host -> clients)
 void MpBroadcastPlayerStates();
 void MpBroadcastObjectStates();
+// Called by MpCombatPump after it runs the host state broadcasts. MpTick
+// checks this so a main-loop frame never sweeps the object state twice
+// (inputGetInput -> MpCombatPump and then MpTick would otherwise both
+// broadcast; the meter showed ~30ms each, i.e. the frame was ~60ms of
+// duplicate work at ~15fps).
+void MpNoteHostBroadcastTick();
 void MpBroadcastMapFullSync(ENetPeer* toPeer /* or NULL = all */);
 void MpBroadcastMapChanged(int32_t mapId);
 void MpBroadcastMapChangeAbort();

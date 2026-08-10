@@ -5,18 +5,18 @@
 
 set(LAUNCHER_TARGET fallout2coop_launcher)
 
-# Embed the Inter font (SIL OFL) as a C array so the launcher is a single binary.
-set(LAUNCHER_FONT_IN "${CMAKE_CURRENT_SOURCE_DIR}/fonts/Inter.ttf")
+# Embed the Pixelify Sans font (SIL OFL) as a C array so the launcher is a single binary.
+set(LAUNCHER_FONT_IN "${CMAKE_CURRENT_SOURCE_DIR}/fonts/PixelifySans.ttf")
 set(LAUNCHER_FONT_OUT "${CMAKE_CURRENT_BINARY_DIR}/font_data.h")
 add_custom_command(
     OUTPUT "${LAUNCHER_FONT_OUT}"
     COMMAND ${CMAKE_COMMAND}
         "-DINPUT_FILE=${LAUNCHER_FONT_IN}"
         "-DOUTPUT_FILE=${LAUNCHER_FONT_OUT}"
-        "-DARRAY_NAME=g_inter_font_ttf"
+        "-DARRAY_NAME=g_launcher_font_ttf"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/bin2header.cmake"
     DEPENDS "${LAUNCHER_FONT_IN}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/bin2header.cmake"
-    COMMENT "Embedding Inter font into ${LAUNCHER_TARGET}"
+    COMMENT "Embedding Pixelify Sans font into ${LAUNCHER_TARGET}"
     VERBATIM
 )
 
@@ -25,6 +25,8 @@ target_sources(${LAUNCHER_TARGET} PRIVATE
     "launcher_main.cc"
     "ui.cc"
     "ui.h"
+    "game_config_editor.cc"
+    "game_config_editor.h"
     "detect.cc"
     "detect.h"
     "install.cc"

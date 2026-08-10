@@ -20,10 +20,13 @@ namespace ui {
 namespace {
 
 SDL_Renderer* g_renderer = nullptr;
+SDL_Window* g_window = nullptr;
 const unsigned char* g_ttfData = nullptr;
 unsigned int g_ttfSize = 0;
 
 float g_scale = 1.0f;
+float g_canvasW = 0.0f;
+float g_canvasH = 0.0f;
 float g_dt = 0.016f;
 float g_time = 0.0f;
 
@@ -31,6 +34,7 @@ float g_mx = 0, g_my = 0;
 bool g_leftDown = false;
 bool g_clicked = false;   // left pressed this frame
 bool g_released = false;  // left released this frame
+float g_wheelDelta = 0.0f;
 
 std::string g_textInput;
 struct KeyEvent {
@@ -349,9 +353,11 @@ void drawRectTexture(SDL_Texture* tex, float x, float y, float w, float h, const
 void init(SDL_Renderer* renderer, const unsigned char* ttfData, unsigned int ttfSize)
 {
     g_renderer = renderer;
+    g_window = SDL_RenderGetWindow(renderer);
     g_ttfData = ttfData;
     g_ttfSize = ttfSize;
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
+    SDL_SetHint(SDL_HINT_RENDER_LOGICAL_SIZE_MODE, "letterbox");
 }
 
 void shutdown()
@@ -366,7 +372,14 @@ void shutdown()
     g_rectTex.clear();
 }
 
-void setScale(float s) { g_scale = s; }
+void setCanvas(float w, float h)
+{
+    g_canvasW = w;
+    g_canvasH = h;
+    if (g_renderer != nullptr)
+        SDL_RenderSetLogicalSize(g_renderer, (int)w, (int)h);
+}
+
 float scale() { return g_scale; }
 
 void beginFrame(float dt)
@@ -375,6 +388,7 @@ void beginFrame(float dt)
     g_time += dt;
     g_clicked = false;
     g_released = false;
+    g_wheelDelta = 0.0f;
     g_textInput.clear();
     g_keys.clear();
 }
@@ -389,6 +403,9 @@ void handleEvent(const SDL_Event& e)
     case SDL_MOUSEBUTTONUP:
         if (e.button.button == SDL_BUTTON_LEFT)
             g_released = true;
+        break;
+    case SDL_MOUSEWHEEL:
+        g_wheelDelta += (float)e.wheel.y;
         break;
     case SDL_TEXTINPUT:
         g_textInput += e.text.text;
@@ -405,12 +422,30 @@ void handleEvent(const SDL_Event& e)
 
 void setMouse(float x, float y, bool leftDown)
 {
-    g_mx = x;
-    g_my = y;
+    if (g_window != nullptr && g_canvasW > 0.0f && g_canvasH > 0.0f) {
+        // Map window coordinates into the logical canvas, accounting for the
+        // uniform scale and the letterbox offset.
+        int ww = 0, wh = 0;
+        SDL_GetWindowSize(g_window, &ww, &wh);
+        float layoutScale = std::min((float)ww / g_canvasW, (float)wh / g_canvasH);
+        if (layoutScale <= 0.0f)
+            layoutScale = 1.0f;
+        float offsetX = ((float)ww - g_canvasW * layoutScale) * 0.5f;
+        float offsetY = ((float)wh - g_canvasH * layoutScale) * 0.5f;
+        g_mx = (x - offsetX) / layoutScale;
+        g_my = (y - offsetY) / layoutScale;
+    } else {
+        g_mx = x;
+        g_my = y;
+    }
     g_leftDown = leftDown;
 }
 
 bool mouseClicked() { return g_clicked; }
+
+float mouseWheelDelta() { return g_wheelDelta; }
+
+bool mouseOver(float x, float y, float w, float h) { return mouseInside(x, y, w, h); }
 
 void roundedRect(float x, float y, float w, float h, float r, const Color& c)
 {

@@ -34,7 +34,9 @@ extern const Color popup;
 // lifecycle
 void init(SDL_Renderer* renderer, const unsigned char* ttfData, unsigned int ttfSize);
 void shutdown();
-void setScale(float s);
+// Sets the logical design size of the UI; the window can be resized freely
+// and the canvas is scaled to fit (letterboxed).
+void setCanvas(float w, float h);
 float scale();
 void beginFrame(float dt); // dt in seconds
 
@@ -42,6 +44,8 @@ void beginFrame(float dt); // dt in seconds
 void handleEvent(const SDL_Event& e);
 void setMouse(float x, float y, bool leftDown); // logical coordinates
 bool mouseClicked();                            // left button pressed this frame
+float mouseWheelDelta();                        // positive when the wheel moves up
+bool mouseOver(float x, float y, float w, float h);
 
 // drawing primitives (logical coordinates)
 void roundedRect(float x, float y, float w, float h, float r, const Color& c);

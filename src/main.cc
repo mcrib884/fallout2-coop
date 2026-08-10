@@ -27,6 +27,7 @@
 #include "mouse.h"
 #include "multiplayer.h"
 #include "multiplayer_menu.h"
+#include "multiplayer_perf.h"
 #include "object.h"
 #include "palette.h"
 #include "platform_compat.h"
@@ -635,6 +636,7 @@ static void mainLoop()
             debugFilePrint("MAIN: first loop begin");
         }
         sharedFpsLimiter.mark();
+        MpPerfFrameStart();
 
         uint32_t nowTick = getTicks();
         if (gMainLastFrameTick != 0) {
@@ -651,6 +653,7 @@ static void mainLoop()
         if (logFirstLoop) {
             debugFilePrint("MAIN: first loop after input key=%d", keyCode);
         }
+        MpPerfMark(MP_PERF_GLOBAL_SCRIPTS);
 
         // SFALL global scripts are part of the host-authoritative world.
         gMainLastSection = 1;
@@ -660,24 +663,28 @@ static void mainLoop()
         if (logFirstLoop) {
             debugFilePrint("MAIN: first loop after global scripts");
         }
+        MpPerfMark(MP_PERF_GAME_KEY);
 
         gMainLastSection = 2;
         gameHandleKey(keyCode, false);
         if (logFirstLoop) {
             debugFilePrint("MAIN: first loop after game key");
         }
+        MpPerfMark(MP_PERF_SCRIPT_REQUESTS);
 
         gMainLastSection = 3;
         scriptsHandleRequests();
         if (logFirstLoop) {
             debugFilePrint("MAIN: first loop after script requests");
         }
+        MpPerfMark(MP_PERF_MAP_TRANSITION);
 
         gMainLastSection = 4;
         mapHandleTransition();
         if (logFirstLoop) {
             debugFilePrint("MAIN: first loop after map transition");
         }
+        MpPerfMark(MP_PERF_MPTICK);
 
         // Co-op: pump the network and broadcast deltas once per frame.
         gMainLastSection = 5;
@@ -691,6 +698,7 @@ static void mainLoop()
 
         // Co-op: middle-mouse camera drag (frame-rate pan, map bounds apply).
         gameMouseCameraDragTick();
+        MpPerfMark(MP_PERF_RENDER);
 
         gMainLastSection = 6;
         if (_main_game_paused != 0) {
@@ -714,6 +722,8 @@ static void mainLoop()
             logFirstLoop = false;
         }
         sharedFpsLimiter.throttle();
+        MpPerfFrameEnd();
+        MpPerfTick();
     }
 
     scriptsDisable();

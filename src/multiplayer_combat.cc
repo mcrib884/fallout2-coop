@@ -691,6 +691,9 @@ void MpCombatPump()
         mpCombatDrainEndRequest();
         MpBroadcastObjectStates();
         MpBroadcastPlayerStates();
+        // Mark the broadcast done for this tick so the main loop's MpTick
+        // does not immediately repeat the (expensive) object-state sweep.
+        MpNoteHostBroadcastTick();
     } else {
         mpCombatDrainEndRequest();
     }

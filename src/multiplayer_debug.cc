@@ -13,6 +13,7 @@
 #include "kb.h"
 #include "mouse.h"
 #include "multiplayer.h"
+#include "multiplayer_perf.h"
 #include "net.h"
 #include "perk.h"
 #include "proto.h"
@@ -50,6 +51,7 @@ constexpr int DBG_BTN_RADAWAY = 616;
 constexpr int DBG_BTN_AMMO = 617;
 constexpr int DBG_BTN_MAX_LEVEL = 618;
 constexpr int DBG_BTN_ITEMS = 619;
+constexpr int DBG_BTN_PERF = 620;
 constexpr int DBG_BTN_PREV = 700;
 constexpr int DBG_BTN_NEXT = 701;
 constexpr int DBG_BTN_DEC = 702;
@@ -57,7 +59,7 @@ constexpr int DBG_BTN_INC = 703;
 constexpr int DBG_BTN_BACK = 706;
 
 constexpr int kDbgWindowWidth = 320;
-constexpr int kDbgWindowHeight = 280;
+constexpr int kDbgWindowHeight = 305;
 
 // Centered position for a window of the given (width, height).
 void dbgCenteredPos(int width, int height, int* outX, int* outY)
@@ -531,7 +533,8 @@ void MpDebugMenuShow()
     _win_register_text_button(win, 30, 230, -1, -1, -1, DBG_BTN_SKILLS, "Skills...", 0);
     _win_register_text_button(win, 170, 230, -1, -1, -1, DBG_BTN_STATS, "Stats...", 0);
     _win_register_text_button(win, 30, 255, -1, -1, -1, DBG_BTN_PERKS, "Perks...", 0);
-    _win_register_text_button(win, 170, 255, -1, -1, -1, DBG_BTN_CLOSE, "Close", 0);
+    _win_register_text_button(win, 170, 255, -1, -1, -1, DBG_BTN_PERF, "Perf Meter", 0);
+    _win_register_text_button(win, 30, 280, -1, -1, -1, DBG_BTN_CLOSE, "Close", 0);
     windowRefresh(win);
 
     SubmenuCallbacks skillsCb {
@@ -583,6 +586,7 @@ void MpDebugMenuShow()
             case DBG_BTN_STATS:
             case DBG_BTN_PERKS:
             case DBG_BTN_ITEMS:
+            case DBG_BTN_PERF:
             case DBG_BTN_CLOSE:
                 rc = keyCode;
                 break;
@@ -660,6 +664,9 @@ void MpDebugMenuShow()
             break;
         case DBG_BTN_ITEMS:
             dbgSubmenuShow(&itemsCb);
+            break;
+        case DBG_BTN_PERF:
+            MpPerfSetEnabled(!MpPerfIsEnabled());
             break;
         }
     }

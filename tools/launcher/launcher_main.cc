@@ -6,6 +6,9 @@
 #include <SDL.h>
 #include <tinyfiledialogs.h>
 
+#include <algorithm>
+#include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <string>
@@ -13,12 +16,14 @@
 
 #include "detect.h"
 #include "font_data.h"
+#include "game_config_editor.h"
 #include "install.h"
 #include "launcher_config.h"
 #include "ui.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #include <windows.h>
 #else
 #include <sys/wait.h>
@@ -49,6 +54,11 @@ fs::path p8(const std::string& utf8) { return fs::u8path(utf8); }
 std::string s8(const fs::path& p) { return p.u8string(); }
 
 struct App {
+    enum class Page {
+        Launcher,
+        GameConfig,
+    };
+
     LauncherConfig cfg;
     std::vector<FoundInstall> installs;
     std::vector<std::string> comboItems;
@@ -60,6 +70,13 @@ struct App {
     bool installHandled = true; // false while a finished install awaits its message box
 
     bool gameRunning = false;
+    Page page = Page::Launcher;
+
+    GameConfigEditor gameConfig;
+    std::string gameConfigNotice;
+    bool gameConfigNoticeError = false;
+    int configSection = 0;
+    std::vector<float> configScroll;
 #ifdef _WIN32
     HANDLE gameProcess = nullptr;
 #else
@@ -197,7 +214,236 @@ void tryStartInstall(App& app, SDL_Window* window)
 // rendering
 // ---------------------------------------------------------------------------
 
-void render(App& app)
+fs::path gameConfigPath(const App& app)
+{
+    if (app.destDir.empty())
+        return {};
+    return p8(app.destDir) / "fallout2.cfg";
+}
+
+bool gameConfigPathMatchesDestination(const App& app)
+{
+    return app.gameConfig.loaded() && !app.destDir.empty() &&
+           app.gameConfig.path() == gameConfigPath(app);
+}
+
+void loadGameConfig(App& app, bool force)
+{
+    if (app.destDir.empty()) {
+        app.gameConfigNotice = "Choose an install destination to edit fallout2.cfg.";
+        app.gameConfigNoticeError = true;
+        return;
+    }
+
+    fs::path target = gameConfigPath(app);
+    if (!force && gameConfigPathMatchesDestination(app))
+        return;
+    if (!force && app.gameConfig.loaded() && app.gameConfig.dirty()) {
+        app.gameConfigNotice = "The destination changed. Save or reload before editing the new folder.";
+        app.gameConfigNoticeError = true;
+        return;
+    }
+
+    std::string error;
+    if (!app.gameConfig.load(target, error)) {
+        app.gameConfigNotice = error;
+        app.gameConfigNoticeError = true;
+        return;
+    }
+
+    app.configScroll.assign(app.gameConfig.sections().size(), 0.0f);
+    app.gameConfigNotice = app.gameConfig.fileExists()
+        ? "Loaded fallout2.cfg."
+        : "No fallout2.cfg found; engine defaults are shown until you save.";
+    app.gameConfigNoticeError = false;
+}
+
+bool parseConfigBool(const std::string& value)
+{
+    std::string lowerValue;
+    lowerValue.reserve(value.size());
+    for (unsigned char c : value)
+        lowerValue.push_back((char)std::tolower(c));
+    return lowerValue == "1" || lowerValue == "true" || lowerValue == "yes" ||
+           lowerValue == "on";
+}
+
+std::string fitConfigText(const std::string& text, float size, float maxWidth)
+{
+    if (ui::textWidth(size, text) <= maxWidth)
+        return text;
+
+    std::string result = text;
+    const std::string suffix = "...";
+    while (!result.empty() && ui::textWidth(size, result + suffix) > maxWidth)
+        result.pop_back();
+    return result.empty() ? suffix : result + suffix;
+}
+
+bool configRowVisible(float y, float h, float top, float bottom)
+{
+    return y >= top && y + h <= bottom;
+}
+
+void renderConfigOption(GameConfigEditor& editor, GameConfigSection& section,
+                        GameConfigOption& option, float x, float y, float w)
+{
+    using namespace ui;
+
+    const float rowH = 54.0f;
+    const float controlW = 208.0f;
+    const float controlX = x + w - controlW - 16.0f;
+    const float descriptionW = controlX - x - 34.0f;
+
+    roundedRect(x + 8.0f, y + 2.0f, w - 16.0f, rowH - 4.0f, 6.0f, palette::input);
+
+    std::string label = option.label;
+    if (option.legacy)
+        label += "  [legacy]";
+    drawText(x + 20.0f, y + 8.0f, 13.0f, palette::text, label);
+    drawText(x + 20.0f, y + 28.0f, 10.0f, palette::textDim,
+             fitConfigText(option.description, 10.0f, descriptionW));
+
+    const std::string id = "cfg_" + section.key + "_" + option.key;
+    std::string before = option.value;
+
+    if (option.type == ConfigValueType::Boolean) {
+        bool value = parseConfigBool(option.value);
+        bool initialValue = value;
+        ui::toggle(id.c_str(), controlX, y + 16.0f, value, "");
+        drawText(controlX + 54.0f, y + 21.0f, 12.0f, palette::textDim,
+                 value ? "On" : "Off");
+        if (value != initialValue)
+            option.value = value ? "1" : "0";
+    } else if (option.type == ConfigValueType::Choice) {
+        std::vector<std::string> labels;
+        labels.reserve(option.choices.size());
+        int selected = -1;
+        for (size_t i = 0; i < option.choices.size(); ++i) {
+            labels.push_back(option.choices[i].label);
+            if (option.choices[i].value == option.value)
+                selected = (int)i;
+        }
+        if (ui::combo(id.c_str(), controlX, y + 10.0f, controlW, 34.0f, labels, selected,
+                      option.value)) {
+            if (selected >= 0 && selected < (int)option.choices.size())
+                option.value = option.choices[(size_t)selected].value;
+        }
+    } else {
+        const std::string placeholder = option.defaultValue.empty() ? "Value" : option.defaultValue;
+        ui::textInput(id.c_str(), controlX, y + 10.0f, controlW, 34.0f, option.value,
+                      placeholder);
+    }
+
+    if (option.value != before)
+        editor.markDirty();
+}
+
+void renderGameConfigPage(App& app, SDL_Renderer* renderer, float m, float cw)
+{
+    using namespace ui;
+
+    loadGameConfig(app, false);
+
+    if (app.destDir.empty()) {
+        roundedRect(m, 86.0f, cw, 110.0f, 12.0f, palette::card);
+        drawText(m + 16.0f, 104.0f, 15.0f, palette::text, "No installation destination");
+        drawText(m + 16.0f, 132.0f, 12.0f, palette::textDim,
+                 "Choose a destination on the Launcher tab before editing fallout2.cfg.");
+        return;
+    }
+
+    const std::vector<GameConfigSection>& constSections = app.gameConfig.sections();
+    if (constSections.empty())
+        return;
+    if (app.configSection < 0 || app.configSection >= (int)constSections.size())
+        app.configSection = 0;
+    if (app.configScroll.size() != constSections.size())
+        app.configScroll.assign(constSections.size(), 0.0f);
+
+    static const char* kSectionLabels[] = {
+        "Debug", "Preferences", "Sound", "System", "Screen", "Interface", "QoL",
+    };
+
+    const float subY = 86.0f;
+    const float subGap = 6.0f;
+    const float subW = (cw - subGap * 6.0f) / 7.0f;
+    for (size_t i = 0; i < constSections.size() && i < 7; ++i) {
+        float x = m + i * (subW + subGap);
+        std::string id = "cfg_subtab_" + constSections[i].key;
+        ui::ButtonStyle style = ((int)i == app.configSection) ? ui::ButtonStyle::Accent
+                                                                : ui::ButtonStyle::Subtle;
+        if (ui::button(id.c_str(), x, subY, subW, 30.0f, kSectionLabels[i], style)) {
+            app.configSection = (int)i;
+            app.configScroll[i] = 0.0f;
+        }
+    }
+
+    bool pathMatches = gameConfigPathMatchesDestination(app);
+    bool canSave = pathMatches;
+    if (ui::button("cfgSave", m, 124.0f, 138.0f, 32.0f, "Save changes",
+                   ui::ButtonStyle::Accent, canSave)) {
+        std::string error;
+        if (app.gameConfig.save(error)) {
+            app.gameConfigNotice = "Saved fallout2.cfg. Restart the game for changes to take effect.";
+            app.gameConfigNoticeError = false;
+        } else {
+            app.gameConfigNotice = error;
+            app.gameConfigNoticeError = true;
+        }
+    }
+    if (ui::button("cfgReload", m + 146.0f, 124.0f, 118.0f, 32.0f, "Reload",
+                   ui::ButtonStyle::Subtle, !app.destDir.empty())) {
+        bool reload = true;
+        if (app.gameConfig.dirty()) {
+            reload = tinyfd_messageBox(
+                         "Discard unsaved changes?",
+                         "Reloading fallout2.cfg will discard the changes made in the launcher.",
+                         "yesno", "question", 0) != 0;
+        }
+        if (reload)
+            loadGameConfig(app, true);
+    }
+
+    ui::drawText(m + 280.0f, 133.0f, 11.0f,
+                 app.gameConfigNoticeError ? ui::palette::error : ui::palette::textDim,
+                 fitConfigText(app.gameConfigNotice, 11.0f, cw - 280.0f));
+
+    GameConfigSection& section = app.gameConfig.sections()[(size_t)app.configSection];
+    const float viewportTop = 166.0f;
+    const float viewportBottom = WINDOW_H - 42.0f;
+    const float viewportHeight = viewportBottom - viewportTop;
+    const float rowH = 54.0f;
+    float contentHeight = rowH * section.options.size() + 8.0f;
+    float maxScroll = std::max(0.0f, contentHeight - viewportHeight);
+    if (ui::mouseWheelDelta() != 0.0f &&
+        ui::mouseOver(m, viewportTop, cw, viewportHeight)) {
+        app.configScroll[(size_t)app.configSection] -= ui::mouseWheelDelta() * 30.0f;
+        app.configScroll[(size_t)app.configSection] = std::max(
+            0.0f, std::min(maxScroll, app.configScroll[(size_t)app.configSection]));
+    }
+
+    float scroll = app.configScroll[(size_t)app.configSection];
+    float panelY = viewportTop - scroll;
+    SDL_Rect clip{
+        (int)std::lround(m * ui::scale()),
+        (int)std::lround(viewportTop * ui::scale()),
+        (int)std::lround(cw * ui::scale()),
+        (int)std::lround(viewportHeight * ui::scale()),
+    };
+    SDL_RenderSetClipRect(renderer, &clip);
+
+    float optionY = panelY;
+    for (GameConfigOption& option : section.options) {
+        if (configRowVisible(optionY, rowH, viewportTop, viewportBottom))
+            renderConfigOption(app.gameConfig, section, option, m, optionY, cw);
+        optionY += rowH;
+    }
+
+    SDL_RenderSetClipRect(renderer, nullptr);
+}
+
+void render(App& app, SDL_Renderer* renderer)
 {
     using namespace ui;
 
@@ -208,7 +454,21 @@ void render(App& app)
 
     // header
     drawText(m, 22, 22, palette::text, "Fallout 2 Co-op");
-    drawText(m, 54, 13, palette::textDim, "Set up and launch the co-op multiplayer edition");
+    drawText(m, 54, 13, palette::textDim,
+             app.page == App::Page::Launcher ? "Set up and launch Fallout 2 Co-op edition."
+                                             : "Configure the game installation");
+
+    if (button("launcherTab", WINDOW_W - m - 240.0f, 18.0f, 104.0f, 32.0f, "Launcher",
+                app.page == App::Page::Launcher ? ButtonStyle::Accent : ButtonStyle::Subtle))
+        app.page = App::Page::Launcher;
+    if (button("gameConfigTab", WINDOW_W - m - 128.0f, 18.0f, 128.0f, 32.0f, "Config",
+                app.page == App::Page::GameConfig ? ButtonStyle::Accent : ButtonStyle::Subtle))
+        app.page = App::Page::GameConfig;
+
+    if (app.page == App::Page::GameConfig) {
+        renderGameConfigPage(app, renderer, m, cw);
+        return;
+    }
 
     // --- card 1: source installation ---
     float c1y = 86.0f, c1h = 122.0f;
@@ -326,9 +586,6 @@ void render(App& app)
     }
     toggle("minToggle", m + 16 + 250 + 32, c3y + 35, app.cfg.minimizeWhilePlaying,
            "Minimize launcher while playing");
-
-    // footer
-    drawTextRight(WINDOW_W - m, WINDOW_H - 24, 11, palette::textDim, "fallout2coop launcher");
 }
 
 // ---------------------------------------------------------------------------
@@ -410,9 +667,12 @@ int main(int argc, char* argv[])
     }
 
     SDL_SetHint(SDL_HINT_VIDEO_HIGHDPI_DISABLED, "0");
-    SDL_Window* window = SDL_CreateWindow("Fallout 2 Co-op", SDL_WINDOWPOS_CENTERED,
-                                          SDL_WINDOWPOS_CENTERED, WINDOW_W, WINDOW_H,
-                                          SDL_WINDOW_ALLOW_HIGHDPI);
+    const float kDefaultWindowScale = 1.3f;
+    SDL_Window* window = SDL_CreateWindow(
+        "Fallout 2 Co-op", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        (int)std::lround(WINDOW_W * kDefaultWindowScale),
+        (int)std::lround(WINDOW_H * kDefaultWindowScale),
+        SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE);
     if (!window) {
         std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
         return 1;
@@ -424,15 +684,8 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    {
-        int dw = 0, dh = 0, ww = 0, wh = 0;
-        SDL_GetRendererOutputSize(renderer, &dw, &dh);
-        SDL_GetWindowSize(window, &ww, &wh);
-        if (ww > 0)
-            ui::setScale((float)dw / (float)ww);
-    }
-
-    ui::init(renderer, g_inter_font_ttf, g_inter_font_ttf_size);
+    ui::init(renderer, g_launcher_font_ttf, g_launcher_font_ttf_size);
+    ui::setCanvas(WINDOW_W, WINDOW_H);
 
     App app;
     app.cfg = LauncherConfig::load();
@@ -506,7 +759,7 @@ int main(int argc, char* argv[])
             SDL_RaiseWindow(window);
         }
 
-        render(app);
+        render(app, renderer);
 
         if (app.gameRunning && app.cfg.minimizeWhilePlaying && !minimizeRequest) {
             SDL_MinimizeWindow(window);

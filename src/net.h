@@ -435,6 +435,7 @@ typedef struct NetPlayerCmdPayload {
 enum NetPlayerCmdOpcode {
     NET_PLAYER_CMD_HEAL = 1,         // arg1: 0 = full, else amount
     NET_PLAYER_CMD_INVENTORY_AP = 2, // arg1: AP cost to deduct
+    NET_PLAYER_CMD_AP_REFILL = 3,    // refill the avatar's action points
 };
 
 // Generic host -> client player event (reliable). Discrete player lifecycle

@@ -3243,6 +3243,9 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                     }
                     break;
                 }
+                case NET_PLAYER_CMD_AP_REFILL:
+                    MpDebugApplyApRefill(p->obj);
+                    break;
                 default:
                     debugFilePrint("MP: player cmd unknown opcode=%u netId=%u",
                         cmd->opcode, p->netId);
@@ -4163,6 +4166,18 @@ void MpDebugApplyHeal(Object* critter, int value)
         critter->data.critter.hp = newHp;
         debugFilePrint("MPDBG: heal applied obj=%p hp=%d->%d", critter, hp, newHp);
     }
+}
+
+// Host: apply a debug AP refill to a player's avatar. Combat AP is
+// host-authoritative; the per-tick state channel carries the result back.
+void MpDebugApplyApRefill(Object* critter)
+{
+    if (!gMpIsHost || !gMpActive || critter == nullptr) {
+        return;
+    }
+    int maxAp = critterGetStat(critter, STAT_MAXIMUM_ACTION_POINTS);
+    critter->data.critter.combat.ap = maxAp;
+    debugFilePrint("MPDBG: ap refill applied obj=%p ap=%d", critter, maxAp);
 }
 
 // Client: a player's downed state changed (host authoritative).
@@ -5658,13 +5673,17 @@ void MpApplyMapTileSync(const void* data, size_t dataLength)
 
         // The host's roof word carries the world's roof-hidden state: roofs
         // above the host's player are hidden as he walks under them, and that
-        // state lives in the tile word itself. The client must adopt it, or
-        // roofs the host has hidden would draw over the client's walls.
-        // Keep only the local hidden bit (bit 0 of the roof flags) so the
+        // state lives in the tile word itself. The client must adopt the
+        // static roof data (frm id + flags) but NOT the host's hidden state —
+        // the host resyncs ALL tiles whenever its own dude walks under a roof,
+        // and the client would otherwise inherit roofs hidden under the host's
+        // feet and never restore them. The hidden flag is bit 0 of the roof
+        // flag nibble, i.e. 0x1000 of the roof word (roof word layout: frm id
+        // bits 0-11, flags bits 12-15). Keep only the LOCAL hidden bit so the
         // client's own roof-fill state above the local player survives.
         int32_t roof = (incoming >> 16) & 0xFFFF;
         int32_t localRoof = (local >> 16) & 0xFFFF;
-        roof = (roof & ~0x0001) | (localRoof & 0x0001);
+        roof = (roof & ~0x1000) | (localRoof & 0x1000);
 
         dest[index] = (incoming & 0xFFFF) | (roof << 16);
     }

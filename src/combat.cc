@@ -3102,11 +3102,20 @@ static void _combat_sequence()
     }
 
     // Move knocked out and disengaged critters to non-combatant list.
+    // Co-op: DISENGAGING critters stay in the turn order. The vanilla AI
+    // flags a critter DISENGAGING when it cannot find a friend in
+    // perception range (combat_ai.cc _combat_ai), which in co-op happens
+    // constantly: a village full of hostile NPCs spread across the map
+    // means the ones approaching the players find no nearby friends and
+    // get permanently dropped from turns even when standing adjacent. Keep
+    // them cycling so they act when they reach the players.
     for (int index = 0; index < count; index++) {
         Object* critter = _combat_list[index];
         if (critter != gDude) {
+            bool coopKeepDisengaging = gMpActive && gMpIsHost
+                && critter->data.critter.combat.maneuver == CRITTER_MANEUVER_DISENGAGING;
             if ((critter->data.critter.combat.results & DAM_KNOCKED_OUT) != 0
-                || critter->data.critter.combat.maneuver == CRITTER_MANEUVER_DISENGAGING) {
+                || (critter->data.critter.combat.maneuver == CRITTER_MANEUVER_DISENGAGING && !coopKeepDisengaging)) {
                 critter->data.critter.combat.maneuver &= ~CRITTER_MANEUVER_ENGAGING;
                 _list_noncom += 1;
 
@@ -3585,6 +3594,24 @@ static bool _combat_should_end()
     }
 
     if (index == _list_com) {
+        // Co-op: diagnostic — dump what the end-check actually saw so a
+        // wrongly-ended combat (hostiles on the player's team, or team
+        // mismatch) is visible in the log.
+        if (gMpIsHost && gMpActive) {
+            debugFilePrint("MPCOMBAT: shouldEnd TRUE list_com=%d dudeTeam=%d:",
+                _list_com, gDude->data.critter.combat.team);
+            for (int di = 0; di < _list_com; di++) {
+                Object* dc = _combat_list[di];
+                debugFilePrint("MPCOMBAT:   [%d] pid=0x%X team=%d hp=%d dead=%d whoHitMe=0x%X netId=%u",
+                    di,
+                    dc->pid,
+                    dc->data.critter.combat.team,
+                    critterGetStat(dc, STAT_CURRENT_HIT_POINTS),
+                    (dc->data.critter.combat.results & DAM_DEAD) != 0 ? 1 : 0,
+                    dc->data.critter.combat.whoHitMe != nullptr ? dc->data.critter.combat.whoHitMe->pid : 0,
+                    MpCombatGetCritterPlayerNetId(dc));
+            }
+        }
         return true;
     }
 
@@ -3727,6 +3754,21 @@ void _combat(CombatStartData* csd)
                 if (gMpIsHost && gMpActive) {
                     Object* combatant = _combat_list[curIndex];
                     uint8_t remoteNetId = MpCombatGetCritterPlayerNetId(combatant);
+                    if (remoteNetId == 0 && MpIsCoopPlayerCritter(combatant)) {
+                        // Diagnostic: the combat list holds a player avatar
+                        // but the netId lookup failed — player->obj pointer
+                        // mismatch or isConnected/isLocal state wrong.
+                        debugFilePrint("MPCOMBAT: player critter netId lookup FAILED pid=0x%X obj=%p",
+                            combatant->pid, (void*)combatant);
+                        for (int di = 0; di < NET_MAX_PLAYERS; di++) {
+                            MultiplayerPlayer* dp = &gMpSession.players[di];
+                            if (dp->isConnected && !dp->isLocal) {
+                                debugFilePrint("MPCOMBAT:   player[%d] netId=%u obj=%p pid=0x%X",
+                                    di, dp->netId, (void*)dp->obj,
+                                    dp->obj != nullptr ? dp->obj->pid : 0);
+                            }
+                        }
+                    }
                     debugFilePrint("MPCOMBAT: sequence combatant pid=0x%X tile=%d netId=%u",
                         combatant->pid, combatant->tile, remoteNetId);
                     if (remoteNetId != 0) {

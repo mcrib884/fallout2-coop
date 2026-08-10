@@ -15,7 +15,9 @@
 #include "multiplayer.h"
 #include "net.h"
 #include "perk.h"
+#include "proto.h"
 #include "skill.h"
+#include "sfall_script_hooks.h"
 #include "stat.h"
 #include "svga.h"
 #include "text_font.h"
@@ -40,6 +42,14 @@ constexpr int DBG_BTN_SKILLS = 608;
 constexpr int DBG_BTN_STATS = 609;
 constexpr int DBG_BTN_PERKS = 610;
 constexpr int DBG_BTN_CLOSE = 611;
+constexpr int DBG_BTN_AP_REFILL = 612;
+constexpr int DBG_BTN_FULL_RESTORE = 613;
+constexpr int DBG_BTN_STIMPAK = 614;
+constexpr int DBG_BTN_SUPER_STIMPAK = 615;
+constexpr int DBG_BTN_RADAWAY = 616;
+constexpr int DBG_BTN_AMMO = 617;
+constexpr int DBG_BTN_MAX_LEVEL = 618;
+constexpr int DBG_BTN_ITEMS = 619;
 constexpr int DBG_BTN_PREV = 700;
 constexpr int DBG_BTN_NEXT = 701;
 constexpr int DBG_BTN_DEC = 702;
@@ -47,7 +57,7 @@ constexpr int DBG_BTN_INC = 703;
 constexpr int DBG_BTN_BACK = 706;
 
 constexpr int kDbgWindowWidth = 320;
-constexpr int kDbgWindowHeight = 185;
+constexpr int kDbgWindowHeight = 280;
 
 // Centered position for a window of the given (width, height).
 void dbgCenteredPos(int width, int height, int* outX, int* outY)
@@ -86,6 +96,93 @@ void dbgHeal(int amount)
         critterAdjustHitPoints(gDude, delta);
         interfaceRenderHitPoints(true);
     }
+}
+
+// Refill the local dude's action points to maximum. Combat AP is
+// host-authoritative in co-op: a client relays the request, the host applies
+// it to the avatar, and the per-tick state channel carries the result back;
+// the local apply is display-only convergence (same pattern as dbgHeal).
+void dbgRefillAp()
+{
+    if (gDude == nullptr) {
+        return;
+    }
+    if (gMpActive && gMpIsHost) {
+        MpDebugApplyApRefill(gDude);
+        return;
+    }
+    if (gMpActive && gMpIsClient) {
+        MpDebugSendApRefill();
+    }
+    int maxAp = critterGetStat(gDude, STAT_MAXIMUM_ACTION_POINTS);
+    gDude->data.critter.combat.ap = maxAp;
+    debugFilePrint("MPDBG: ap refill local ap=%d", maxAp);
+}
+
+// Gives [count] copies of item proto [pid] to the local dude. On a co-op
+// client the items ride the regular 1s profile capture up to the host's
+// avatar mirror, so host-validated use (combat attacks, item actions) keeps
+// working — same trust model as the money buttons.
+void dbgGiveItem(int pid, int count)
+{
+    if (gDude == nullptr || pid < 0 || count <= 0) {
+        return;
+    }
+    Object* item = nullptr;
+    if (objectCreateWithPid(&item, pid) != 0 || item == nullptr) {
+        debugFilePrint("MPDBG: give item failed pid=0x%X", pid);
+        return;
+    }
+    itemAdd(gDude, item, count);
+    debugFilePrint("MPDBG: give item pid=0x%X count=%d", pid, count);
+    interfaceUpdateItems(false, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
+}
+
+// Ammo refill: fill the wielded weapon to capacity and drop a few spare
+// clips of its caliber into the inventory. Melee/unarmed (no ammo type)
+// does nothing.
+void dbgRefillAmmo()
+{
+    if (gDude == nullptr) {
+        return;
+    }
+    Hand hand = interfaceGetCurrentHand();
+    Object* weapon = hand == HAND_RIGHT ? critterGetItem2(gDude) : critterGetItem1(gDude);
+    if (weapon == nullptr || itemGetType(weapon) != ITEM_TYPE_WEAPON) {
+        return;
+    }
+    int ammoTypePid = weaponGetAmmoTypePid(weapon);
+    if (ammoTypePid == -1) {
+        return;
+    }
+    int capacity = ammoGetCapacity(weapon);
+    if (ammoGetQuantity(weapon) < capacity) {
+        ammoSetQuantity(weapon, capacity);
+    }
+    dbgGiveItem(ammoTypePid, 3);
+    debugFilePrint("MPDBG: ammo refill weapon pid=0x%X ammo=0x%X capacity=%d",
+        weapon->pid, ammoTypePid, capacity);
+}
+
+// Level the local dude to the cap (99) through the vanilla level-up path
+// (add exactly the XP needed for each next level), so perks and skill
+// points are granted normally.
+void dbgMaxLevel()
+{
+    if (gDude == nullptr) {
+        return;
+    }
+    int level = pcGetStat(PC_STAT_LEVEL);
+    int guard = 0;
+    while (level < PC_LEVEL_MAX && guard++ < 200) {
+        int xpToNext = pcGetExperienceForNextLevel() - pcGetStat(PC_STAT_EXPERIENCE);
+        if (xpToNext <= 0) {
+            break;
+        }
+        pcAddExperience(xpToNext, nullptr);
+        level = pcGetStat(PC_STAT_LEVEL);
+    }
+    debugFilePrint("MPDBG: max level done level=%d", level);
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +286,88 @@ void dbgPerkModify(int index, int delta)
             perkRemove(gDude, perk);
         }
     }
+}
+
+// Curated item list for the Items... submenu. Pids from the PROTO_ID_*
+// constants (verified item protos); display names are static on purpose.
+struct DebugItemEntry {
+    int pid;
+    const char* name;
+};
+
+const DebugItemEntry kDbgItems[] = {
+    { PROTO_ID_STIMPAK, "Stimpak" },
+    { PROTO_ID_SUPER_STIMPAK, "Super Stimpak" },
+    { PROTO_ID_FIRST_AID_KIT, "First Aid Kit" },
+    { PROTO_ID_DOCTORS_BAG, "Doctor's Bag" },
+    { PROTO_ID_HEALING_POWDER, "Healing Powder" },
+    { PROTO_ID_RADAWAY, "RadAway" },
+    { PROTO_ID_MENTATS, "Mentats" },
+    { PROTO_ID_BUFF_OUT, "Buffout" },
+    { PROTO_ID_PSYCHO, "Psycho" },
+    { PROTO_ID_JET, "Jet" },
+    { PROTO_ID_NUKA_COLA, "Nuka Cola" },
+    { PROTO_ID_BEER, "Beer" },
+    { PROTO_ID_BOOZE, "Booze" },
+    { PROTO_ID_MONEY, "Money" },
+    { PROTO_ID_SMALL_ENERGY_CELL, "Small Energy Cell" },
+    { PROTO_ID_MICRO_FUSION_CELL, "Micro Fusion Cell" },
+    { PROTO_ID_DYNAMITE_I, "Dynamite" },
+    { PROTO_ID_PLASTIC_EXPLOSIVES_I, "Plastic Explosives" },
+    { PROTO_ID_MOLOTOV_COCKTAIL, "Molotov Cocktail" },
+    { PROTO_ID_FLARE, "Flare" },
+};
+
+const char* dbgItemName(int index)
+{
+    return kDbgItems[index].name;
+}
+
+// Quantity of this item currently carried by the local dude.
+int dbgItemValue(int index)
+{
+    if (gDude == nullptr) {
+        return 0;
+    }
+    int count = 0;
+    for (int i = 0; i < gDude->data.inventory.length; i++) {
+        auto* invItem = &gDude->data.inventory.items[i];
+        if (invItem->item != nullptr && invItem->item->pid == kDbgItems[index].pid) {
+            count += invItem->quantity;
+        }
+    }
+    return count;
+}
+
+void dbgItemModify(int index, int delta)
+{
+    if (gDude == nullptr) {
+        return;
+    }
+    if (delta > 0) {
+        dbgGiveItem(kDbgItems[index].pid, delta);
+        return;
+    }
+    if (delta >= 0) {
+        return;
+    }
+    // Remove up to -delta copies. Equipped gear is left alone — the removal
+    // hook reasons differ per slot (hand/armor) and a wrong reason would
+    // desync the sprite (see the weapon-strip fix).
+    int remaining = -delta;
+    for (int i = 0; i < gDude->data.inventory.length && remaining > 0; i++) {
+        auto* invItem = &gDude->data.inventory.items[i];
+        if (invItem->item == nullptr
+            || invItem->item->pid != kDbgItems[index].pid
+            || (invItem->item->flags & OBJECT_EQUIPPED) != 0) {
+            continue;
+        }
+        int removeQty = std::min(remaining, invItem->quantity);
+        itemRemoveWithReason(gDude, invItem->item, removeQty,
+            RemoveInventoryObjectHookReason::ItemRemoved);
+        remaining -= removeQty;
+    }
+    debugFilePrint("MPDBG: item removed pid=0x%X count=%d", kDbgItems[index].pid, -delta - remaining);
 }
 
 // Runs the modal loop for an editor submenu. The current entry line is
@@ -341,10 +520,18 @@ void MpDebugMenuShow()
     _win_register_text_button(win, 170, 80, -1, -1, -1, DBG_BTN_XP_5000, "XP +5000", 0);
     _win_register_text_button(win, 30, 105, -1, -1, -1, DBG_BTN_SP_10, "Skill Pts +10", 0);
     _win_register_text_button(win, 170, 105, -1, -1, -1, DBG_BTN_LEVEL_1, "Level +1", 0);
-    _win_register_text_button(win, 30, 130, -1, -1, -1, DBG_BTN_SKILLS, "Skills...", 0);
-    _win_register_text_button(win, 140, 130, -1, -1, -1, DBG_BTN_STATS, "Stats...", 0);
-    _win_register_text_button(win, 250, 130, -1, -1, -1, DBG_BTN_PERKS, "Perks...", 0);
-    _win_register_text_button(win, 30, 160, -1, -1, -1, DBG_BTN_CLOSE, "Close", 0);
+    _win_register_text_button(win, 30, 130, -1, -1, -1, DBG_BTN_AP_REFILL, "AP Refill", 0);
+    _win_register_text_button(win, 170, 130, -1, -1, -1, DBG_BTN_FULL_RESTORE, "Full Restore", 0);
+    _win_register_text_button(win, 30, 155, -1, -1, -1, DBG_BTN_STIMPAK, "Stimpak +5", 0);
+    _win_register_text_button(win, 170, 155, -1, -1, -1, DBG_BTN_SUPER_STIMPAK, "Super Stimpak", 0);
+    _win_register_text_button(win, 30, 180, -1, -1, -1, DBG_BTN_RADAWAY, "RadAway +5", 0);
+    _win_register_text_button(win, 170, 180, -1, -1, -1, DBG_BTN_AMMO, "Ammo Refill", 0);
+    _win_register_text_button(win, 30, 205, -1, -1, -1, DBG_BTN_MAX_LEVEL, "Max Level", 0);
+    _win_register_text_button(win, 170, 205, -1, -1, -1, DBG_BTN_ITEMS, "Items...", 0);
+    _win_register_text_button(win, 30, 230, -1, -1, -1, DBG_BTN_SKILLS, "Skills...", 0);
+    _win_register_text_button(win, 170, 230, -1, -1, -1, DBG_BTN_STATS, "Stats...", 0);
+    _win_register_text_button(win, 30, 255, -1, -1, -1, DBG_BTN_PERKS, "Perks...", 0);
+    _win_register_text_button(win, 170, 255, -1, -1, -1, DBG_BTN_CLOSE, "Close", 0);
     windowRefresh(win);
 
     SubmenuCallbacks skillsCb {
@@ -355,6 +542,10 @@ void MpDebugMenuShow()
     };
     SubmenuCallbacks perksCb {
         "PERKS", PERK_COUNT, 1, dbgPerkName, dbgPerkValue, dbgPerkModify,
+    };
+    SubmenuCallbacks itemsCb {
+        "ITEMS", (int)(sizeof(kDbgItems) / sizeof(kDbgItems[0])), 5,
+        dbgItemName, dbgItemValue, dbgItemModify,
     };
 
     bool keepGoing = true;
@@ -381,9 +572,17 @@ void MpDebugMenuShow()
             case DBG_BTN_XP_5000:
             case DBG_BTN_SP_10:
             case DBG_BTN_LEVEL_1:
+            case DBG_BTN_AP_REFILL:
+            case DBG_BTN_FULL_RESTORE:
+            case DBG_BTN_STIMPAK:
+            case DBG_BTN_SUPER_STIMPAK:
+            case DBG_BTN_RADAWAY:
+            case DBG_BTN_AMMO:
+            case DBG_BTN_MAX_LEVEL:
             case DBG_BTN_SKILLS:
             case DBG_BTN_STATS:
             case DBG_BTN_PERKS:
+            case DBG_BTN_ITEMS:
             case DBG_BTN_CLOSE:
                 rc = keyCode;
                 break;
@@ -428,6 +627,28 @@ void MpDebugMenuShow()
             }
             break;
         }
+        case DBG_BTN_AP_REFILL:
+            dbgRefillAp();
+            break;
+        case DBG_BTN_FULL_RESTORE:
+            dbgHeal(0);
+            dbgRefillAp();
+            break;
+        case DBG_BTN_STIMPAK:
+            dbgGiveItem(PROTO_ID_STIMPAK, 5);
+            break;
+        case DBG_BTN_SUPER_STIMPAK:
+            dbgGiveItem(PROTO_ID_SUPER_STIMPAK, 5);
+            break;
+        case DBG_BTN_RADAWAY:
+            dbgGiveItem(PROTO_ID_RADAWAY, 5);
+            break;
+        case DBG_BTN_AMMO:
+            dbgRefillAmmo();
+            break;
+        case DBG_BTN_MAX_LEVEL:
+            dbgMaxLevel();
+            break;
         case DBG_BTN_SKILLS:
             dbgSubmenuShow(&skillsCb);
             break;
@@ -436,6 +657,9 @@ void MpDebugMenuShow()
             break;
         case DBG_BTN_PERKS:
             dbgSubmenuShow(&perksCb);
+            break;
+        case DBG_BTN_ITEMS:
+            dbgSubmenuShow(&itemsCb);
             break;
         }
     }
@@ -462,6 +686,23 @@ void MpDebugSendHeal(int value)
     NetSendPacket(gMpSession.hostPeer, NET_CHANNEL_RELIABLE,
         NET_PKT_PLAYER_CMD, &payload, sizeof(payload));
     debugFilePrint("MP: heal sent value=%d", value);
+}
+
+// Client: AP refill request for the local avatar. Rides the generic
+// player-command route — the host applies it to the avatar and the state
+// channel carries the result back.
+void MpDebugSendApRefill()
+{
+    if (!gMpIsClient || !gMpActive || gMpSession.hostPeer == nullptr) {
+        return;
+    }
+    NetPlayerCmdPayload payload;
+    payload.opcode = NET_PLAYER_CMD_AP_REFILL;
+    payload.arg1 = 0;
+    payload.arg2 = 0;
+    NetSendPacket(gMpSession.hostPeer, NET_CHANNEL_RELIABLE,
+        NET_PKT_PLAYER_CMD, &payload, sizeof(payload));
+    debugFilePrint("MP: ap refill sent");
 }
 
 } // namespace fallout

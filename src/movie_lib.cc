@@ -868,16 +868,9 @@ static int _MVE_sndConfigure(int a1, int a2, int a3, int a4, int a5, int a6)
     dword_6B3AE4 = 0;
     dword_6B3660 = 0;
 
-    // Co-op: client instances run movies video-only. Two game processes on
-    // the same machine share the SDL audio device; the MVE audio path can
-    // stall (cursor never advances -> infinite spin in _MVE_sndSync). With
-    // no sound buffer the client skips all audio records cleanly.
-    if (gMpIsClient) {
-        gMveSoundBuffer = -1;
-        debugFilePrint("MPMOVIE: sndConfigure client video-only (no audio buffer)");
-        return 1;
-    }
-
+    // Co-op: the client now creates a real sound buffer too (both instances
+    // share the system default device). The 2s bound in _MVE_sndSync guards
+    // against a stalled device, so movie audio is safe on both sides.
     gMveSoundBuffer = audioEngineCreateSoundBuffer(gMveBufferBytes, a5 < 1 ? 8 : 16, 2 - (a3 < 1), a4);
     if (gMveSoundBuffer == -1) {
         return 0;

@@ -1643,8 +1643,18 @@ int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
             }
         }
     } else {
-        if (elevation != _obj_last_elev && objectTypeFromPid(obj->pid) == OBJ_TYPE_CRITTER) {
-            _combat_delete_critter(obj);
+        // Co-op: never remove critters from combat via the elevation
+        // heuristic. In co-op, moves come through sync teleports, avatar
+        // re-applies and host-side NPC animation, and _obj_last_elev only
+        // tracks the last roof-tracked object (the local dude) — so the
+        // comparison misfires constantly, silently deleting players AND
+        // hostiles from the combatant list until the end-check fires and
+        // combat restarts endlessly. Vanilla singleplayer keeps its
+        // original behavior (a critter leaving the floor leaves combat).
+        if (!gMpActive) {
+            if (elevation != _obj_last_elev && objectTypeFromPid(obj->pid) == OBJ_TYPE_CRITTER) {
+                _combat_delete_critter(obj);
+            }
         }
     }
 

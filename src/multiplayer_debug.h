@@ -19,6 +19,12 @@ void MpDebugSendHeal(int value);
 // Host: apply a debug heal to a player's avatar; revives a downed player.
 void MpDebugApplyHeal(Object* critter, int value);
 
+// Client: request the host to refill this player's avatar action points.
+void MpDebugSendApRefill();
+
+// Host: apply a debug AP refill to a player's avatar.
+void MpDebugApplyApRefill(Object* critter);
+
 } // namespace fallout
 
 #endif

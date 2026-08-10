@@ -16,6 +16,7 @@
 #include "memory_manager.h"
 #include "multiplayer.h"
 #include "platform_compat.h"
+#include "scripts.h"
 #include "sfall_global_scripts.h"
 #include "svga.h"
 
@@ -2705,6 +2706,19 @@ void programInterpret(Program* program, int numInstructions)
 
         // NOTE: Uninline.
         opcode_t opcode = programGetNextOpcode(program);
+
+        // Co-op: heartbeat while the client runs a deferred cutscene script.
+        // If the instruction pointer keeps advancing we're spinning in the
+        // interpreter; if it freezes at one opcode the script is parked in a
+        // nested vanilla call (dialog/movie/animation) that never returns.
+        if (gMpIsClient && gMpAllowClientScriptExec) {
+            static int sMpClientExecCount = 0;
+            if (sMpClientExecCount < 300 || (sMpClientExecCount % 1000) == 0) {
+                debugFilePrint("MPSCR: client exec #%d opcode=0x%X ip=%d",
+                    sMpClientExecCount, opcode, program->instructionPointer);
+            }
+            sMpClientExecCount++;
+        }
 
         // TODO: Replace with field_82 and field_80?
         program->flags &= 0xFFFF;

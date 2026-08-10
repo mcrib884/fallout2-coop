@@ -6,6 +6,9 @@
 
 #include <SDL.h>
 
+#include "debug.h"
+#include "settings.h"
+
 namespace fallout {
 
 #define AUDIO_ENGINE_SOUND_BUFFERS 8
@@ -106,9 +109,13 @@ bool audioEngineInit()
     desiredSpec.samples = 1024;
     desiredSpec.callback = audioEngineMixin;
 
+    // Both co-op instances use the system default device, like everything
+    // else. The movie audio sync spin is time-bounded in movie_lib.cc, so a
+    // shared device can never freeze the game.
     gAudioEngineDeviceId = SDL_OpenAudioDevice(nullptr, 0, &desiredSpec, &gAudioEngineSpec, SDL_AUDIO_ALLOW_ANY_CHANGE);
     if (gAudioEngineDeviceId == 0) {
         gAudioEngineDeviceId = -1;
+        debugFilePrint("AUDIO: failed to open default audio device");
         return false;
     }
 

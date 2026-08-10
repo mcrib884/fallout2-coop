@@ -9,7 +9,10 @@
 #include <string.h>
 
 #include "audio_engine.h"
+#include "debug.h"
 #include "delay.h"
+#include "input.h"
+#include "multiplayer.h"
 #include "platform_compat.h"
 
 namespace fallout {
@@ -633,6 +636,12 @@ static void _MVE_sndPause()
 // 0x4F4EC0 MVE_rmStepMovie
 int _MVE_rmStepMovie()
 {
+    // Co-op: log entry so a hang inside the decoder is localizable.
+    static int sStepEntryCount = 0;
+    if (gMpIsClient && (sStepEntryCount++ < 20 || (sStepEntryCount % 1000) == 0)) {
+        debugFilePrint("MPMOVIE: step enter rm_active=%d rm_len=%d", rm_active, rm_len);
+    }
+
     int v0;
     unsigned short* v1;
     unsigned int v5;
@@ -668,6 +677,13 @@ LABEL_5:
         v5 = *(unsigned int*)((unsigned char*)v1 + v0);
         v1 = (unsigned short*)((unsigned char*)v1 + v0 + 4);
         v0 = v5 & 0xFFFF;
+
+        // Co-op: log each record type the client processes so a hang inside
+        // the decoder is localizable to the exact record kind.
+        static int sRecordLogCount = 0;
+        if (gMpIsClient && (sRecordLogCount++ < 30 || (sRecordLogCount % 1000) == 0)) {
+            debugFilePrint("MPMOVIE: record type=%d len=%d active=%d", (v5 >> 16) & 0xFF, v5 & 0xFFFF, rm_active);
+        }
 
         switch ((v5 >> 16) & 0xFF) {
         case 0:
@@ -852,6 +868,16 @@ static int _MVE_sndConfigure(int a1, int a2, int a3, int a4, int a5, int a6)
     dword_6B3AE4 = 0;
     dword_6B3660 = 0;
 
+    // Co-op: client instances run movies video-only. Two game processes on
+    // the same machine share the SDL audio device; the MVE audio path can
+    // stall (cursor never advances -> infinite spin in _MVE_sndSync). With
+    // no sound buffer the client skips all audio records cleanly.
+    if (gMpIsClient) {
+        gMveSoundBuffer = -1;
+        debugFilePrint("MPMOVIE: sndConfigure client video-only (no audio buffer)");
+        return 1;
+    }
+
     gMveSoundBuffer = audioEngineCreateSoundBuffer(gMveBufferBytes, a5 < 1 ? 8 : 16, 2 - (a3 < 1), a4);
     if (gMveSoundBuffer == -1) {
         return 0;
@@ -868,7 +894,14 @@ static int _MVE_sndConfigure(int a1, int a2, int a3, int a4, int a5, int a6)
 static void MVE_syncSync()
 {
     if (sync_active) {
+        // Co-op: bounded like _MVE_sndSync; wall-clock based, but never let
+        // a wrap or timing anomaly turn this into an infinite spin.
+        uint32_t syncSyncStart = getTicks();
         while (sync_time + 1000 * compat_timeGetTime() < 0) {
+            if (getTicks() - syncSyncStart > 2000) {
+                debugFilePrint("MPMOVIE: syncSync timed out");
+                return;
+            }
         }
     }
 }
@@ -910,6 +943,13 @@ static void _MVE_sndSync()
         return;
     }
 
+    // Co-op: bound the Windows busy-spin. When the audio device stalls the
+    // play cursor never advances and the vanilla loop spins forever at 100%
+    // CPU — the movie freeze seen on both host and client. Give up after a
+    // generous window; the movie keeps playing video-only.
+    uint32_t syncSpinStart = getTicks();
+    uint32_t syncSpinDeadline = syncSpinStart + 2000;
+
     while (1) {
         if (!audioEngineSoundBufferGetStatus(gMveSoundBuffer, &dwStatus)) {
             return;
@@ -917,6 +957,20 @@ static void _MVE_sndSync()
 
         if (!audioEngineSoundBufferGetCurrentPosition(gMveSoundBuffer, &dwCurrentPlayCursor, &dwCurrentWriteCursor)) {
             return;
+        }
+
+        if (getTicks() >= syncSpinDeadline) {
+            debugFilePrint("MPMOVIE: sndsync spin timed out (audio stalled) status=0x%X play=%u write=%u",
+                dwStatus, dwCurrentPlayCursor, dwCurrentWriteCursor);
+            return;
+        }
+
+        // Co-op: this loop is a busy-spin on Windows when the audio buffer is
+        // playing but the play cursor is not advancing. Log throttled so a
+        // stalled client audio device is visible instead of a silent freeze.
+        static int sSndSyncLogCount = 0;
+        if (gMpIsClient && (sSndSyncLogCount++ < 20 || (sSndSyncLogCount % 1000) == 0)) {
+            debugFilePrint("MPMOVIE: sndsync spin status=0x%X play=%u write=%u", dwStatus, dwCurrentPlayCursor, dwCurrentWriteCursor);
         }
 
         dwCurrentWriteCursor = dword_6B36A4;
@@ -1053,6 +1107,13 @@ static int syncWaitLevel(int wait)
 // 0x4F5A00 CallsSndBuff_Lock
 static void _CallsSndBuff_Loc(unsigned char* a1, int a2)
 {
+    // Co-op: log audio-push entry so a hang in the buffer lock is visible.
+    static int sSndPushLogCount = 0;
+    bool logClientPush = gMpIsClient && (sSndPushLogCount++ < 20 || (sSndPushLogCount % 1000) == 0);
+    if (logClientPush) {
+        debugFilePrint("MPMOVIE: sndpush enter buf=%d size=%d", gMveSoundBuffer, a2);
+    }
+
     int v2;
     int v3;
     int v5;

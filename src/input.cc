@@ -10,6 +10,7 @@
 #include "dinput.h"
 #include "draw.h"
 #include "game.h"
+#include "game_movie.h"
 #include "kb.h"
 #include "memory.h"
 #include "mouse.h"
@@ -209,7 +210,15 @@ int inputGetInput()
         MpCombatPump();
     }
 
+    if (gMpIsClient && gameMovieIsPlaying()) {
+        debugFilePrint("MPIN: stage 1/4 after combat pump (movie playing)");
+    }
+
     _GNW95_process_message();
+
+    if (gMpIsClient && gameMovieIsPlaying()) {
+        debugFilePrint("MPIN: stage 2/4 after process message");
+    }
 
     if (!gProgramIsActive) {
         _GNW95_lost_focus();
@@ -217,7 +226,14 @@ int inputGetInput()
 
     _process_bk();
 
+    if (gMpIsClient && gameMovieIsPlaying()) {
+        debugFilePrint("MPIN: stage 3/4 after process bk");
+    }
+
     v3 = dequeueInputEvent();
+    if (gMpIsClient && gameMovieIsPlaying()) {
+        debugFilePrint("MPIN: stage 4/4 after dequeue input v3=%d", v3);
+    }
     if (v3 == -1 && mouseGetEvent() & 0x33) {
         mouseGetPosition(&_input_mx, &_input_my);
         return -2;
@@ -242,7 +258,15 @@ void _process_bk()
 
     tickersExecute();
 
+    if (gMpIsClient && gameMovieIsPlaying()) {
+        debugFilePrint("MPIN: process_bk stage A after tickers");
+    }
+
     _mouse_info();
+
+    if (gMpIsClient && gameMovieIsPlaying()) {
+        debugFilePrint("MPIN: process_bk stage B after mouse info");
+    }
 
     v1 = _win_check_all_buttons();
     if (v1 != -1) {

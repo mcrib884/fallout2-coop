@@ -10,9 +10,11 @@
 #include "draw.h"
 #include "geometry.h"
 #include "input.h"
+#include "game_movie.h"
 #include "memory_manager.h"
 #include "movie_effect.h"
 #include "movie_lib.h"
+#include "multiplayer.h"
 #include "platform_compat.h"
 #include "settings.h"
 #include "sound.h"
@@ -765,10 +767,21 @@ int _movieRunRect(int win, char* filePath, int x, int y, int w, int h)
 // 0x487B7C stepMovie
 static int _stepMovie()
 {
+    // Co-op: the client runs deferred cutscene movies inside the deferred
+    // map-enter script. If the MVE decoder blocks instead of returning, this
+    // is where the client hangs — log the step result while a client movie
+    // is active (throttled to 1/sec to avoid flooding).
+    static int sStepLogCount = 0;
+    bool logClientStep = gMpIsClient && gameMovieIsPlaying() && (sStepLogCount++ < 20 || (sStepLogCount % 1000) == 0);
+
     int stepResult = _MVE_rmStepMovie();
     if (stepResult != -1) {
         movieRenderSubtitles();
         renderPresent();
+    }
+
+    if (logClientStep) {
+        debugFilePrint("MPMOVIE: step result=%d", stepResult);
     }
 
     return stepResult;

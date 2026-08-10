@@ -171,6 +171,8 @@ int gameMoviePlay(int movie, int flags)
         return -1;
     }
 
+    debugFilePrint("MPMOVIE: play begin movie=%d file=%s", movie, movieFilePath);
+
     if ((flags & GAME_MOVIE_FADE_IN) != 0) {
         paletteFadeTo(gPaletteBlack);
         gGameMovieFaded = true;
@@ -249,8 +251,22 @@ int gameMoviePlay(int movie, int flags)
 
     int pressed = 0;
     int buttons;
+    int movieLoopIterations = 0;
     do {
-        if (!_moviePlaying() || _game_user_wants_to_quit || inputGetInput() != -1) {
+        if (!_moviePlaying() || _game_user_wants_to_quit) {
+            break;
+        }
+
+        // Co-op debug: the client can park inside this loop (movie plays but
+        // never advances / never exits). Log the loop state throttled so a
+        // frozen client still shows us where the pump died.
+        int inputResult = inputGetInput();
+        if (movieLoopIterations < 10 || movieLoopIterations % 120 == 0) {
+            debugFilePrint("MPMOVIE: loop iter=%d playing=%d movie=%d input=%d",
+                movieLoopIterations, _moviePlaying() ? 1 : 0, movie, inputResult);
+        }
+        movieLoopIterations++;
+        if (inputResult != -1) {
             break;
         }
 
@@ -267,6 +283,8 @@ int gameMoviePlay(int movie, int flags)
         // Exit on mouse only after a click cycle: observe left/right down at
         // least once, then wait until both are released.
     } while (((pressed & 1) == 0 && (pressed & 2) == 0) || (buttons & 1) != 0 || (buttons & 2) != 0);
+
+    debugFilePrint("MPMOVIE: loop exited iter=%d playing=%d movie=%d", movieLoopIterations, _moviePlaying() ? 1 : 0, movie);
 
     _movieStop();
     _moviefx_stop();

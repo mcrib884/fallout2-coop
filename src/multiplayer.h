@@ -226,6 +226,9 @@ void MpApplyLocalDudeSnap(int tile, int elevation);
 // (left preferred, right fallback). Run after any co-op inventory apply or
 // savegame load — the vanilla inven_wield path never runs for synced gear.
 void MpSyncCritterWeaponFid(Object* critter);
+// Make the next periodic profile sync run immediately instead of waiting for
+// its cadence (used by the skin picker so a model change propagates at once).
+void MpProfileForceSync();
 void MpApplyMapFullSync(const void* data, size_t dataLength);
 void MpApplyMapTileSync(const void* data, size_t dataLength);
 void MpApplyMapChanged(const NetMapSyncPayload* payload);

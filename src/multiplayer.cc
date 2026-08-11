@@ -346,6 +346,15 @@ static bool mpSendProfile(ENetPeer* peer, uint8_t netId, uint32_t objNetId,
             netId, profile.name, changedSections);
         return false;
     }
+    // Diag: the exact model state the body builder saw. files=0 with
+    // includeModel=1 means the model payload never rode — the receiver then
+    // installs the registry payload for the (possibly stale) hash.
+    // (Commented: root-caused — the MODEL section bit now travels with picks.)
+    // if (includeModel) {
+    //     debugFilePrint("MP: send profile model diag netId=%u name='%.12s' modelName='%.12s' modelHash=%08X files=%zu sections=%u",
+    //         netId, profile.name, profile.modelName, profile.modelHash,
+    //         profile.modelFiles.size(), sectionCount);
+    // }
     // Diag: the first bytes must be section headers [id][0][size]; if the
     // wire body starts with text the sender is not using the sectioned path.
     {
@@ -1090,8 +1099,8 @@ static int mpClientLoadMap(const NetMapSyncPayload* payload)
         gDude != nullptr ? critterGetStat(gDude, STAT_STRENGTH) : -1,
         gDude != nullptr ? critterGetStat(gDude, STAT_CARRY_WEIGHT) : -1,
         gDude != nullptr ? objectGetInventoryWeight(gDude) : -1);
-    mpDebugDumpWalls("client-pre-sync", 12);
-    mpDebugDumpLightState("client-after-load");
+    // mpDebugDumpWalls("client-pre-sync", 12);
+    // mpDebugDumpLightState("client-after-load");
     if (rc == 0) {
         // Snapshot the map file's natural entering position before the co-op
         // metadata overwrites gMapHeader.entering* with the host's position.
@@ -1109,36 +1118,16 @@ static int mpClientLoadMap(const NetMapSyncPayload* payload)
 
 static void mpDebugDumpWalls(const char* tag, int limit)
 {
-    int total = 0;
-    int shown = 0;
-    for (Object* it = objectFindFirst(); it != nullptr; it = objectFindNext()) {
-        int objType = objectTypeFromFid(it->fid);
-        if (objType == OBJ_TYPE_WALL || objType == OBJ_TYPE_SCENERY) {
-            total++;
-            if (shown < limit) {
-                uint32_t netId = 0;
-                if (gMpIsHost) {
-                    auto netIt = gMpHostObjNetIds.find(it);
-                    if (netIt != gMpHostObjNetIds.end()) {
-                        netId = netIt->second;
-                    }
-                }
-                debugFilePrint("MPDBG wall dump[%s]: pid=0x%X fid=0x%X type=%d tile=%d elev=%d flags=0x%X id=%d netId=%u",
-                    tag, it->pid, it->fid, objType, it->tile, it->elevation, it->flags, it->id, netId);
-                shown++;
-            }
-        }
-    }
-    debugFilePrint("MPDBG wall dump[%s]: total=%d shown=%d", tag, total, shown);
+    // (Commented: temporary join-time wall dump — the 3000+ line dumps at
+    // every map sync were pure noise. See git history to re-enable.)
+    (void)tag;
+    (void)limit;
 }
 
 static void mpDebugDumpLightState(const char* tag)
 {
-    int ambient = lightGetAmbientIntensity();
-    int dudeLight = (gDude != nullptr && hexGridTileIsValid(gDude->tile))
-        ? lightGetTileIntensity(gDude->elevation, gDude->tile)
-        : -1;
-    debugFilePrint("MPDBG light[%s]: ambient=%d dudeTile=%d", tag, ambient, dudeLight);
+    // (Commented: temporary join-time light dump — see git history.)
+    (void)tag;
 }
 
 struct MpPreSyncWall
@@ -1166,25 +1155,8 @@ static void mpDebugSnapshotPreSyncWalls()
 
 static void mpDebugReportMissingWalls()
 {
-    int missing = 0;
-    for (const MpPreSyncWall& wall : gMpPreSyncWalls) {
-        bool found = false;
-        for (Object* it = objectFindFirst(); it != nullptr; it = objectFindNext()) {
-            int objType = objectTypeFromFid(it->fid);
-            if ((objType == OBJ_TYPE_WALL || objType == OBJ_TYPE_SCENERY)
-                && it->pid == wall.pid && it->tile == wall.tile) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            if (missing < 25) {
-                debugFilePrint("MPDBG wall MISSING: pid=0x%X tile=%d", wall.pid, wall.tile);
-            }
-            missing++;
-        }
-    }
-    debugFilePrint("MPDBG wall missing total=%d", missing);
+    // (Commented: temporary join-time wall diff - see git history.)
+    (void)0;
 }
 
 static void mpClientApplyMapMetadata()
@@ -1223,25 +1195,25 @@ static void mpClientTryFinishMapSync()
         return;
     }
     if (!gMpSession.clientMapMetadataValid) {
-        debugFilePrint("MPDBG sync wait: map metadata not valid");
+        // debugFilePrint("MPDBG sync wait: map metadata not valid");
         return;
     }
     if (gMpSession.clientSyncExpectedChunks == 0) {
-        debugFilePrint("MPDBG sync wait: no object chunks yet");
+        // debugFilePrint("MPDBG sync wait: no object chunks yet");
         return;
     }
     if (gMpSession.clientSyncNextChunk < gMpSession.clientSyncExpectedChunks) {
-        debugFilePrint("MPDBG sync wait: object chunks %u/%u",
-            gMpSession.clientSyncNextChunk, gMpSession.clientSyncExpectedChunks);
+        // debugFilePrint("MPDBG sync wait: object chunks %u/%u",
+        //     gMpSession.clientSyncNextChunk, gMpSession.clientSyncExpectedChunks);
         return;
     }
     if (gMpSession.clientTileSyncExpectedChunks == 0) {
-        debugFilePrint("MPDBG sync wait: no tile chunks yet");
+        // debugFilePrint("MPDBG sync wait: no tile chunks yet");
         return;
     }
     if (gMpSession.clientTileSyncNextChunk < gMpSession.clientTileSyncExpectedChunks) {
-        debugFilePrint("MPDBG sync wait: tile chunks %u/%u",
-            gMpSession.clientTileSyncNextChunk, gMpSession.clientTileSyncExpectedChunks);
+        // debugFilePrint("MPDBG sync wait: tile chunks %u/%u",
+        //     gMpSession.clientTileSyncNextChunk, gMpSession.clientTileSyncExpectedChunks);
         return;
     }
 
@@ -1249,30 +1221,30 @@ static void mpClientTryFinishMapSync()
         const MultiplayerPlayer* player = &gMpSession.players[index];
         if (player->isConnected && (!player->profileReady || player->obj == nullptr
                 || !player->hasInitialState)) {
-            debugFilePrint("MPDBG sync wait: player netId=%u name='%s' ready=%d obj=%p initial=%d",
-                player->netId, player->name, player->profileReady ? 1 : 0,
-                (void*)player->obj, player->hasInitialState ? 1 : 0);
+            // debugFilePrint("MPDBG sync wait: player netId=%u name='%s' ready=%d obj=%p initial=%d",
+            //     player->netId, player->name, player->profileReady ? 1 : 0,
+            //     (void*)player->obj, player->hasInitialState ? 1 : 0);
             return;
         }
     }
 
     mpClientApplyMapMetadata();
-    debugFilePrint("MPDBG sync done: dude=%p pid=0x%X pt=%d fid=0x%X anim=%d tile=%d elev=%d hidden=%d st=%d carry=%d weight=%d center=%d",
-        (void*)gDude,
-        gDude != nullptr ? gDude->pid : 0,
-        gDude != nullptr ? objectTypeFromPid(gDude->pid) : -1,
-        gDude != nullptr ? gDude->fid : 0,
-        gDude != nullptr ? animationTypeFromFid(gDude->fid) : -1,
-        gDude != nullptr ? gDude->tile : -1,
-        gDude != nullptr ? gDude->elevation : -1,
-        gDude != nullptr ? ((gDude->flags & OBJECT_HIDDEN) != 0) : -1,
-        gDude != nullptr ? critterGetStat(gDude, STAT_STRENGTH) : -1,
-        gDude != nullptr ? critterGetStat(gDude, STAT_CARRY_WEIGHT) : -1,
-        gDude != nullptr ? objectGetInventoryWeight(gDude) : -1,
-        gCenterTile);
-    mpDebugDumpWalls("client-synced", 30);
-    mpDebugReportMissingWalls();
-    mpDebugDumpLightState("client-sync-done");
+    // debugFilePrint("MPDBG sync done: dude=%p pid=0x%X pt=%d fid=0x%X anim=%d tile=%d elev=%d hidden=%d st=%d carry=%d weight=%d center=%d",
+    //     (void*)gDude,
+    //     gDude != nullptr ? gDude->pid : 0,
+    //     gDude != nullptr ? objectTypeFromPid(gDude->pid) : -1,
+    //     gDude != nullptr ? gDude->fid : 0,
+    //     gDude != nullptr ? animationTypeFromFid(gDude->fid) : -1,
+    //     gDude != nullptr ? gDude->tile : -1,
+    //     gDude != nullptr ? gDude->elevation : -1,
+    //     gDude != nullptr ? ((gDude->flags & OBJECT_HIDDEN) != 0) : -1,
+    //     gDude != nullptr ? critterGetStat(gDude, STAT_STRENGTH) : -1,
+    //     gDude != nullptr ? critterGetStat(gDude, STAT_CARRY_WEIGHT) : -1,
+    //     gDude != nullptr ? objectGetInventoryWeight(gDude) : -1,
+    //     gCenterTile);
+    // mpDebugDumpWalls("client-synced", 30);
+    // mpDebugReportMissingWalls();
+    // mpDebugDumpLightState("client-sync-done");
     if (gDude != nullptr) {
         for (int itemIndex = 0; itemIndex < gDude->data.inventory.length; itemIndex++) {
             const Object* invItem = gDude->data.inventory.items[itemIndex].item;
@@ -1421,8 +1393,8 @@ static int mpHostRegisterPlayerMovement(Object* obj, bool isRun, int tile, int e
     // here bypass AP entirely, and stale packets queued before combat
     // started would replay afterwards and drag the avatar around.
     if (MpCombatIsActive()) {
-        debugFilePrint("MP: movement rejected in combat obj=%p tile=%d elev=%d",
-            (void*)obj, tile, elevation);
+        // debugFilePrint("MP: movement rejected in combat obj=%p tile=%d elev=%d",
+        //     (void*)obj, tile, elevation);
         return -1;
     }
 
@@ -1829,7 +1801,7 @@ int MpHostStart(int32_t mapId)
     MpAssignNetIdsToAllObjects();
     mpSnapshotMapStaticObjects();
     debugFilePrint("MP: object net ids assigned");
-    mpDebugDumpWalls("host", 12);
+    // mpDebugDumpWalls("host", 12);
     MpResetObjectSyncBaseline();
     debugFilePrint("MP: object sync baseline reset");
 
@@ -2131,6 +2103,13 @@ static void mpHostRemovePlayer(MultiplayerPlayer* player)
 static void mpBroadcastProfileToClients(uint8_t netId, uint32_t objNetId,
     const MpPlayerProfile& profile, bool skipOwner, uint32_t changedSections)
 {
+    // Diag: what the broadcast hands to the send path — files=0 + a stale
+    // hash here means the caller passed a model-free copy; the receiver then
+    // resolves the registry payload for the stale hash (poisoned install).
+    // (Commented: root-caused — see git history.)
+    // debugFilePrint("MPROF: broadcast profile netId=%u name='%.12s' modelName='%.12s' modelHash=%08X files=%zu sections=%08X",
+    //     netId, profile.name, profile.modelName, profile.modelHash,
+    //     profile.modelFiles.size(), changedSections);
     for (int index = 0; index < NET_MAX_PLAYERS; index++) {
         MultiplayerPlayer* other = &gMpSession.players[index];
         if (!other->isConnected || !other->isHandshaken || other->peer == nullptr) {
@@ -2236,6 +2215,11 @@ static void mpHostSyncProfiles()
                 }
                 full.generation = captured.generation;
                 MpProfileBindLocal(netId, full, gDude);
+                // The change-detection snapshot is model-file-free and its
+                // modelName/hash never flag the MODEL section for a skin
+                // change — without the bit the wire body drops the model
+                // payload. Force it so the fresh files ride when they matter.
+                changedSections |= (1u << (PROFILE_SECTION_MODEL - 1));
             }
         } else {
             MpProfileUpdateRuntime(netId, captured);
@@ -2266,13 +2250,22 @@ static void mpHostSyncProfiles()
     }
 }
 
+// Forces the next periodic profile sync to run immediately (the skin picker
+// calls this so a model change reaches the other players right away instead
+// of waiting out the 1s cadence). The host's sync already runs every tick and
+// diff-detects changes, so only the client upload needs the nudge.
+void MpProfileForceSync()
+{
+    gMpLocalProfileSyncTick = 0;
+}
+
 // Unified client->host character-sheet sync: capture the local sheet once a
 // second and upload the CHANGED sections through the profile channel. The
 // host applies them onto the avatar in place (MpProfileApplyRuntimeUpdate),
 // so level-up perks, spent skill points, looted/dropped items, script XP and
 // stat changes all reach the host's combat resolution and every other client
 // without any per-attribute protocol. Volatile fields (transform, hp/ap,
-// combat state, object flags) are in NO section — they never ride this path.
+// combat state, object flags) are in NO section - they never ride this path.
 static void mpClientSyncLocalProfile()
 {
     if (!gMpIsClient || !gMpActive || gMpSession.hostPeer == nullptr
@@ -2305,6 +2298,20 @@ static void mpClientSyncLocalProfile()
         if (MpProfileSectionChanged(captured, gMpLastUploadedProfile,
                 (uint8_t)sectionId)) {
             changedSections |= (1u << (sectionId - 1));
+        }
+    }
+    // The model-free capture leaves modelName stale, so a skin change never
+    // flags the MODEL section (and the wire body would drop the payload).
+    // Compare the local dude's live proto model directly.
+    {
+        int liveModelId = -1;
+        Proto* dudeProto = nullptr;
+        if (gDude != nullptr && protoGetProto(gDude->pid, &dudeProto) == 0) {
+            liveModelId = dudeProto->critter.fid & 0xFFF;
+        }
+        if (liveModelId >= 0
+            && liveModelId != (gMpLastUploadedProfile.prototypeFid & 0xFFF)) {
+            changedSections |= (1u << (PROFILE_SECTION_MODEL - 1));
         }
     }
     if (gMpLocalProfileSyncReady && changedSections == 0) {
@@ -2590,6 +2597,77 @@ void MpDrawPlayerIndicators()
     }
 }
 
+// Diagnostic (throttled): dump every connected avatar's visible fid once per
+// second so skin-pick propagation can be traced from the logs — which fid the
+// object renders, which model/animation bits it carries, what the proto says,
+// and whether an animation is actively driving the sprite.
+// (Commented: skin-pick propagation root-caused — see git history.)
+static void mpDbgFidWatch()
+{
+    if (!gMpActive) {
+        return;
+    }
+    (void)0;
+#if 0
+    static uint32_t lastTick = 0;
+    if (lastTick != 0 && getTicksSince(lastTick) < 1000) {
+        return;
+    }
+    lastTick = getTicks();
+    for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+        MultiplayerPlayer* p = &gMpSession.players[index];
+        if (!p->isConnected || p->obj == nullptr) {
+            continue;
+        }
+        int protoFid = -1;
+        Proto* proto = nullptr;
+        if (protoGetProto(p->obj->pid, &proto) == 0) {
+            protoFid = proto->critter.fid;
+        }
+        // Art resolution probe (throttled with the watch): does the avatar's
+        // LIVE fid resolve to a drawable FRM on this machine? A fail here
+        // renders the avatar invisible until the fid changes again.
+        const char* artResult = "ok";
+        CacheEntry* artHandle = nullptr;
+        Art* art = artLock(p->obj->fid, &artHandle);
+        if (art != nullptr) {
+            artUnlock(artHandle);
+        } else {
+            artResult = "FAIL";
+        }
+        int model = p->obj->fid & 0xFFF;
+        const char* modelName = artGetCritterModelName(model);
+        char nameBuf[16];
+        if (modelName == nullptr) {
+            snprintf(nameBuf, sizeof(nameBuf), "?");
+            modelName = nameBuf;
+        }
+        debugFilePrint("MPDBG fidwatch netId=%u objFid=0x%X model=%d anim=%d busy=%d protoFid=0x%X protoModel=%d frame=%d tile=%d elev=%d hidden=%d art=%s name='%.12s'",
+            p->netId, p->obj->fid, model,
+            animationTypeFromFid(p->obj->fid),
+            animationIsBusy(p->obj) != 0 ? 1 : 0,
+            protoFid, protoFid >= 0 ? protoFid & 0xFFF : -1,
+            p->obj->frame, p->obj->tile, p->obj->elevation,
+            (p->obj->flags & OBJECT_HIDDEN) != 0 ? 1 : 0,
+            artResult, modelName);
+        // Tile probe: what critters actually sit at the avatar's tile on
+        // THIS machine? A stale duplicate (same position, different fid)
+        // would render as the wrong look even though the avatar fid is right.
+        if (hexGridTileIsValid(p->obj->tile) && elevationIsValid(p->obj->elevation)) {
+            Object* other = objectFindFirstAtLocation(p->obj->elevation, p->obj->tile);
+            while (other != nullptr) {
+                if (objectTypeFromFid(other->fid) == OBJ_TYPE_CRITTER) {
+                    debugFilePrint("MPDBG tileprobe netId=%u obj=%p pid=0x%X fid=0x%X model=%d netObj=%u isAvatar=%d",
+                        p->netId, (void*)other, other->pid, other->fid, other->fid & 0xFFF,
+                        MpGetObjNetId(other), other == p->obj ? 1 : 0);
+                }
+                other = objectFindNextAtLocation();
+            }
+        }
+    }
+#endif
+}
+
 void MpTick()
 {
     if (!gMpActive) {
@@ -2667,8 +2745,8 @@ void MpTick()
         gMpAllowClientScriptExec = false;
         _scr_spatials_enable();
         debugFilePrint("MAP: client deferred map script enter done sid=%d", gMapSid);
-        debugFilePrint("MAPDBG ambient after client deferred map script enter=%d",
-            lightGetAmbientIntensity());
+        // debugFilePrint("MAPDBG ambient after client deferred map script enter=%d",
+        //     lightGetAmbientIntensity());
         if (wmSetupRandomEncounter() == -1) {
             debugPrint("\nError: couldn't set up random encounter after deferred client map enter!");
         }
@@ -2806,12 +2884,11 @@ void MpTick()
         gMpLastTileRefreshTick = getTicks();
         tileWindowRefreshFull();
     }
+    mpDbgFidWatch();
 }
 
 // ---------------------------------------------------------------------------
 // Network event dispatch (host & client)
-// ---------------------------------------------------------------------------
-
 // ---------------------------------------------------------------------------
 // Client quest-state apply (NET_PKT_GVAR_SNAPSHOT / NET_PKT_GVAR_CHANGE).
 // The host's gvar table is the co-op quest state: the snapshot seeds the
@@ -2895,9 +2972,10 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             }
             // Reliable-channel traffic only; the per-tick unreliable state
             // updates (100/101) would spam this log to uselessness.
-            if (packetType <= 32) {
-                debugFilePrint("MP: raw receive type=%u len=%zu", packetType, packetPayloadLength);
-            }
+            // (Commented: per-packet spam — see git history.)
+            // if (packetType <= 32) {
+            //     debugFilePrint("MP: raw receive type=%u len=%zu", packetType, packetPayloadLength);
+            // }
             const void* payload = packetPayload;
             size_t payloadLen = packetPayloadLength;
             switch (packetType) {
@@ -3511,8 +3589,8 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                 static_cast<const uint8_t*>(data) + dataLength);
             gMpDeferredPackets.push_back(std::move(deferred));
             if (packetType != NET_PKT_PLAYER_PROFILE_CHUNK) {
-                debugFilePrint("MP: packet deferred type=%u queue=%zu",
-                    packetType, gMpDeferredPackets.size());
+                // debugFilePrint("MP: packet deferred type=%u queue=%zu",
+                //     packetType, gMpDeferredPackets.size());
             }
             return;
         }
@@ -4652,7 +4730,8 @@ void MpBroadcastObjectStates()
             if (changed && player == nullptr) {
                 // MPDIAG (temporary): watch critter state broadcasts to verify
                 // the dialogue speaker stays in the object stream.
-                if (objectTypeFromFid(state.fid) == OBJ_TYPE_CRITTER) {
+                // (Commented: per-frame spam — see git history.)
+                if (false && objectTypeFromFid(state.fid) == OBJ_TYPE_CRITTER) {
                     static struct { uint32_t netId; uint32_t ms; uint32_t key; } last[32] = {};
                     uint32_t nowMs = getTicks();
                     uint32_t key = state.fid ^ (state.tile << 7) ^ (state.flags << 15) ^ (state.hp << 3);
@@ -5081,7 +5160,7 @@ void MpFinishHostMapChange()
     gMpSuppressExitGridCheck = false;
     mpSetDudeInventoryProtected(false);
     debugFilePrint("MP: finish map change done");
-    mpDebugDumpLightState("host-after-finish");
+    // mpDebugDumpLightState("host-after-finish");
 }
 
 // ---------------------------------------------------------------------------
@@ -5139,7 +5218,7 @@ static void mpApplyObjectTransform(Object* obj, int tile, int x, int y, int rota
     // the local player in vanilla. Keep roofs consistent: run the same roof
     // state machine for the local dude so walls hide when he is under a roof.
     if (obj == gDude) {
-        debugFilePrint("MPDBG roof update: tile=%d elev=%d", tile, elevation);
+        // debugFilePrint("MPDBG roof update: tile=%d elev=%d", tile, elevation);
         objUpdateRoofsForTile(tile, elevation);
     }
 
@@ -5401,7 +5480,8 @@ static Object* mpApplyObjectStateInternal(const NetMapFullSyncObjectPayload* sta
 
     // MPDIAG (temporary): watch critter state applies to verify the dialogue
     // speaker keeps a visible mirror on the client.
-    if (player == nullptr && objectTypeFromFid(state->fid) == OBJ_TYPE_CRITTER) {
+    // (Commented: per-state spam — see git history.)
+    if (false && player == nullptr && objectTypeFromFid(state->fid) == OBJ_TYPE_CRITTER) {
         static struct { uint32_t netId; uint32_t ms; uint32_t key; } last[32] = {};
         uint32_t nowMs = getTicks();
         uint32_t key = state->fid ^ (state->tile << 7) ^ (state->flags << 15) ^ (state->hp << 3);
@@ -5539,16 +5619,17 @@ void MpApplyPlayerState(const NetPlayerStateUpdatePayload* s)
         // Co-op diagnostic (throttled): a local-player transform snap. Shows
         // how far the client's dude is being pulled by the authoritative
         // state (expected to be sub-tile; large snaps indicate the avatar
-        // lags behind — e.g. its walk never advanced).
-        if (isLocalPlayer && p->hasLastState && obj->tile != s->tile) {
-            static uint32_t gMpLocalSnapLogTick = 0;
-            uint32_t nowTicks = getTicks();
-            if (nowTicks - gMpLocalSnapLogTick > 500) {
-                gMpLocalSnapLogTick = nowTicks;
-                debugFilePrint("MP: local snap tile=%d->%d anim=%d",
-                    obj->tile, s->tile, localMovementIsActive ? 1 : 0);
-            }
-        }
+        // lags behind - e.g. its walk never advanced).
+        // (Commented: throttled noise — see git history.)
+        // if (isLocalPlayer && p->hasLastState && obj->tile != s->tile) {
+        //     static uint32_t gMpLocalSnapLogTick = 0;
+        //     uint32_t nowTicks = getTicks();
+        //     if (nowTicks - gMpLocalSnapLogTick > 500) {
+        //         gMpLocalSnapLogTick = nowTicks;
+        //         debugFilePrint("MP: local snap tile=%d->%d anim=%d",
+        //             obj->tile, s->tile, localMovementIsActive ? 1 : 0);
+        //     }
+        // }
         // Remote avatars are applied directly from the authoritative state
         // (per-heartbeat snap). Attempts to animate their movement with a
         // registered walk made the avatar visibly skip: every re-targeted
@@ -6324,7 +6405,7 @@ void MpOnGameTime(const NetGameTimePayload* payload)
     // Adopt the host's authoritative clock. Between syncs the client's own
     // tick advances the mirror (see _script_chk_timed_events), so this keeps
     // time-gated scripts roughly in lockstep with the host without spamming.
-    debugFilePrint("MP: game time sync %u -> %u", gameTimeGetTime(), payload->time);
+    // debugFilePrint("MP: game time sync %u -> %u", gameTimeGetTime(), payload->time);
     gameTimeSetTime((unsigned int)payload->time);
 }
 

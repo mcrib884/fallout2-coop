@@ -461,8 +461,8 @@ void gameMouseCameraDragTick()
                 // leaves the cursor stuck in exploration mode.
                 if (gMpRightPressModeSet) {
                     gameMouseSetMode(gMpRightPressMode);
-                    debugFilePrint("MPDRAG: drag release restore mode=%d",
-                        gMpRightPressMode);
+                    // debugFilePrint("MPDRAG: drag release restore mode=%d",
+                    //     gMpRightPressMode);
                 }
                 // Releasing near a screen edge must not throw the cursor
                 // into edge-scroll the instant the drag ends.
@@ -474,10 +474,10 @@ void gameMouseCameraDragTick()
                 // never cycles, so releasing after a drag leaves the cursor
                 // alone.
                 gameMouseCycleMode();
-                debugFilePrint("MPDRAG: click release cycle");
+                // debugFilePrint("MPDRAG: click release cycle");
             }
-            debugFilePrint("MPDRAG: tick cleared (right released) drag=%d",
-                gMpCameraDragActive);
+            // debugFilePrint("MPDRAG: tick cleared (right released) drag=%d",
+            //     gMpCameraDragActive);
         }
         gMpCameraDragActive = false;
         gMpRightDragCandidate = false;
@@ -499,8 +499,8 @@ void gameMouseCameraDragTick()
         }
         gMpRightDragCandidate = true;
         mouseGetPosition(&gMpRightPressX, &gMpRightPressY);
-        debugFilePrint("MPDRAG: tick self-armed mouse=%d,%d",
-            gMpRightPressX, gMpRightPressY);
+        // debugFilePrint("MPDRAG: tick self-armed mouse=%d,%d",
+        //     gMpRightPressX, gMpRightPressY);
     }
     int x;
     int y;
@@ -528,7 +528,7 @@ void gameMouseCameraDragTick()
         gMpCameraDragAccumX = 0;
         gMpCameraDragAccumY = 0;
         gMpCameraDragLastTick = getTicks();
-        debugFilePrint("MPDRAG: drag engaged mouse=%d,%d", x, y);
+        // debugFilePrint("MPDRAG: drag engaged mouse=%d,%d", x, y);
         return;
     }
     const int dx = x - gMpCameraDragLastX;
@@ -729,18 +729,18 @@ static void mpCursorDebugDump(const char* why)
     if (!gMpActive || !gMpIsClient || !MpCombatIsActive()) {
         return;
     }
-    debugFilePrint("MPCURSOR[%s]: cursor=%d mode=%d gmouseEnabled=%d uiDisabled=%d hexHidden=%d hexFid=0x%X hexTile=%d hexElev=%d bounceHidden=%d elev=%d",
-        why,
-        gGameMouseCursor,
-        gGameMouseMode,
-        _gmouse_enabled ? 1 : 0,
-        gameUiIsDisabled() ? 1 : 0,
-        (gGameMouseHexCursor->flags & OBJECT_HIDDEN) != 0 ? 1 : 0,
-        gGameMouseHexCursor->fid,
-        gGameMouseHexCursor->tile,
-        gGameMouseHexCursor->elevation,
-        (gGameMouseBouncingCursor->flags & OBJECT_HIDDEN) != 0 ? 1 : 0,
-        gElevation);
+    // debugFilePrint("MPCURSOR[%s]: cursor=%d mode=%d gmouseEnabled=%d uiDisabled=%d hexHidden=%d hexFid=0x%X hexTile=%d hexElev=%d bounceHidden=%d elev=%d",
+    //     why,
+    //     gGameMouseCursor,
+    //     gGameMouseMode,
+    //     _gmouse_enabled ? 1 : 0,
+    //     gameUiIsDisabled() ? 1 : 0,
+    //     (gGameMouseHexCursor->flags & OBJECT_HIDDEN) != 0 ? 1 : 0,
+    //     gGameMouseHexCursor->fid,
+    //     gGameMouseHexCursor->tile,
+    //     gGameMouseHexCursor->elevation,
+    //     (gGameMouseBouncingCursor->flags & OBJECT_HIDDEN) != 0 ? 1 : 0,
+    //     gElevation);
 }
 
 // 0x44B684 gmouse_bk_process
@@ -1253,8 +1253,8 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                 gMpRightDragCandidate = true;
                 gMpRightPressX = mouseX;
                 gMpRightPressY = mouseY;
-                debugFilePrint("MPDRAG: press candidate armed mouse=%d,%d",
-                    mouseX, mouseY);
+                // debugFilePrint("MPDRAG: press candidate armed mouse=%d,%d",
+                //     mouseX, mouseY);
             } else if ((mouseState & MOUSE_EVENT_RIGHT_BUTTON_REPEAT) == 0
                 && ((gMpActive && gMpIsClient) || (gGameMouseHexCursor->flags & OBJECT_HIDDEN) == 0)) {
                 // Non-exploration presses keep the vanilla cycle-on-press.

@@ -1,10 +1,16 @@
 #include "multiplayer_debug.h"
 
 #include <algorithm>
+#include <cctype>
 #include <stdio.h>
+#include <string.h>
+#include <vector>
 
+#include "animation.h"
+#include "art.h"
 #include "color.h"
 #include "combat.h"
+#include "content_config.h"
 #include "critter.h"
 #include "debug.h"
 #include "display_monitor.h"
@@ -17,13 +23,16 @@
 #include "multiplayer.h"
 #include "multiplayer_perf.h"
 #include "net.h"
+#include "object.h"
 #include "perk.h"
+#include "platform_compat.h"
 #include "proto.h"
 #include "skill.h"
 #include "sfall_script_hooks.h"
 #include "stat.h"
 #include "svga.h"
 #include "text_font.h"
+#include "tile.h"
 #include "window_manager.h"
 #include "window_manager_private.h"
 
@@ -69,6 +78,15 @@ constexpr int DBG_BTN_PERF_METER = 736;
 constexpr int DBG_BTN_CHEAT_BACK = 737;
 constexpr int DBG_BTN_CHEAT_INSTA_KILL = 738;
 constexpr int DBG_BTN_CLIENT_CHEATS = 739;
+constexpr int DBG_BTN_SKIN_RESTORE = 741;
+constexpr int DBG_BTN_SKIN_BACK = 742;
+constexpr int DBG_BTN_SKIN_CAT_PREV = 743;
+constexpr int DBG_BTN_SKIN_CAT_NEXT = 744;
+constexpr int DBG_BTN_SKIN_MODEL_PREV = 745;
+constexpr int DBG_BTN_SKIN_MODEL_NEXT = 746;
+constexpr int DBG_BTN_SKIN = 747;
+constexpr int DBG_BTN_SKIN_CAT_BASE = 750;
+constexpr int DBG_BTN_SKIN_MODEL_BASE = 770;
 
 constexpr int kDbgWindowWidth = 460;
 constexpr int kDbgWindowHeight = 305;
@@ -788,7 +806,7 @@ void MpDebugCheatsTick()
                     NET_PKT_PLAYER_CMD, &payload, sizeof(payload))) {
                 gDbgCheatFlagsDirty = false;
                 gDbgCheatLastSyncTick = now;
-                debugFilePrint("MPDBG: cheat flags sent flags=0x%X", gDbgCheatFlags);
+                // debugFilePrint("MPDBG: cheat flags sent flags=0x%X", gDbgCheatFlags);
             }
         }
     }
@@ -1026,6 +1044,10 @@ static void dbgCheatsMenuShow()
 }
 
 // === MpDebugMenuShow ===
+// Forward: the skin status helper is defined with the skin-picker block below
+// but drawn from the settings menu.
+static void dbgSkinStatusText(char* buf, size_t size);
+
 void MpDebugMenuShow()
 {
     debugFilePrint("MPDBG: menu show begin");
@@ -1081,6 +1103,12 @@ void MpDebugMenuShow()
             windowDrawText(win, clientCheatsStatus, 0, 330, 110, COLOR_WHITE);
         }
     }
+    // Skin picker: per-machine appearance override, available to everyone
+    // (singleplayer included — it is the local dude's look either way).
+    char skinStatus[64];
+    dbgSkinStatusText(skinStatus, sizeof(skinStatus));
+    _win_register_text_button(win, 330, 146, -1, -1, -1, DBG_BTN_SKIN, "Skin...", 0);
+    windowDrawText(win, skinStatus, 0, 330, 174, COLOR_WHITE);
     windowRefresh(win);
 
     bool keepGoing = true;
@@ -1100,6 +1128,7 @@ void MpDebugMenuShow()
                 rc = 0;
                 break;
             case DBG_BTN_CHEATS:
+            case DBG_BTN_SKIN:
             case DBG_BTN_CLOSE:
                 rc = keyCode;
                 break;
@@ -1142,6 +1171,14 @@ void MpDebugMenuShow()
                 dbgCheatsMenuShow();
             }
             break;
+        case DBG_BTN_SKIN:
+            MpDebugModelPickerShow();
+            // Redraw the skin status line after the picker returned.
+            dbgSkinStatusText(skinStatus, sizeof(skinStatus));
+            windowFill(win, 330, 172, 130, 20, COLOR_BLACK);
+            windowDrawText(win, skinStatus, 0, 330, 174, COLOR_WHITE);
+            windowRefresh(win);
+            break;
         }
     }
 
@@ -1150,6 +1187,370 @@ void MpDebugMenuShow()
         mouseHideCursor();
     }
     debugFilePrint("MPDBG: menu show end");
+}
+
+// ---------------------------------------------------------------------------
+// Skin picker: a per-machine appearance override. The choice is written into
+// the dude's proto fid so the periodic profile sync (change-detected on the
+// model NAME) propagates it to every machine; vanilla models resolve by name
+// on the receivers. The override wins over the armor appearance on the
+// picker's own machine (inventoryComputeCritterFid consults it), and the
+// state-stream FID carries the picked look to everyone else.
+// ---------------------------------------------------------------------------
+
+// -1 = no override (the config default / armor decides), otherwise the picked
+// critter model index.
+static int gDbgSkinOverrideModel = -1;
+
+int MpDebugSkinOverrideModel()
+{
+    return gDbgSkinOverrideModel;
+}
+
+// Fills the "Skin: <model>" status text with the dude's current base model
+// name (the proto FID model, i.e. what the picker would restore to).
+static const char* dbgCurrentModelName()
+{
+    if (gDude != nullptr) {
+        Proto* proto = nullptr;
+        if (protoGetProto(gDude->pid, &proto) == 0 && proto != nullptr) {
+            const char* name = artGetCritterModelName(proto->critter.fid & 0xFFF);
+            if (name != nullptr && name[0] != '\0') {
+                return name;
+            }
+        }
+    }
+    return "?";
+}
+
+static void dbgSkinStatusText(char* buf, size_t size)
+{
+    snprintf(buf, size, "Skin: %.12s", dbgCurrentModelName());
+}
+
+void MpDebugApplyModel(int modelIndex)
+{
+    if (gDude == nullptr || modelIndex < 0 || modelIndex >= artGetCritterModelCount()) {
+        return;
+    }
+    Proto* proto = nullptr;
+    if (protoGetProto(gDude->pid, &proto) == -1 || proto == nullptr) {
+        debugFilePrint("MPDBG: skin apply protoGetProto failed pid=0x%X", gDude->pid);
+        return;
+    }
+    gDbgSkinOverrideModel = modelIndex;
+    int preFid = gDude->fid;
+    // The profile capture reads the proto FID model — writing the pick here
+    // makes the periodic profile sync detect and propagate it.
+    proto->critter.fid = (proto->critter.fid & ~0xFFF) | (modelIndex & 0xFFF);
+    int fid = buildFid(OBJ_TYPE_CRITTER, modelIndex, ANIM_STAND,
+        weaponAnimationFromFid(gDude->fid), gDude->rotation + 1);
+    Rect rect;
+    objectSetFid(gDude, fid, &rect);
+    tileWindowRefreshRect(&rect, gDude->elevation);
+    const char* name = artGetCritterModelName(modelIndex);
+    debugFilePrint("MPDBG: skin applied index=%d name='%.12s' preFid=0x%X newFid=0x%X busy=%d",
+        modelIndex, name != nullptr ? name : "?", preFid, fid,
+        animationIsBusy(gDude) != 0 ? 1 : 0);
+    // Push the model change immediately — the periodic profile sync runs on
+    // a 1s cadence, and the pick should reach the other player right away.
+    MpProfileForceSync();
+}
+
+void MpDebugRestoreSkin()
+{
+    if (gDude == nullptr) {
+        return;
+    }
+    Proto* proto = nullptr;
+    if (protoGetProto(gDude->pid, &proto) == -1 || proto == nullptr) {
+        return;
+    }
+    gDbgSkinOverrideModel = -1;
+    // The config's per-gender default is the vanilla look (the fork's ce.dat
+    // ships it; the code fallback is the jumpsuit per gender).
+    bool female = critterGetStat(gDude, STAT_GENDER) == GENDER_FEMALE;
+    const char* defaultName = female ? "hfjmps" : "hmjmps";
+    configGetString(&gContentConfig, CONTENT_CONFIG_START_SECTION,
+        female ? "model_female_default" : "model_male_default",
+        const_cast<char**>(&defaultName), defaultName);
+    int modelId = -1;
+    if (defaultName != nullptr && defaultName[0] != '\0') {
+        modelId = artListIndex(OBJ_TYPE_CRITTER, defaultName);
+    }
+    if (modelId < 0) {
+        debugFilePrint("MPDBG: skin restore default model not found name='%s'",
+            defaultName != nullptr ? defaultName : "?");
+        return;
+    }
+    proto->critter.fid = (proto->critter.fid & ~0xFFF) | (modelId & 0xFFF);
+    // Armor decides the look again after a restore (vanilla behavior).
+    int model = modelId;
+    Object* armor = critterGetArmor(gDude);
+    if (armor != nullptr) {
+        Proto* armorProto = nullptr;
+        if (protoGetProto(armor->pid, &armorProto) == 0 && armorProto != nullptr) {
+            int armorFid = female
+                ? armorProto->item.data.armor.femaleFid
+                : armorProto->item.data.armor.maleFid;
+            if (armorFid != -1) {
+                model = armorFid;
+            }
+        }
+    }
+    int fid = buildFid(OBJ_TYPE_CRITTER, model, ANIM_STAND,
+        weaponAnimationFromFid(gDude->fid), gDude->rotation + 1);
+    Rect rect;
+    objectSetFid(gDude, fid, &rect);
+    tileWindowRefreshRect(&rect, gDude->elevation);
+    debugFilePrint("MPDBG: skin restored model=%d override cleared", model);
+}
+
+void MpDebugModelPickerShow()
+{
+    constexpr int kWidth = 640;
+    constexpr int kHeight = 440;
+    constexpr int kCatRows = 9;
+    constexpr int kModelRows = 12;
+
+    // Flatten the runtime critter art list, dropping reserved/empty slots,
+    // then sort by name so the two-letter prefix groups fall together.
+    struct SkinModel { int index; char name[13]; };
+    std::vector<SkinModel> models;
+    {
+        int count = artGetCritterModelCount();
+        for (int i = 0; i < count; i++) {
+            const char* name = artGetCritterModelName(i);
+            if (name == nullptr || name[0] == '\0') {
+                continue;
+            }
+            SkinModel model;
+            strncpy(model.name, name, 12);
+            model.name[12] = '\0';
+            if (compat_stricmp(model.name, "reserv") == 0) {
+                continue;
+            }
+            model.index = i;
+            models.push_back(model);
+        }
+        std::stable_sort(models.begin(), models.end(),
+            [](const SkinModel& a, const SkinModel& b) {
+                return compat_stricmp(a.name, b.name) < 0;
+            });
+    }
+
+    // Category runs: equal two-letter prefixes.
+    struct SkinCategory { char prefix[3]; int start; int count; };
+    std::vector<SkinCategory> categories;
+    for (size_t i = 0; i < models.size();) {
+        char prefix[3] = {
+            (char)tolower((unsigned char)models[i].name[0]),
+            (char)tolower((unsigned char)models[i].name[1]),
+            '\0',
+        };
+        size_t end = i + 1;
+        while (end < models.size()) {
+            char nextPrefix[3] = {
+                (char)tolower((unsigned char)models[end].name[0]),
+                (char)tolower((unsigned char)models[end].name[1]),
+                '\0',
+            };
+            if (strncmp(nextPrefix, prefix, 2) != 0) {
+                break;
+            }
+            end++;
+        }
+        SkinCategory category;
+        memcpy(category.prefix, prefix, sizeof(category.prefix));
+        category.start = (int)i;
+        category.count = (int)(end - i);
+        categories.push_back(category);
+        i = end;
+    }
+    if (categories.empty()) {
+        debugFilePrint("MPDBG: skin picker no categories (art list empty)");
+        return;
+    }
+
+    auto skinCategoryLabel = [](const char* prefix) -> const char* {
+        struct Entry {
+            const char* prefix;
+            const char* label;
+        };
+        static const Entry kEntries[] = {
+            { "hm", "Human Male" },
+            { "hf", "Human Female" },
+            { "ha", "Humans (armor)" },
+            { "ma", "Creatures & Mutants" },
+            { "na", "Ghouls & Oddities" },
+            { "nf", "NPC Female" },
+            { "nm", "NPC Male" },
+        };
+        for (const Entry& entry : kEntries) {
+            if (compat_stricmp(prefix, entry.prefix) == 0) {
+                return entry.label;
+            }
+        }
+        return nullptr;
+    };
+
+    // Open on the category that holds the dude's current base model.
+    int catSel = 0;
+    {
+        Proto* proto = nullptr;
+        if (gDude != nullptr && protoGetProto(gDude->pid, &proto) == 0 && proto != nullptr) {
+            const char* current = artGetCritterModelName(proto->critter.fid & 0xFFF);
+            if (current != nullptr && current[0] != '\0') {
+                for (size_t i = 0; i < models.size(); i++) {
+                    if (strncmp(models[i].name, current, 12) == 0) {
+                        for (size_t c = 0; c < categories.size(); c++) {
+                            if ((int)i >= categories[c].start
+                                && (int)i < categories[c].start + categories[c].count) {
+                                catSel = (int)c;
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    int catPage = 0;
+    int modelPage = 0;
+    int win = -1;
+
+    auto rebuild = [&]() {
+        if (win != -1) {
+            windowDestroy(win);
+        }
+        int winX, winY;
+        dbgCenteredPos(kWidth, kHeight, &winX, &winY);
+        win = windowCreate(winX, winY, kWidth, kHeight, COLOR_BLACK,
+            WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
+        if (win == -1) {
+            return;
+        }
+        windowDrawBorder(win);
+
+        const char* title = "SKIN PICKER";
+        windowDrawText(win, title, 0, (kWidth - fontGetStringWidth(title)) / 2, 6, COLOR_WHITE);
+        char status[64];
+        snprintf(status, sizeof(status), "Current: %.12s", dbgCurrentModelName());
+        windowDrawText(win, status, 0, 30, 28, COLOR_WHITE);
+        windowDrawText(win, "Category", 0, 30, 48, COLOR_WHITE);
+        windowDrawText(win, "Models", 0, 250, 48, COLOR_WHITE);
+
+        int catStart = catPage * kCatRows;
+        int catShown = std::min(kCatRows, (int)categories.size() - catStart);
+        for (int i = 0; i < catShown; i++) {
+            int categoryIndex = catStart + i;
+            const char* label = skinCategoryLabel(categories[categoryIndex].prefix);
+            char fallback[32];
+            if (label == nullptr) {
+                snprintf(fallback, sizeof(fallback), "Other: %s", categories[categoryIndex].prefix);
+                label = fallback;
+            }
+            _win_register_text_button(win, 30, 62 + i * 26, -1, -1, -1,
+                DBG_BTN_SKIN_CAT_BASE + i, label, 0);
+        }
+
+        const SkinCategory& category = categories[catSel];
+        int modelStart = modelPage * kModelRows;
+        int modelShown = std::min(kModelRows, category.count - modelStart);
+        for (int i = 0; i < modelShown; i++) {
+            const SkinModel& model = models[category.start + modelStart + i];
+            _win_register_text_button(win, 250, 62 + i * 26, -1, -1, -1,
+                DBG_BTN_SKIN_MODEL_BASE + i, model.name, 0);
+        }
+
+        _win_register_text_button(win, 30, 300, -1, -1, -1, DBG_BTN_SKIN_CAT_PREV, "Cat Prev", 0);
+        _win_register_text_button(win, 170, 300, -1, -1, -1, DBG_BTN_SKIN_CAT_NEXT, "Cat Next", 0);
+        _win_register_text_button(win, 250, 380, -1, -1, -1, DBG_BTN_SKIN_MODEL_PREV, "Prev", 0);
+        _win_register_text_button(win, 370, 380, -1, -1, -1, DBG_BTN_SKIN_MODEL_NEXT, "Next", 0);
+        _win_register_text_button(win, 30, 410, -1, -1, -1, DBG_BTN_SKIN_RESTORE, "Restore Vanilla", 0);
+        _win_register_text_button(win, 250, 410, -1, -1, -1, DBG_BTN_SKIN_BACK, "Back", 0);
+        windowRefresh(win);
+    };
+
+    rebuild();
+
+    bool keepGoing = true;
+    while (keepGoing) {
+        sharedFpsLimiter.mark();
+
+        // Keep the session alive behind the modal (profile sync runs from
+        // MpTick, so a picked skin propagates even while the picker is open).
+        MpTick();
+
+        int keyCode = inputGetInput();
+        switch (keyCode) {
+        case KEY_ESCAPE:
+        case DBG_BTN_SKIN_BACK:
+            keepGoing = false;
+            break;
+        case DBG_BTN_SKIN_RESTORE:
+            MpDebugRestoreSkin();
+            rebuild();
+            break;
+        case DBG_BTN_SKIN_CAT_PREV:
+            if (catPage > 0) {
+                catPage--;
+                rebuild();
+            }
+            break;
+        case DBG_BTN_SKIN_CAT_NEXT:
+            if ((catPage + 1) * kCatRows < (int)categories.size()) {
+                catPage++;
+                rebuild();
+            }
+            break;
+        case DBG_BTN_SKIN_MODEL_PREV:
+            if (modelPage > 0) {
+                modelPage--;
+                rebuild();
+            }
+            break;
+        case DBG_BTN_SKIN_MODEL_NEXT:
+            if ((modelPage + 1) * kModelRows < categories[catSel].count) {
+                modelPage++;
+                rebuild();
+            }
+            break;
+        default:
+            if (keyCode >= DBG_BTN_SKIN_CAT_BASE
+                && keyCode < DBG_BTN_SKIN_CAT_BASE + kCatRows) {
+                int categoryIndex = catPage * kCatRows + (keyCode - DBG_BTN_SKIN_CAT_BASE);
+                if (categoryIndex >= 0 && categoryIndex < (int)categories.size()
+                    && categoryIndex != catSel) {
+                    catSel = categoryIndex;
+                    modelPage = 0;
+                    rebuild();
+                }
+            } else if (keyCode >= DBG_BTN_SKIN_MODEL_BASE
+                && keyCode < DBG_BTN_SKIN_MODEL_BASE + kModelRows) {
+                const SkinCategory& category = categories[catSel];
+                int modelIndex = modelPage * kModelRows + (keyCode - DBG_BTN_SKIN_MODEL_BASE);
+                if (modelIndex >= 0 && modelIndex < category.count) {
+                    MpDebugApplyModel(models[category.start + modelIndex].index);
+                    // Redraw the current-model line.
+                    char status[64];
+                    snprintf(status, sizeof(status), "Current: %.12s",
+                        models[category.start + modelIndex].name);
+                    windowFill(win, 8, 24, kWidth - 16, 24, COLOR_BLACK);
+                    windowDrawText(win, status, 0, 30, 28, COLOR_WHITE);
+                    windowRefresh(win);
+                }
+            }
+            break;
+        }
+
+        renderPresent();
+        sharedFpsLimiter.throttle();
+    }
+
+    windowDestroy(win);
 }
 
 // Client: heal request for the local avatar (value <= 0 = full). Rides the

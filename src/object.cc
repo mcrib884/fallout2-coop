@@ -21,6 +21,7 @@
 #include "map.h"
 #include "memory.h"
 #include "multiplayer.h"
+#include "input.h"
 #include "multiplayer_vote.h"
 #include "party_member.h"
 #include "proto.h"
@@ -5170,6 +5171,43 @@ static void _obj_render_object(Object* object, Rect* rect, int light)
     Art* art = artLock(object->fid, &cacheEntry);
     if (art == nullptr) {
         return;
+    }
+
+    // Co-op render probe (throttled): ground truth of what the viewer draws
+    // for a networked player avatar — the resolved file path and the frame
+    // against the art's frame count.
+    // (Commented: skin-pick render mystery resolved — see git history.)
+    if (false && gMpActive && type == OBJ_TYPE_CRITTER && MpGetObjNetId(object) != 0) {
+        // Per-object throttle: the old single-tick gate only logged the FIRST
+        // networked critter drawn each second — a visible map critter (e.g. a
+        // gecko) drowned out the player avatars. Each networked critter now
+        // logs at most once per second.
+        static struct { const void* obj; uint32_t tick; } gMpRenderProbeLast[8] = {};
+        uint32_t nowTicks = getTicks();
+        int slot = -1;
+        int oldest = 0;
+        for (int i = 0; i < 8; i++) {
+            if (gMpRenderProbeLast[i].obj == object) {
+                slot = i;
+                break;
+            }
+            if (gMpRenderProbeLast[i].tick < gMpRenderProbeLast[oldest].tick) {
+                oldest = i;
+            }
+        }
+        if (slot < 0) {
+            slot = oldest;
+            gMpRenderProbeLast[slot].obj = object;
+        }
+        if (gMpRenderProbeLast[slot].tick == 0
+            || nowTicks - gMpRenderProbeLast[slot].tick >= 1000) {
+            gMpRenderProbeLast[slot].tick = nowTicks;
+            char* probePath = artBuildFilePath(object->fid);
+            debugFilePrint("MPDBG renderprobe obj=%p fid=0x%X model=%d file='%s' frames=%d objFrame=%d rot=%d",
+                (void*)object, object->fid, object->fid & 0xFFF,
+                probePath != nullptr ? probePath : "?",
+                artGetFrameCount(art), object->frame, object->rotation);
+        }
     }
 
     int frameWidth = artGetWidth(art, object->frame, object->rotation);

@@ -77,6 +77,10 @@ int artCritterFidShouldRun(int fid);
 int artAliasFid(int fid);
 int buildFid(ObjectType objectType, int frmId, int animType = 0, int weaponCode = 0, Rotation rotation = ROTATION_NE);
 int artListIndex(ObjectType objectType, const char* name);
+// Model enumeration for the skin picker (runtime critter art list; names
+// are 12-char fixed-width, "reserv" slots and empty entries must be skipped).
+int artGetCritterModelCount();
+const char* artGetCritterModelName(int index);
 int artRegisterSessionCritterModel(const char* name, const char* rootPath, int alias, int shouldRun);
 void artClearSessionModels();
 Art* artLoad(const char* path);

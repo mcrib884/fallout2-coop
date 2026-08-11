@@ -20,6 +20,7 @@
 #include "multiplayer.h"
 #include "object.h"
 #include "perk.h"
+#include "tile.h"
 #include "proto.h"
 #include "skill.h"
 #include "stat.h"
@@ -427,13 +428,21 @@ static bool mpEnsureDirectoryTree(const char* path)
 static bool installModelFiles(MpPlayerProfile* profile)
 {
     if (profile == nullptr || profile->modelName[0] == '\0') return true;
-    if (profile->modelFiles.empty()) {
+    // A vanilla model ships with the game — resolve it locally and NEVER
+    // install files or register a session root for it. Installing under a
+    // vanilla name would register a root that redirects the vanilla art to
+    // whatever content arrived on the wire (the stale-hash poison: join-era
+    // files installed under a picked name rendered as the default look).
+    {
         int modelId = artListIndex(OBJ_TYPE_CRITTER, profile->modelName);
-        if (modelId >= 0) {
+        if (modelId >= 0 && modelId < artGetCritterModelCount()) {
             profile->localModelIndex = modelId;
-            debugFilePrint("MPROF: install model by name='%s' index=%d", profile->modelName, modelId);
+            debugFilePrint("MPROF: install model by name='%s' index=%d (vanilla, no install)",
+                profile->modelName, modelId);
             return true;
         }
+    }
+    if (profile->modelFiles.empty()) {
         // Custom model whose payload was skipped on the wire (the receiver
         // was assumed to have it): pull it from the session registry.
         if (!MpModelRegistryResolve(profile->modelHash, &profile->modelFiles)) {
@@ -1689,10 +1698,12 @@ static bool mpProfileReapplyAvatar(MpPlayerRuntime& runtime, uint32_t changedSec
     const MpPlayerProfile& profile = runtime.profile;
     // Only the sections present on the wire are written; changedSections == 0
     // means "apply everything" (join transfers).
-    if (changedSections == 0
-        || (changedSections & (1u << (PROFILE_SECTION_IDENTITY - 1))) != 0) {
+    bool identityOnWire = changedSections == 0
+        || (changedSections & (1u << (PROFILE_SECTION_IDENTITY - 1))) != 0;
+    bool modelOnWire = changedSections == 0
+        || (changedSections & (1u << (PROFILE_SECTION_MODEL - 1))) != 0;
+    if (identityOnWire) {
         proto->critter.messageId = profile.prototypeMessageId;
-        proto->critter.fid = profile.prototypeFid;
         proto->critter.lightDistance = profile.prototypeLightDistance;
         proto->critter.lightIntensity = profile.prototypeLightIntensity;
         proto->critter.flags = profile.prototypeFlags;
@@ -1708,6 +1719,33 @@ static bool mpProfileReapplyAvatar(MpPlayerRuntime& runtime, uint32_t changedSec
         // The object's own fields derived from the proto at creation.
         object->lightDistance = profile.lightDistance;
         object->lightIntensity = profile.lightIntensity;
+    }
+    // The proto's model fid IS the model identity: a skin/model change rides
+    // the MODEL section alone, so the fid must apply here too — otherwise
+    // the model files install but the avatar keeps its old look. The live
+    // object fid is rebuilt whenever the model actually changes, whichever
+    // section carried it (a skin pick mutates the proto fid and travels as
+    // IDENTITY — the no-model capture never refreshes the name, so the MODEL
+    // bit alone would miss it and every broadcast would revert the pick).
+    if (identityOnWire || modelOnWire) {
+        int oldModel = proto->critter.fid & 0xFFF;
+        proto->critter.fid = profile.prototypeFid;
+        int newModel = profile.prototypeFid & 0xFFF;
+        if (newModel != oldModel) {
+            // Rebuild the live avatar's fid with the new model (weapon-anim
+            // and rotation bits preserved) so the state stream carries the
+            // new look to every machine immediately.
+            int fid = buildFid(OBJ_TYPE_CRITTER, newModel,
+                animationTypeFromFid(object->fid),
+                weaponAnimationFromFid(object->fid),
+                object->rotation + 1);
+            Rect rect;
+            if (fid != object->fid && objectSetFid(object, fid, &rect) == 0) {
+                tileWindowRefreshRect(&rect, object->elevation);
+            }
+            debugFilePrint("MPROF: skin model applied name='%s' model=%d fid=0x%X",
+                profile.name, newModel, fid);
+        }
     }
     if (changedSections == 0
         || (changedSections & (1u << (PROFILE_SECTION_BASE_STATS - 1))) != 0) {

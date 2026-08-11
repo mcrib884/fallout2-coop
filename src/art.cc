@@ -516,6 +516,22 @@ int artListIndex(ObjectType objectType, const char* name)
     return -1;
 }
 
+// Model enumeration for the skin picker: the runtime critter art list. The
+// entries are 12-char fixed-width names; reserved slots are "reserv" and
+// mods/session models appear past the vanilla base length.
+int artGetCritterModelCount()
+{
+    return gArtListDescriptions[OBJ_TYPE_CRITTER].fileNamesLength;
+}
+
+const char* artGetCritterModelName(int index)
+{
+    if (index < 0 || index >= gArtListDescriptions[OBJ_TYPE_CRITTER].fileNamesLength) {
+        return nullptr;
+    }
+    return gArtListDescriptions[OBJ_TYPE_CRITTER].fileNames + index * 13;
+}
+
 // 0x419160
 Art* artLock(int fid, CacheEntry** handlePtr)
 {

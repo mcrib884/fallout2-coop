@@ -36,6 +36,7 @@
 #include "message.h"
 #include "mouse.h"
 #include "multiplayer.h"
+#include "multiplayer_debug.h"
 #include "multiplayer_combat.h"
 #include "multiplayer_dialog.h"
 #include "multiplayer_loot.h"
@@ -1539,6 +1540,16 @@ int inventoryComputeCritterFid(Object* critter, int basePid, Object* rightHandIt
             if (inventoryFid == -1) {
                 inventoryFid = _art_vault_guy_num;
             }
+        }
+    }
+
+    // Co-op skin picker: a player-chosen base model wins over the armor
+    // appearance on the picker's own machine (the remote view follows the
+    // state-stream FID, which already carries the picked model).
+    if (gMpActive && critter == gDude) {
+        int override = MpDebugSkinOverrideModel();
+        if (override >= 0) {
+            inventoryFid = override;
         }
     }
 

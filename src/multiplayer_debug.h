@@ -70,6 +70,24 @@ bool MpDebugClientCheatsEnabled();
 // Send the current cheat policy to one peer (join-time seeding).
 void MpDebugSendCheatPolicyTo(ENetPeer* peer);
 
+// Per-machine skin override: -1 = none (the config default / armor decides),
+// otherwise the picked critter model index (art list).
+int MpDebugSkinOverrideModel();
+
+// Apply a picked critter model to the local dude: writes the choice into the
+// dude's proto fid (the profile capture reads it, so the periodic profile
+// sync propagates it to every machine) and updates the visible sprite.
+void MpDebugApplyModel(int modelIndex);
+
+// Restore the vanilla look: clears the override and rebuilds the dude's fid
+// from the config's per-gender default model (armor decides again).
+void MpDebugRestoreSkin();
+
+// Opens the skin picker: every critter model from the runtime art list,
+// grouped by its two-letter species/gender prefix, per-page navigation,
+// select-on-click and a restore-vanilla button.
+void MpDebugModelPickerShow();
+
 } // namespace fallout
 
 #endif

@@ -86,6 +86,8 @@ enum NetPacketType {
     NET_PKT_MAP_ELEVATION = 56,   // host -> clients: shared elevation change (same-map transition)
     NET_PKT_ITEM_REMOVE = 57,     // host -> client: script removed an item from the player's inventory
     NET_PKT_GAME_TIME = 58,       // host -> clients: authoritative game clock (client keeps a mirror)
+    NET_PKT_TO_HIT_QUERY = 59,    // client -> host: called-shot probabilities for a target (host-owned rolls)
+    NET_PKT_TO_HIT_RESULT = 60,   // host -> client: the 8 called-shot probabilities computed host-side
 };
 
 enum NetUnreliablePacketType {
@@ -436,7 +438,24 @@ enum NetPlayerCmdOpcode {
     NET_PLAYER_CMD_HEAL = 1,         // arg1: 0 = full, else amount
     NET_PLAYER_CMD_INVENTORY_AP = 2, // arg1: AP cost to deduct
     NET_PLAYER_CMD_AP_REFILL = 3,    // refill the avatar's action points
+    NET_PLAYER_CMD_CHEAT_FLAGS = 4,  // arg1: MpDebugCheatFlags bitmask
 };
+
+// Called-shot probability query: the client's aiming window must show the
+// host's numbers (the host owns every combat roll), so the client asks for
+// them instead of computing with its own settings and script hooks.
+typedef struct NetToHitQueryPayload {
+    uint32_t targetNetId;
+    uint8_t hitMode;
+} NetToHitQueryPayload;
+
+// Host reply: probs[0..3] are the left-column locations, probs[4..7] the
+// right-column ones, in the same order the called-shot window draws them.
+typedef struct NetToHitResultPayload {
+    uint32_t targetNetId;
+    uint8_t hitMode;
+    int16_t probs[8];
+} NetToHitResultPayload;
 
 // Generic host -> client player event (reliable). Discrete player lifecycle
 // and combat outcomes ride this single route. (DEPRECATED: NET_PKT_PLAYER_STATUS,
@@ -455,6 +474,7 @@ enum NetPlayerEventOpcode {
     NET_PLAYER_EVENT_GAME_OVER = 2,     // arg1: reason
     NET_PLAYER_EVENT_ATTACK_RESULT = 3, // arg1: damage; arg2: attackerFlags; arg3: defenderFlags; arg4: targetNetId
     NET_PLAYER_EVENT_SKILL_USE = 4,     // arg1: skill message id; arg2: format arg (hp / limb msg id); arg3: target netId; arg4: 1 = play time-skip fade
+    NET_PLAYER_EVENT_ATTACK_REJECTED = 5, // arg1: attacker authoritative tile; arg2: elevation; arg3: targetNetId; arg4: 0
 };
 
 // --- Synchronized dialogue ---

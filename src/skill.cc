@@ -18,6 +18,7 @@
 #include "message.h"
 #include "multiplayer.h"
 #include "multiplayer_combat.h"
+#include "multiplayer_debug.h"
 #include "multiplayer_profile.h"
 #include "object.h"
 #include "palette.h"
@@ -795,6 +796,15 @@ int skillRoll(Object* critter, Skill skill, int modifier, int* howMuch)
         if (sneaking) {
             skillValue += 30;
         }
+    }
+
+    if (MpDebugCheatEnabled(critter, MP_DEBUG_CHEAT_ALWAYS_SUCCEED)) {
+        if (howMuch != nullptr) {
+            *howMuch = 100;
+        }
+        debugFilePrint("MPDBG: always succeed skill=%d netId=%u",
+            skill, MpGetObjNetId(critter));
+        return ROLL_SUCCESS;
     }
 
     int criticalChance = critterGetStat(critter, STAT_CRITICAL_CHANCE);

@@ -28,6 +28,7 @@
 #include "memory.h"
 #include "multiplayer.h"
 #include "multiplayer_combat.h"
+#include "multiplayer_debug.h"
 #include "multiplayer_profile.h"
 #include "message.h"
 #include "object.h"
@@ -3251,6 +3252,7 @@ void _combat_turn_run()
         if (gMpActive && gMpIsHost) {
             MpCombatPump();
         }
+        MpDebugCheatsTick();
 
         renderPresent();
         sharedFpsLimiter.throttle();
@@ -3270,6 +3272,9 @@ static int _combat_input()
         if (gMpActive && gMpIsHost) {
             MpCombatPump();
         }
+        // Co-op cheats (also covers singleplayer): the blocking turn loop
+        // never runs MpTick, so refill AP/HP/ammo here every frame.
+        MpDebugCheatsTick();
 
         if ((gCombatState & COMBAT_STATE_EXIT_REQUESTED) != 0) {
             break;
@@ -5024,6 +5029,15 @@ static int attackDetermineToHit(Object* attacker, int tile, Object* defender, Hi
     return toHit;
 }
 
+int combatComputeCalledShotProbabilities(Object* attacker, Object* defender, HitMode hitMode, int probs[8])
+{
+    for (int index = 0; index < 4; index++) {
+        probs[index] = _determine_to_hit(attacker, defender, _hit_loc_left[index], hitMode);
+        probs[4 + index] = _determine_to_hit(attacker, defender, _hit_loc_right[index], hitMode);
+    }
+    return 0;
+}
+
 // 0x4247B8
 static void attackComputeDamage(Attack* attack, int numRounds, int baseDamageMult)
 {
@@ -5162,6 +5176,17 @@ static void attackComputeDamage(Attack* attack, int numRounds, int baseDamageMul
         }
     }
 
+    // Co-op cheat: insta-kill — any hit from a flagged attacker is lethal.
+    // Overridden AFTER the damage formula and DT/DR, so bursts, called shots
+    // and area extras all one-shot their target (damage == current HP). Only
+    // the defender branch qualifies; backwash/attacker damage is untouched.
+    if ((attack->attackerFlags & DAM_HIT) != 0
+        && MpDebugCheatEnabled(attack->attacker, MP_DEBUG_CHEAT_INSTA_KILL)) {
+        *damagePtr = critter->data.critter.hp;
+        debugFilePrint("MPDBG: insta-kill netId=%u targetHp=%d",
+            MpGetObjNetId(critter), critter->data.critter.hp);
+    }
+
     if (knockbackDistancePtr != nullptr
         && (critter->flags & OBJECT_MULTIHEX) == 0
         && (damageType == DAMAGE_TYPE_EXPLOSION || attack->weapon == nullptr || weaponGetAttackTypeForHitMode(attack->weapon, attack->hitMode) == ATTACK_TYPE_MELEE)
@@ -5183,6 +5208,16 @@ static void attackComputeDamage(Attack* attack, int numRounds, int baseDamageMul
             int knockbackDistanceDivisor = weaponGetPerk(attack->weapon) == PERK_WEAPON_KNOCKBACK ? 5 : 10;
 
             *knockbackDistancePtr = *damagePtr / knockbackDistanceDivisor;
+
+            // Co-op cheat: the insta-kill's full-HP damage would slide the
+            // corpse HP/10 tiles (5+ for a 50 HP critter) — a long animation
+            // window that keeps the host's attack batch busy and drops the
+            // attacker's queued commands (the post-kill desync). Cap the
+            // slide at one tile so the feedback reads without the stall.
+            if (MpDebugCheatEnabled(attack->attacker, MP_DEBUG_CHEAT_INSTA_KILL)
+                && *knockbackDistancePtr > 1) {
+                *knockbackDistancePtr = 1;
+            }
 
             if (hasStonewall) {
                 *knockbackDistancePtr /= 2;
@@ -6144,6 +6179,17 @@ static void _draw_loc_(int eventCode, int color)
 }
 
 // 0x426218
+static void calledShotDrawProbabilities(unsigned char* windowBuffer, const int probs[8])
+{
+    for (int index = 0; index < 4; index++) {
+        _print_tohit(windowBuffer + CALLED_SHOT_WINDOW_WIDTH * (_call_ty[index] - 86) + 33,
+            CALLED_SHOT_WINDOW_WIDTH, probs[index]);
+        _print_tohit(windowBuffer + CALLED_SHOT_WINDOW_WIDTH * (_call_ty[index] - 86) + 453,
+            CALLED_SHOT_WINDOW_WIDTH, probs[4 + index]);
+    }
+}
+
+// 0x426218
 static int calledShotSelectHitLocation(Object* critter, HitLocation* hitLocation, HitMode hitMode)
 {
     *hitLocation = HIT_LOCATION_TORSO;
@@ -6158,6 +6204,14 @@ static int calledShotSelectHitLocation(Object* critter, HitLocation* hitLocation
     }
 
     gCalledShotCritter = critter;
+
+    // Co-op client: the host owns every combat roll, so the numbers shown in
+    // this window must come from the host's context (difficulty, script
+    // hooks). Ask now; the modal loop below applies the reply when it lands
+    // and falls back to the local computation if it never arrives.
+    if (gMpActive && gMpIsClient) {
+        MpToHitQuery(critter, (int)hitMode);
+    }
 
     // The default value is 68, which centers called shot window given it's
     // width (68 - 504 - 68).
@@ -6238,19 +6292,34 @@ static int calledShotSelectHitLocation(Object* critter, HitLocation* hitLocation
     int oldFont = fontGetCurrent();
     fontSetCurrent(101);
 
+    // Initial draw: the host's numbers if we already have them, otherwise the
+    // local computation (the modal loop swaps in the host's reply).
+    int probs[8];
+    if (gMpActive && gMpIsClient) {
+        uint32_t resultTarget;
+        uint8_t resultMode;
+        if (MpToHitResultTake(&resultTarget, &resultMode, probs)
+            && resultTarget == MpGetObjNetId(critter)
+            && resultMode == (uint8_t)hitMode) {
+            debugFilePrint("MPCOMBAT: called-shot host probs applied before draw targetNetId=%u",
+                resultTarget);
+        } else {
+            combatComputeCalledShotProbabilities(gDude, critter, hitMode, probs);
+        }
+    } else {
+        combatComputeCalledShotProbabilities(gDude, critter, hitMode, probs);
+    }
+
     for (int index = 0; index < 4; index++) {
-        int probability;
         int btn;
 
-        probability = _determine_to_hit(gDude, critter, _hit_loc_left[index], hitMode);
-        _print_tohit(windowBuffer + CALLED_SHOT_WINDOW_WIDTH * (_call_ty[index] - 86) + 33, CALLED_SHOT_WINDOW_WIDTH, probability);
+        _print_tohit(windowBuffer + CALLED_SHOT_WINDOW_WIDTH * (_call_ty[index] - 86) + 33, CALLED_SHOT_WINDOW_WIDTH, probs[index]);
 
         btn = buttonCreate(gCalledShotWindow, 33, _call_ty[index] - 90, 128, 20, index, index, -1, index, nullptr, nullptr, nullptr, 0);
         buttonSetMouseCallbacks(btn, _draw_loc_on_, _draw_loc_off, nullptr, nullptr);
         _draw_loc_(index, COLOR_GREEN);
 
-        probability = _determine_to_hit(gDude, critter, _hit_loc_right[index], hitMode);
-        _print_tohit(windowBuffer + CALLED_SHOT_WINDOW_WIDTH * (_call_ty[index] - 86) + 453, CALLED_SHOT_WINDOW_WIDTH, probability);
+        _print_tohit(windowBuffer + CALLED_SHOT_WINDOW_WIDTH * (_call_ty[index] - 86) + 453, CALLED_SHOT_WINDOW_WIDTH, probs[4 + index]);
 
         btn = buttonCreate(gCalledShotWindow, 341, _call_ty[index] - 90, 128, 20, index + 4, index + 4, -1, index + 4, nullptr, nullptr, nullptr, 0);
         buttonSetMouseCallbacks(btn, _draw_loc_on_, _draw_loc_off, nullptr, nullptr);
@@ -6270,6 +6339,27 @@ static int calledShotSelectHitLocation(Object* critter, HitLocation* hitLocation
     int eventCode;
     while (true) {
         sharedFpsLimiter.mark();
+
+        // Co-op: keep the session and the net pump alive while this modal
+        // blocks the main loop (same as the cheat menu). A client's called-
+        // shot query reply lands here and redraws the numbers with the
+        // host's authoritative values.
+        if (gMpActive) {
+            MpTick();
+            if (gMpIsClient) {
+                uint32_t resultTarget;
+                uint8_t resultMode;
+                int resultProbs[8];
+                if (MpToHitResultTake(&resultTarget, &resultMode, resultProbs)
+                    && resultTarget == MpGetObjNetId(critter)
+                    && resultMode == (uint8_t)hitMode) {
+                    debugFilePrint("MPCOMBAT: called-shot host probs applied targetNetId=%u mode=%d",
+                        resultTarget, resultMode);
+                    calledShotDrawProbabilities(windowGetBuffer(gCalledShotWindow), resultProbs);
+                    windowRefresh(gCalledShotWindow);
+                }
+            }
+        }
 
         eventCode = inputGetInput();
 

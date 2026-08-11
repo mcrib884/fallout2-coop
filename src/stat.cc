@@ -19,6 +19,7 @@
 #include "message.h"
 #include "multiplayer.h"
 #include "multiplayer_combat.h"
+#include "multiplayer_debug.h"
 #include "multiplayer_profile.h"
 #include "object.h"
 #include "party_member.h"
@@ -326,6 +327,10 @@ int critterGetStat(Object* critter, Stat stat)
 {
     if (objectTypeFromPid(critter->pid) != OBJ_TYPE_CRITTER) {
         return 0;
+    }
+    if (stat == STAT_CARRY_WEIGHT
+        && MpDebugCheatEnabled(critter, MP_DEBUG_CHEAT_UNLIMITED_CARRY)) {
+        return 100000;
     }
     int value;
     if (stat >= STAT_FIRST && stat < SAVEABLE_STAT_COUNT) {

@@ -35,6 +35,7 @@
 #include "item.h"
 #include "kb.h"
 #include "memory.h"
+#include "multiplayer_debug.h"
 #include "mouse.h"
 #include "object.h"
 #include "palette.h"
@@ -3809,6 +3810,12 @@ static int wmRndEncounterOccurred(int* mapToLoadPtr)
         wmForceEncounterFlags = 0;
 
         return 1;
+    }
+
+    if (MpDebugCheatEnabled(gDude, MP_DEBUG_CHEAT_NO_RANDOM_ENCOUNTERS)) {
+        wmGenData.oldWorldPosX = wmGenData.worldPosX;
+        wmGenData.oldWorldPosY = wmGenData.worldPosY;
+        return 0;
     }
 
     // NOTE: Uninline.

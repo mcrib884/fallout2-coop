@@ -58,6 +58,7 @@ typedef struct MultiplayerPlayer {
     bool hasLastState;
     int32_t lastSafeTile, lastSafeElevation, lastSafeRotation;
     bool hasSafePosition;
+    uint32_t debugCheatFlags;
     // Downed state (co-op: players don't die — they get downed and revive
     // when combat ends). downedOrigFid is the standing fid restored on
     // revive. Valid on the host for every player and on the client for the
@@ -164,6 +165,10 @@ void MpDrawPlayerIndicators();
 // positions the roof/wall transparency circle must be punched. Single-player
 // returns just the local dude. Fills outAnchors up to maxAnchors.
 int MpGetCircleAnchors(Object** outAnchors, int maxAnchors);
+// Returns the roof-transparency circle bounds for a connected player avatar.
+// The bounds are larger than the critter sprite and must be included in
+// movement invalidation when the avatar moves.
+bool MpGetPlayerCircleRect(const Object* obj, Rect* rect);
 
 // True for any critter that belongs to a connected player: the local dude or
 // any remote avatar (both the host's avatar on a client and the clients'
@@ -240,6 +245,14 @@ Object* MpFindObjByNetId(uint32_t netId);
 uint32_t MpGetObjNetId(Object* obj);
 bool MpIsNetworkedCritter(Object* obj);
 void MpClearNetIdMappings();
+
+// Called-shot probabilities (co-op): the host owns every combat roll, so a
+// client's aiming window asks the host for the numbers instead of computing
+// them with local settings/script hooks.
+void MpToHitQuery(Object* target, int hitMode);
+// Client modal loop: consume the latest host reply (returns false when none
+// is pending). The caller must match targetNetId/hitMode against its window.
+bool MpToHitResultTake(uint32_t* targetNetId, uint8_t* hitMode, int probs[8]);
 
 // vote hook (called from map.cc)
 int MpOnMapTransitionRequested(MapTransition* transition);

@@ -35,6 +35,7 @@
 #include "map.h"
 #include "memory.h"
 #include "multiplayer.h"
+#include "multiplayer_debug.h"
 #include "multiplayer_dialog.h"
 #include "multiplayer_loot.h"
 #include "multiplayer_vote.h"
@@ -471,6 +472,31 @@ static void mpCombatSendMoveResult(MultiplayerPlayer* player, int tile, int elev
         NET_PKT_COMBAT_MOVE_RESULT, &payload, sizeof(payload));
 }
 
+// Reply to a refused combat attack. The acting client already played its
+// swing locally, so every refusal MUST be answered — a silent rejection is
+// exactly the "nothing I do does anything until I end my turn" stall. The
+// rejection carries the attacker's authoritative position so the client can
+// reconcile its local avatar (its optimistic position runs ahead of the
+// host's, and range checks then diverge).
+static void mpCombatSendAttackRejected(MultiplayerPlayer* player,
+    uint32_t targetNetId, int rc)
+{
+    if (player == nullptr || player->peer == nullptr) {
+        return;
+    }
+    NetPlayerEventPayload rejected;
+    rejected.opcode = NET_PLAYER_EVENT_ATTACK_REJECTED;
+    rejected.netId = player->netId;
+    rejected.arg1 = player->obj != nullptr ? player->obj->tile : -1;
+    rejected.arg2 = player->obj != nullptr ? player->obj->elevation : -1;
+    rejected.arg3 = targetNetId;
+    rejected.arg4 = 0;
+    NetSendPacket(player->peer, NET_CHANNEL_RELIABLE,
+        NET_PKT_PLAYER_EVENT, &rejected, sizeof(rejected));
+    debugFilePrint("MPCOMBAT: attack rejected netId=%u targetNetId=%u rc=%d tile=%d elev=%d",
+        player->netId, targetNetId, rc, rejected.arg1, rejected.arg2);
+}
+
 static void mpCombatResolveMove(MultiplayerPlayer* player, const NetCombatCmdPayload* cmd)
 {
     Object* critter = player->obj;
@@ -505,13 +531,26 @@ static void mpCombatResolveMove(MultiplayerPlayer* player, const NetCombatCmdPay
     }
 
     bool isRun = (cmd->reserved & 0x01) != 0;
+    int moveRc = -1;
     reg_anim_begin(ANIMATION_REQUEST_RESERVED);
     if (isRun) {
-        animationRegisterRunToTile(critter, targetTile, cmd->elevation, ap, 0);
+        moveRc = animationRegisterRunToTile(critter, targetTile, cmd->elevation, ap, 0);
     } else {
-        animationRegisterMoveToTile(critter, targetTile, cmd->elevation, ap, 0);
+        moveRc = animationRegisterMoveToTile(critter, targetTile, cmd->elevation, ap, 0);
     }
     reg_anim_end();
+
+    if (moveRc != 0) {
+        // The avatar is busy (attack batch: swing + target slide/death) or
+        // the path is invalid — it did NOT move. Never pretend it resolved:
+        // the acting client already walked optimistically and must snap back
+        // to the authoritative position (the post-kill desync). The queue
+        // deferral catches most of these earlier; this is the safety net.
+        debugFilePrint("MPCOMBAT: move registration failed netId=%u tile=%d busy=%d",
+            player->netId, targetTile, animationIsBusy(critter) != 0 ? 1 : 0);
+        mpCombatSendMoveResult(player, critter->tile, critter->elevation);
+        return;
+    }
 
     // Vanilla parity: running cancels sneaking unless the Silent Running perk
     // (same rule as mpHostRegisterPlayerMovement). Combat move intents flow
@@ -538,21 +577,25 @@ static void mpCombatResolveAttack(MultiplayerPlayer* player, const NetCombatCmdP
     Object* critter = player->obj;
     if (critter == nullptr) {
         debugFilePrint("MPCOMBAT: attack rejected (no critter) netId=%u", player->netId);
+        mpCombatSendAttackRejected(player, cmd->targetNetId, -1);
         return;
     }
     Object* target = MpFindObjByNetId(cmd->targetNetId);
     if (target == nullptr) {
         debugFilePrint("MPCOMBAT: attack rejected (no target) netId=%u targetNetId=%u",
             player->netId, cmd->targetNetId);
+        mpCombatSendAttackRejected(player, cmd->targetNetId, -1);
         return;
     }
     if (target->elevation != critter->elevation) {
         debugFilePrint("MPCOMBAT: attack rejected (elevation) netId=%u", player->netId);
+        mpCombatSendAttackRejected(player, cmd->targetNetId, -1);
         return;
     }
     int ap = critter->data.critter.combat.ap;
     if (ap <= 0) {
         debugFilePrint("MPCOMBAT: attack rejected (no AP) netId=%u", player->netId);
+        mpCombatSendAttackRejected(player, cmd->targetNetId, -1);
         return;
     }
 
@@ -602,6 +645,12 @@ static void mpCombatResolveAttack(MultiplayerPlayer* player, const NetCombatCmdP
             targetDt, targetDr,
             attackerUnarmed,
             critterGetStat(critter, STAT_STRENGTH));
+    } else if (player->peer != nullptr) {
+        // The attack was refused on the host (out of range / invalid state).
+        // Answer anyway: the acting client already played its swing and needs
+        // the authoritative position to reconcile (see
+        // mpCombatSendAttackRejected).
+        mpCombatSendAttackRejected(player, cmd->targetNetId, rc);
     } else {
         debugFilePrint("MPCOMBAT: attack resolved (no result sent) netId=%u rc=%d",
             player->netId, rc);
@@ -612,6 +661,30 @@ static void mpCombatDrainQueue()
 {
     if (gCombatCmdQueue.empty()) {
         return;
+    }
+
+    // The acting avatar is mid-animation (attack batch: swing + target
+    // knockback slide + death). A move/attack registered now would be
+    // rejected as busy and silently dropped — the client already played its
+    // copy and would keep walking while the host's avatar never moves (the
+    // post-kill desync). Defer the queue until the batch settles; the pump
+    // runs every frame and retries. Order is preserved: everything behind
+    // the first command waits too, so an attack never resolves from a
+    // position its preceding move has not reached yet.
+    uint8_t owner = gCombatCmdQueue.front().netId;
+    if (owner >= 1 && owner <= NET_MAX_PLAYERS) {
+        MultiplayerPlayer* ownerPlayer = &gMpSession.players[owner - 1];
+        if (ownerPlayer->isConnected && ownerPlayer->obj != nullptr
+            && animationIsBusy(ownerPlayer->obj)) {
+            static uint32_t gLastQueueDeferLogTick = 0;
+            uint32_t nowTicks = getTicks();
+            if (nowTicks - gLastQueueDeferLogTick > 500) {
+                gLastQueueDeferLogTick = nowTicks;
+                debugFilePrint("MPCOMBAT: cmd queue deferred (avatar busy) netId=%u cmds=%zu",
+                    owner, gCombatCmdQueue.size());
+            }
+            return;
+        }
     }
 
     std::vector<MpCombatQueuedCmd> queue;
@@ -689,6 +762,10 @@ void MpCombatPump()
     if (gMpIsHost) {
         mpCombatDrainQueue();
         mpCombatDrainEndRequest();
+        // Co-op cheats: refill after every spend/drain this pump so the state
+        // broadcast below carries the refilled values. MpTick does not run in
+        // the blocking combat loops, so this is the only per-frame hook there.
+        MpDebugCheatsTick();
         MpBroadcastObjectStates();
         MpBroadcastPlayerStates();
         // Mark the broadcast done for this tick so the main loop's MpTick
@@ -696,6 +773,7 @@ void MpCombatPump()
         MpNoteHostBroadcastTick();
     } else {
         mpCombatDrainEndRequest();
+        MpDebugCheatsTick();
     }
 
     // The blocking combat loops (the host's own turn in _combat_input, NPC

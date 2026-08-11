@@ -42,6 +42,11 @@ int _combat_attack(Object* attacker, Object* defender, HitMode hitMode, HitLocat
 int _combat_bullet_start(const Object* attacker, const Object* target);
 void _compute_explosion_on_extras(Attack* attack, bool isFromAttacker, bool isGrenade, bool noDamage);
 int _determine_to_hit(Object* a1, Object* a2, HitLocation hitLocation, HitMode hitMode);
+
+// Fills probs[8] with the called-shot window's hit-location probabilities:
+// probs[0..3] = left column, probs[4..7] = right column. Used by the co-op
+// host to answer a client's called-shot query (the host owns every roll).
+int combatComputeCalledShotProbabilities(Object* attacker, Object* defender, HitMode hitMode, int probs[8]);
 int _determine_to_hit_no_range(Object* attacker, Object* defender, HitLocation hitLocation, HitMode hitMode, unsigned char* a5);
 int _determine_to_hit_from_tile(Object* attacker, int tile, Object* defender, HitLocation hitLocation, HitMode hitMode);
 void attackComputeDeathFlags(Attack* attack);

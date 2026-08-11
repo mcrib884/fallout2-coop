@@ -3478,7 +3478,16 @@ static unsigned int animationComputeTicksPerFrame(Object* object, int fid)
 
     if (isInCombat()) {
         if (animationTypeFromFid(fid) == ANIM_WALK) {
-            if (object != gDude || settings.preferences.player_speedup) {
+            // Co-op: every player avatar (own or remote) is a player. The
+            // vanilla player_speedup gate would leave both players' own
+            // walks slow while their mirrors walk fast on the other machine
+            // (object != gDude there), splitting the two machines' walk
+            // durations and widening position divergence. Boost all player
+            // avatars; vanilla NPC/PC behavior is unchanged.
+            bool coopPlayer = gMpActive
+                && (object == gDude || MpIsCoopPlayerCritter(object));
+            if (coopPlayer || object != gDude
+                || settings.preferences.player_speedup) {
                 fps += settings.preferences.combat_speed;
             }
         }

@@ -4,6 +4,7 @@
 #include <stdio.h>
 
 #include "color.h"
+#include "combat.h"
 #include "critter.h"
 #include "debug.h"
 #include "game.h"
@@ -51,15 +52,30 @@ constexpr int DBG_BTN_RADAWAY = 616;
 constexpr int DBG_BTN_AMMO = 617;
 constexpr int DBG_BTN_MAX_LEVEL = 618;
 constexpr int DBG_BTN_ITEMS = 619;
-constexpr int DBG_BTN_PERF = 620;
+constexpr int DBG_BTN_CHEATS = 620;
 constexpr int DBG_BTN_PREV = 700;
 constexpr int DBG_BTN_NEXT = 701;
 constexpr int DBG_BTN_DEC = 702;
 constexpr int DBG_BTN_INC = 703;
 constexpr int DBG_BTN_BACK = 706;
+constexpr int DBG_BTN_CHEAT_GOD = 730;
+constexpr int DBG_BTN_CHEAT_AP = 731;
+constexpr int DBG_BTN_CHEAT_AMMO = 732;
+constexpr int DBG_BTN_CHEAT_CARRY = 733;
+constexpr int DBG_BTN_CHEAT_SKILLS = 734;
+constexpr int DBG_BTN_CHEAT_ENCOUNTERS = 735;
+constexpr int DBG_BTN_CHEAT_PERF = 736;
+constexpr int DBG_BTN_CHEAT_BACK = 737;
+constexpr int DBG_BTN_CHEAT_INSTA_KILL = 738;
 
 constexpr int kDbgWindowWidth = 320;
 constexpr int kDbgWindowHeight = 305;
+constexpr int kDbgCheatWindowWidth = 380;
+constexpr int kDbgCheatWindowHeight = 220;
+
+uint32_t gDbgCheatFlags = 0;
+bool gDbgCheatFlagsDirty = false;
+uint32_t gDbgCheatLastSyncTick = 0;
 
 // Centered position for a window of the given (width, height).
 void dbgCenteredPos(int width, int height, int* outX, int* outY)
@@ -164,6 +180,192 @@ void dbgRefillAmmo()
     dbgGiveItem(ammoTypePid, 3);
     debugFilePrint("MPDBG: ammo refill weapon pid=0x%X ammo=0x%X capacity=%d",
         weapon->pid, ammoTypePid, capacity);
+}
+
+void dbgRefillWeaponAmmo(Object* critter)
+{
+    if (critter == nullptr) {
+        return;
+    }
+
+    Object* weapons[] = { critterGetItem1(critter), critterGetItem2(critter) };
+    for (Object* weapon : weapons) {
+        if (weapon == nullptr || itemGetType(weapon) != ITEM_TYPE_WEAPON) {
+            continue;
+        }
+        int ammoTypePid = weaponGetAmmoTypePid(weapon);
+        int capacity = ammoGetCapacity(weapon);
+        if (ammoTypePid != -1 && capacity > 0 && ammoGetQuantity(weapon) < capacity) {
+            ammoSetQuantity(weapon, capacity);
+        }
+    }
+}
+
+void dbgToggleCheat(uint32_t flag)
+{
+    gDbgCheatFlags ^= flag;
+    gDbgCheatFlagsDirty = true;
+    if (gMpActive && gMpIsHost) {
+        gMpSession.players[0].debugCheatFlags = gDbgCheatFlags;
+    }
+    debugFilePrint("MPDBG: cheat %s flags=0x%X",
+        (gDbgCheatFlags & flag) != 0 ? "enabled" : "disabled", gDbgCheatFlags);
+}
+
+bool dbgCheatOn(uint32_t flag)
+{
+    return (gDbgCheatFlags & flag) != 0;
+}
+
+const char* dbgOnOff(uint32_t flag)
+{
+    return dbgCheatOn(flag) ? "ON" : "off";
+}
+
+uint32_t dbgCheatFlagsFor(const Object* critter)
+{
+    if (critter == nullptr) {
+        return 0;
+    }
+    if (critter == gDude) {
+        return gDbgCheatFlags;
+    }
+    if (gMpActive && gMpIsHost) {
+        for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+            const MultiplayerPlayer* player = &gMpSession.players[index];
+            if (player->isConnected && player->obj == critter) {
+                return player->debugCheatFlags;
+            }
+        }
+    }
+    return 0;
+}
+
+void dbgApplyCheats(Object* critter, uint32_t flags)
+{
+    if (critter == nullptr) {
+        return;
+    }
+
+    bool hpChanged = false;
+    bool apChanged = false;
+    if ((flags & MP_DEBUG_CHEAT_GOD_MODE) != 0) {
+        int maxHp = critterGetStat(critter, STAT_MAXIMUM_HIT_POINTS);
+        if (critter->data.critter.hp < maxHp) {
+            critter->data.critter.hp = maxHp;
+            hpChanged = true;
+        }
+    }
+    if ((flags & MP_DEBUG_CHEAT_INFINITE_AP) != 0) {
+        int maxAp = critterGetStat(critter, STAT_MAXIMUM_ACTION_POINTS);
+        if (critter->data.critter.combat.ap != maxAp) {
+            critter->data.critter.combat.ap = maxAp;
+            apChanged = true;
+        }
+    }
+    if ((flags & MP_DEBUG_CHEAT_INFINITE_AMMO) != 0) {
+        dbgRefillWeaponAmmo(critter);
+    }
+    if (hpChanged) {
+        debugFilePrint("MPDBG: god mode restored netId=%u hp=%d",
+            MpGetObjNetId(critter), critter->data.critter.hp);
+        if (critter == gDude) {
+            interfaceRenderHitPoints(true);
+        }
+    }
+    if (apChanged && critter == gDude) {
+        interfaceRenderActionPoints(critter->data.critter.combat.ap, _combat_free_move);
+    }
+}
+
+void dbgCheatModal()
+{
+    int winX;
+    int winY;
+    dbgCenteredPos(kDbgCheatWindowWidth, kDbgCheatWindowHeight, &winX, &winY);
+
+    int win = windowCreate(winX, winY, kDbgCheatWindowWidth, kDbgCheatWindowHeight,
+        COLOR_BLACK, WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
+    if (win == -1) {
+        debugFilePrint("MPDBG: cheat submenu window create failed");
+        return;
+    }
+    windowDrawBorder(win);
+
+    const char* title = "CHEATS";
+    int titleX = (kDbgCheatWindowWidth - fontGetStringWidth(title)) / 2;
+    windowDrawText(win, title, 0, titleX, 6, COLOR_WHITE);
+    _win_register_text_button(win, 30, 30, -1, -1, -1, DBG_BTN_CHEAT_GOD, "God Mode", 0);
+    _win_register_text_button(win, 140, 30, -1, -1, -1, DBG_BTN_CHEAT_AP, "Infinite AP", 0);
+    _win_register_text_button(win, 250, 30, -1, -1, -1, DBG_BTN_CHEAT_AMMO, "Infinite Ammo", 0);
+    _win_register_text_button(win, 30, 55, -1, -1, -1, DBG_BTN_CHEAT_CARRY, "Unlimited Carry", 0);
+    _win_register_text_button(win, 140, 55, -1, -1, -1, DBG_BTN_CHEAT_SKILLS, "Always Succeed", 0);
+    _win_register_text_button(win, 250, 55, -1, -1, -1, DBG_BTN_CHEAT_ENCOUNTERS, "No Encounters", 0);
+    _win_register_text_button(win, 30, 80, -1, -1, -1, DBG_BTN_CHEAT_PERF, "Perf Meter", 0);
+    _win_register_text_button(win, 140, 80, -1, -1, -1, DBG_BTN_CHEAT_INSTA_KILL, "Insta Kill", 0);
+    _win_register_text_button(win, 250, 80, -1, -1, -1, DBG_BTN_CHEAT_BACK, "Back", 0);
+    windowRefresh(win);
+
+    bool keepGoing = true;
+    while (keepGoing) {
+        sharedFpsLimiter.mark();
+        windowFill(win, 8, 132, kDbgCheatWindowWidth - 16, 34, COLOR_BLACK);
+        char status1[128];
+        char status2[128];
+        snprintf(status1, sizeof(status1), "God: %s   AP: %s   Ammo: %s   Carry: %s",
+            dbgOnOff(MP_DEBUG_CHEAT_GOD_MODE),
+            dbgOnOff(MP_DEBUG_CHEAT_INFINITE_AP),
+            dbgOnOff(MP_DEBUG_CHEAT_INFINITE_AMMO),
+            dbgOnOff(MP_DEBUG_CHEAT_UNLIMITED_CARRY));
+        snprintf(status2, sizeof(status2), "Skills: %s   Enc: %s   InstaKill: %s",
+            dbgOnOff(MP_DEBUG_CHEAT_ALWAYS_SUCCEED),
+            dbgOnOff(MP_DEBUG_CHEAT_NO_RANDOM_ENCOUNTERS),
+            dbgOnOff(MP_DEBUG_CHEAT_INSTA_KILL));
+        windowDrawText(win, status1, 0,
+            (kDbgCheatWindowWidth - fontGetStringWidth(status1)) / 2, 135, COLOR_WHITE);
+        windowDrawText(win, status2, 0,
+            (kDbgCheatWindowWidth - fontGetStringWidth(status2)) / 2, 151, COLOR_WHITE);
+        windowRefresh(win);
+        renderPresent();
+        MpTick();
+
+        int keyCode = inputGetInput();
+        switch (keyCode) {
+        case KEY_ESCAPE:
+        case DBG_BTN_CHEAT_BACK:
+            keepGoing = false;
+            break;
+        case DBG_BTN_CHEAT_GOD:
+            dbgToggleCheat(MP_DEBUG_CHEAT_GOD_MODE);
+            break;
+        case DBG_BTN_CHEAT_AP:
+            dbgToggleCheat(MP_DEBUG_CHEAT_INFINITE_AP);
+            break;
+        case DBG_BTN_CHEAT_AMMO:
+            dbgToggleCheat(MP_DEBUG_CHEAT_INFINITE_AMMO);
+            break;
+        case DBG_BTN_CHEAT_CARRY:
+            dbgToggleCheat(MP_DEBUG_CHEAT_UNLIMITED_CARRY);
+            break;
+        case DBG_BTN_CHEAT_SKILLS:
+            dbgToggleCheat(MP_DEBUG_CHEAT_ALWAYS_SUCCEED);
+            break;
+        case DBG_BTN_CHEAT_ENCOUNTERS:
+            dbgToggleCheat(MP_DEBUG_CHEAT_NO_RANDOM_ENCOUNTERS);
+            break;
+        case DBG_BTN_CHEAT_INSTA_KILL:
+            dbgToggleCheat(MP_DEBUG_CHEAT_INSTA_KILL);
+            break;
+        case DBG_BTN_CHEAT_PERF:
+            MpPerfSetEnabled(!MpPerfIsEnabled());
+            break;
+        default:
+            break;
+        }
+        sharedFpsLimiter.throttle();
+    }
+
+    windowDestroy(win);
 }
 
 // Level the local dude to the cap (99) through the vanilla level-up path
@@ -486,6 +688,47 @@ void dbgSubmenuShow(const SubmenuCallbacks* cb)
 
 } // namespace
 
+uint32_t MpDebugCheatFlagsFor(const Object* critter)
+{
+    return dbgCheatFlagsFor(critter);
+}
+
+bool MpDebugCheatEnabled(const Object* critter, uint32_t flag)
+{
+    return (dbgCheatFlagsFor(critter) & flag) != 0;
+}
+
+void MpDebugCheatsTick()
+{
+    if (gMpActive && gMpIsClient && gMpSession.hostPeer != nullptr) {
+        uint32_t now = getTicks();
+        if (gDbgCheatFlagsDirty || getTicksSince(gDbgCheatLastSyncTick) >= 1000) {
+            NetPlayerCmdPayload payload;
+            payload.opcode = NET_PLAYER_CMD_CHEAT_FLAGS;
+            payload.arg1 = (int32_t)gDbgCheatFlags;
+            payload.arg2 = 0;
+            if (NetSendPacket(gMpSession.hostPeer, NET_CHANNEL_RELIABLE,
+                    NET_PKT_PLAYER_CMD, &payload, sizeof(payload))) {
+                gDbgCheatFlagsDirty = false;
+                gDbgCheatLastSyncTick = now;
+                debugFilePrint("MPDBG: cheat flags sent flags=0x%X", gDbgCheatFlags);
+            }
+        }
+    }
+
+    if (gMpActive && gMpIsHost) {
+        gMpSession.players[0].debugCheatFlags = gDbgCheatFlags;
+        for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+            MultiplayerPlayer* player = &gMpSession.players[index];
+            if (player->isConnected && player->obj != nullptr) {
+                dbgApplyCheats(player->obj, player->debugCheatFlags);
+            }
+        }
+    } else {
+        dbgApplyCheats(gDude, gDbgCheatFlags);
+    }
+}
+
 // === MpDebugMenuShow ===
 void MpDebugMenuShow()
 {
@@ -533,7 +776,7 @@ void MpDebugMenuShow()
     _win_register_text_button(win, 30, 230, -1, -1, -1, DBG_BTN_SKILLS, "Skills...", 0);
     _win_register_text_button(win, 170, 230, -1, -1, -1, DBG_BTN_STATS, "Stats...", 0);
     _win_register_text_button(win, 30, 255, -1, -1, -1, DBG_BTN_PERKS, "Perks...", 0);
-    _win_register_text_button(win, 170, 255, -1, -1, -1, DBG_BTN_PERF, "Perf Meter", 0);
+    _win_register_text_button(win, 170, 255, -1, -1, -1, DBG_BTN_CHEATS, "Cheats...", 0);
     _win_register_text_button(win, 30, 280, -1, -1, -1, DBG_BTN_CLOSE, "Close", 0);
     windowRefresh(win);
 
@@ -586,7 +829,7 @@ void MpDebugMenuShow()
             case DBG_BTN_STATS:
             case DBG_BTN_PERKS:
             case DBG_BTN_ITEMS:
-            case DBG_BTN_PERF:
+            case DBG_BTN_CHEATS:
             case DBG_BTN_CLOSE:
                 rc = keyCode;
                 break;
@@ -665,8 +908,8 @@ void MpDebugMenuShow()
         case DBG_BTN_ITEMS:
             dbgSubmenuShow(&itemsCb);
             break;
-        case DBG_BTN_PERF:
-            MpPerfSetEnabled(!MpPerfIsEnabled());
+        case DBG_BTN_CHEATS:
+            dbgCheatModal();
             break;
         }
     }

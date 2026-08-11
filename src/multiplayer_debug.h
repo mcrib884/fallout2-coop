@@ -7,6 +7,24 @@ namespace fallout {
 
 struct Object;
 
+enum MpDebugCheatFlags : uint32_t {
+    MP_DEBUG_CHEAT_GOD_MODE = 1u << 0,
+    MP_DEBUG_CHEAT_INFINITE_AP = 1u << 1,
+    MP_DEBUG_CHEAT_INFINITE_AMMO = 1u << 2,
+    MP_DEBUG_CHEAT_UNLIMITED_CARRY = 1u << 3,
+    MP_DEBUG_CHEAT_ALWAYS_SUCCEED = 1u << 4,
+    MP_DEBUG_CHEAT_NO_RANDOM_ENCOUNTERS = 1u << 5,
+    MP_DEBUG_CHEAT_INSTA_KILL = 1u << 6,
+};
+
+constexpr uint32_t MP_DEBUG_CHEAT_ALL = MP_DEBUG_CHEAT_GOD_MODE
+    | MP_DEBUG_CHEAT_INFINITE_AP
+    | MP_DEBUG_CHEAT_INFINITE_AMMO
+    | MP_DEBUG_CHEAT_UNLIMITED_CARRY
+    | MP_DEBUG_CHEAT_ALWAYS_SUCCEED
+    | MP_DEBUG_CHEAT_NO_RANDOM_ENCOUNTERS
+    | MP_DEBUG_CHEAT_INSTA_KILL;
+
 // Per-player co-op debug menu (F11): money, XP, HP, skill points, level,
 // skills, SPECIAL stats and perks — every player edits their own sheet.
 // Persistent fields (stats/skills/perks/money/xp) ride the profile channel;
@@ -24,6 +42,14 @@ void MpDebugSendApRefill();
 
 // Host: apply a debug AP refill to a player's avatar.
 void MpDebugApplyApRefill(Object* critter);
+
+// Returns the active cheat flags for a local player or a host-side remote
+// player. Used by the engine's authoritative gameplay paths.
+uint32_t MpDebugCheatFlagsFor(const Object* critter);
+bool MpDebugCheatEnabled(const Object* critter, uint32_t flag);
+
+// Applies active runtime cheats and relays changed client flags to the host.
+void MpDebugCheatsTick();
 
 } // namespace fallout
 

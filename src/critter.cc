@@ -19,6 +19,7 @@
 #include "map.h"
 #include "memory.h"
 #include "multiplayer.h"
+#include "multiplayer_debug.h"
 #include "multiplayer_profile.h"
 #include "message.h"
 #include "object.h"
@@ -309,6 +310,12 @@ int critterGetHitPoints(Object* critter)
 int critterAdjustHitPoints(Object* critter, int hp)
 {
     if (objectTypeFromPid(critter->pid) != OBJ_TYPE_CRITTER) {
+        return 0;
+    }
+
+    if (hp < 0 && MpDebugCheatEnabled(critter, MP_DEBUG_CHEAT_GOD_MODE)) {
+        debugFilePrint("MPDBG: god mode blocked damage netId=%u amount=%d",
+            MpGetObjNetId(critter), -hp);
         return 0;
     }
 

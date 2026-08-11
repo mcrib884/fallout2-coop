@@ -1186,8 +1186,8 @@ static void opGetDude(Program* program)
                         netId = 1; // host player is players[0].netId in practice
                     }
                 }
-                debugFilePrint("MPCOMBAT: dude_obj enemy pid=0x%X tile=%d sees netId=%u tile=%d dist=%d",
-                    script->target->pid, script->target->tile, netId,
+                debugFilePrint("MPCOMBAT: dude_obj enemy sid=%d pid=0x%X tile=%d sees netId=%u tile=%d dist=%d",
+                    sid, script->target->pid, script->target->tile, netId,
                     nearest != nullptr ? nearest->tile : -1,
                     nearest != nullptr
                         ? tileDistanceBetween(nearest->tile, script->target->tile)
@@ -1938,33 +1938,72 @@ static void opAttackComplex(Program* program)
         return;
     }
 
+    // Co-op diagnostic: every script-initiated attack, with the decision
+    // trail. The arroyo-cave gecko polls dude_obj every second but combat
+    // never started — this shows whether the attack opcode is reached and
+    // which guard refuses it.
+    Object* diagSelf = scriptGetSelf(program);
+    if (gMpActive && gMpIsHost) {
+        int diagSid = scriptGetSid(program);
+        Script* diagScript = nullptr;
+        int diagTargetPid = target != nullptr ? target->pid : 0;
+        int diagSelfPid = diagSelf != nullptr ? diagSelf->pid : 0;
+        if (scriptGetScript(diagSid, &diagScript) != -1 && diagScript->target != nullptr) {
+            diagTargetPid = diagScript->target->pid;
+        }
+        debugFilePrint("MPCOMBAT: attack opcode sid=%d self=0x%X tile=%d target=0x%X tile=%d dist=%d",
+            diagSid, diagSelfPid, diagSelf != nullptr ? diagSelf->tile : -1,
+            diagTargetPid, target != nullptr ? target->tile : -1,
+            diagSelf != nullptr && target != nullptr
+                ? tileDistanceBetween(diagSelf->tile, target->tile) : -1);
+    }
+
     program->flags |= PROGRAM_FLAG_CHILD_CALL;
 
     Object* self = scriptGetSelf(program);
     if (self == nullptr) {
+        if (gMpActive && gMpIsHost) {
+            debugFilePrint("MPCOMBAT: attack refused (no self)");
+        }
         program->flags &= ~PROGRAM_FLAG_CHILD_CALL;
         return;
     }
 
     if (!critterIsActive(self) || (self->flags & OBJECT_HIDDEN) != 0) {
+        if (gMpActive && gMpIsHost) {
+            debugFilePrint("MPCOMBAT: attack refused (self inactive/hidden) self=0x%X flags=0x%X",
+                self->pid, self->flags);
+        }
         debugPrint("\n   But is already Inactive (Dead/Stunned/Invisible)");
         program->flags &= ~PROGRAM_FLAG_CHILD_CALL;
         return;
     }
 
     if (!critterIsActive(target) || (target->flags & OBJECT_HIDDEN) != 0) {
+        if (gMpActive && gMpIsHost) {
+            debugFilePrint("MPCOMBAT: attack refused (target inactive/hidden) target=0x%X flags=0x%X",
+                target->pid, target->flags);
+        }
         debugPrint("\n   But target is already dead or invisible");
         program->flags &= ~PROGRAM_FLAG_CHILD_CALL;
         return;
     }
 
     if ((target->data.critter.combat.maneuver & CRITTER_MANUEVER_FLEEING) != 0) {
+        if (gMpActive && gMpIsHost) {
+            debugFilePrint("MPCOMBAT: attack refused (target fleeing) target=0x%X maneuver=0x%X",
+                target->pid, target->data.critter.combat.maneuver);
+        }
         debugPrint("\n   But target is AFRAID");
         program->flags &= ~PROGRAM_FLAG_CHILD_CALL;
         return;
     }
 
     if (_gdialogActive()) {
+        if (gMpActive && gMpIsHost) {
+            debugFilePrint("MPCOMBAT: attack refused (dialogue active) target=0x%X",
+                target->pid);
+        }
         // TODO: Might be an error, program flag is not removed.
         return;
     }
@@ -1976,6 +2015,10 @@ static void opAttackComplex(Program* program)
             combatData->whoHitMe = target;
         }
     } else {
+        if (gMpActive && gMpIsHost) {
+            debugFilePrint("MPCOMBAT: attack requesting combat self=0x%X tile=%d target=0x%X tile=%d",
+                self->pid, self->tile, target->pid, target->tile);
+        }
         CombatStartData combat;
         combat.attacker = self;
         combat.defender = target;

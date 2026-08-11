@@ -73,6 +73,14 @@ int gMpSessionSlot = -1;
 // elevator use.
 static uint32_t gMpRemoteActionNetId = 0;
 
+// Latest host reply to a client's called-shot query (NET_PKT_TO_HIT_RESULT).
+// The aiming window's modal loop consumes it via MpToHitResultTake and must
+// match the target/mode against its own window before drawing.
+static bool gToHitResultPending = false;
+static uint32_t gToHitResultTarget = 0;
+static uint8_t gToHitResultMode = 0;
+static int gToHitResultProbs[8] = { 0 };
+
 bool MpRemoteActionActive()
 {
     return gMpRemoteActionNetId != 0;
@@ -2422,6 +2430,52 @@ int MpGetCircleAnchors(Object** outAnchors, int maxAnchors)
     return count;
 }
 
+bool MpGetPlayerCircleRect(const Object* obj, Rect* rect)
+{
+    if (!gMpActive || obj == nullptr || rect == nullptr || gEgg == nullptr
+        || !hexGridTileIsValid(obj->tile) || !elevationIsValid(obj->elevation)) {
+        return false;
+    }
+
+    Object* anchors[NET_MAX_PLAYERS + 1];
+    int anchorCount = MpGetCircleAnchors(anchors, NET_MAX_PLAYERS + 1);
+    bool isAnchor = false;
+    for (int index = 0; index < anchorCount; index++) {
+        if (anchors[index] == obj) {
+            isAnchor = true;
+            break;
+        }
+    }
+    if (!isAnchor) {
+        return false;
+    }
+
+    CacheEntry* eggHandle;
+    Art* egg = artLock(gEgg->fid, &eggHandle);
+    if (egg == nullptr) {
+        return false;
+    }
+
+    int eggWidth;
+    int eggHeight;
+    artGetSize(egg, 0, ROTATION_NE, &eggWidth, &eggHeight);
+
+    int screenX;
+    int screenY;
+    bool valid = tileToScreenXY(obj->tile, &screenX, &screenY) == 0;
+    if (valid) {
+        screenX += 16 + egg->xOffsets[0] + obj->x;
+        screenY += 8 + egg->yOffsets[0] + obj->y;
+        rect->left = screenX - eggWidth / 2;
+        rect->top = screenY - eggHeight + 1;
+        rect->right = rect->left + eggWidth - 1;
+        rect->bottom = screenY;
+    }
+
+    artUnlock(eggHandle);
+    return valid;
+}
+
 void MpDrawPlayerIndicators()
 {
     if (!gMpActive || gMpSession.players == nullptr) {
@@ -2535,6 +2589,7 @@ void MpDrawPlayerIndicators()
 void MpTick()
 {
     if (!gMpActive) {
+        MpDebugCheatsTick();
         return;
     }
     bool logFirstHostTick = gMpIsHost && gMpHostFirstTickPending;
@@ -2568,6 +2623,12 @@ void MpTick()
         mpClientDisconnectNow(notifyPeer);
         return;
     }
+
+    // Co-op cheats: apply/refill before any broadcast in this tick, so the
+    // state packets that go out below already carry the cheated values.
+    // MpCombatPump applies the same tick inside the blocking combat loops
+    // and modals, where this function never runs.
+    MpDebugCheatsTick();
 
     // Co-op dialogue: a director host (not a participant) never enters the
     // blocking dialogue modal — its session is driven from here each tick.
@@ -3251,6 +3312,40 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                 MpCombatOnEndedPacket();
                 break;
             }
+            case NET_PKT_TO_HIT_QUERY: {
+                if (payloadLen != sizeof(NetToHitQueryPayload)) {
+                    return;
+                }
+                MultiplayerPlayer* p = mpPlayerFindByPeer(peer);
+                if (p == nullptr || !p->isHandshaken || p->obj == nullptr) {
+                    return;
+                }
+                const NetToHitQueryPayload* query = (const NetToHitQueryPayload*)payload;
+                Object* toHitTarget = mpHostFindObjectByNetId(query->targetNetId);
+                if (toHitTarget == nullptr) {
+                    debugFilePrint("MP: to-hit query ignored (no target) netId=%u targetNetId=%u",
+                        p->netId, query->targetNetId);
+                    return;
+                }
+
+                NetToHitResultPayload result;
+                memset(&result, 0, sizeof(result));
+                result.targetNetId = query->targetNetId;
+                result.hitMode = query->hitMode;
+                int hostProbs[8];
+                combatComputeCalledShotProbabilities(p->obj, toHitTarget,
+                    (HitMode)query->hitMode, hostProbs);
+                for (int index = 0; index < 8; index++) {
+                    result.probs[index] = (int16_t)hostProbs[index];
+                }
+                NetSendPacket(peer, NET_CHANNEL_RELIABLE,
+                    NET_PKT_TO_HIT_RESULT, &result, sizeof(result));
+                debugFilePrint("MP: to-hit result sent netId=%u targetNetId=%u mode=%d probs=%d/%d/%d/%d/%d/%d/%d/%d",
+                    p->netId, result.targetNetId, result.hitMode,
+                    result.probs[0], result.probs[1], result.probs[2], result.probs[3],
+                    result.probs[4], result.probs[5], result.probs[6], result.probs[7]);
+                break;
+            }
             case NET_PKT_PLAYER_CMD: {
                 if (payloadLen != sizeof(NetPlayerCmdPayload)) {
                     return;
@@ -3282,6 +3377,11 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                 }
                 case NET_PLAYER_CMD_AP_REFILL:
                     MpDebugApplyApRefill(p->obj);
+                    break;
+                case NET_PLAYER_CMD_CHEAT_FLAGS:
+                    p->debugCheatFlags = (uint32_t)cmd->arg1 & MP_DEBUG_CHEAT_ALL;
+                    debugFilePrint("MP: cheat flags netId=%u flags=0x%X",
+                        p->netId, p->debugCheatFlags);
                     break;
                 default:
                     debugFilePrint("MP: player cmd unknown opcode=%u netId=%u",
@@ -3412,6 +3512,19 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
         const void* payload = packetPayload;
         size_t payloadLen = packetPayloadLength;
         switch (packetType) {
+        case NET_PKT_TO_HIT_RESULT: {
+            if (payloadLen != sizeof(NetToHitResultPayload)) {
+                return;
+            }
+            const NetToHitResultPayload* result = (const NetToHitResultPayload*)payload;
+            gToHitResultTarget = result->targetNetId;
+            gToHitResultMode = result->hitMode;
+            memcpy(gToHitResultProbs, result->probs, sizeof(gToHitResultProbs));
+            gToHitResultPending = true;
+            debugFilePrint("MP: to-hit result received targetNetId=%u mode=%d",
+                result->targetNetId, result->hitMode);
+            break;
+        }
         case NET_PKT_PLAYER_PROFILE_BEGIN:
             mpHandleProfileBegin(peer, payload, payloadLen);
             break;
@@ -3588,6 +3701,31 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                 } else {
                     debugFilePrint("MP: attack result remote netId=%u dmg=%d flags=0x%X",
                         evt->netId, evt->arg1, evt->arg2);
+                }
+                break;
+            }
+            case NET_PLAYER_EVENT_ATTACK_REJECTED: {
+                if (evt->netId == gMpSession.localNetId) {
+                    // The host refused our attack (out of range, invalid
+                    // state) — the swing already played locally with no
+                    // effect. Snap the local dude to the host's
+                    // authoritative position so the next click targets from
+                    // the same space the host will resolve from.
+                    debugFilePrint("MP: attack rejected targetNetId=%u tile=%d elev=%d",
+                        (unsigned)evt->arg3, evt->arg1, evt->arg2);
+                    if (gDude != nullptr && hexGridTileIsValid(evt->arg1)
+                        && elevationIsValid(evt->arg2)
+                        && (gDude->tile != evt->arg1
+                            || gDude->elevation != evt->arg2)) {
+                        reg_anim_clear(gDude);
+                        objectSetLocation(gDude, evt->arg1, evt->arg2, nullptr);
+                        debugFilePrint("MP: attack rejection snap dude tile=%d->%d elev=%d",
+                            gDude->tile, evt->arg1, evt->arg2);
+                    }
+                    displayMonitorAddMessage("Attack failed - target unreachable.");
+                } else {
+                    debugFilePrint("MP: attack rejected remote netId=%u tile=%d",
+                        evt->netId, evt->arg1);
                 }
                 break;
             }
@@ -4957,6 +5095,8 @@ static void mpApplyObjectTransform(Object* obj, int tile, int x, int y, int rota
     Rect oldRect;
     objectGetRect(obj, &oldRect);
     int oldElevation = obj->elevation;
+    Rect oldCircleRect;
+    bool hasCircleRect = MpGetPlayerCircleRect(obj, &oldCircleRect);
     bool wasApplyingNetworkState = gMpSession.applyingNetworkState;
     gMpSession.applyingNetworkState = true;
 
@@ -4996,8 +5136,17 @@ static void mpApplyObjectTransform(Object* obj, int tile, int x, int y, int rota
 
     Rect newRect;
     objectGetRect(obj, &newRect);
-    tileWindowRefreshRect(&oldRect, oldElevation);
-    tileWindowRefreshRect(&newRect, obj->elevation);
+    Rect oldRefreshRect = oldRect;
+    Rect newRefreshRect = newRect;
+    if (hasCircleRect) {
+        rectUnion(&oldRefreshRect, &oldCircleRect, &oldRefreshRect);
+        Rect newCircleRect;
+        if (MpGetPlayerCircleRect(obj, &newCircleRect)) {
+            rectUnion(&newRefreshRect, &newCircleRect, &newRefreshRect);
+        }
+    }
+    tileWindowRefreshRect(&oldRefreshRect, oldElevation);
+    tileWindowRefreshRect(&newRefreshRect, obj->elevation);
 }
 
 static void mpApplyCritterState(Object* obj, int hp, int ap, int radiation, int poison, int combatTeam, int combatManeuver, int combatResults)
@@ -5382,6 +5531,14 @@ void MpApplyPlayerState(const NetPlayerStateUpdatePayload* s)
                     obj->tile, s->tile, localMovementIsActive ? 1 : 0);
             }
         }
+        // Remote avatars are applied directly from the authoritative state
+        // (per-heartbeat snap). Attempts to animate their movement with a
+        // registered walk made the avatar visibly skip: every re-targeted
+        // walk restarts the animation from frame 0 at the state cadence, and
+        // blocked destination tiles (stale client-side copies) killed the
+        // walk silently. The snap reads smooth at the broadcast cadence and
+        // can never freeze or stutter — the combat-speed boost for remote
+        // avatars is a host-side walk concern only.
         mpApplyObjectTransform(obj, s->tile, s->x, s->y, s->rotation, s->fid, s->frame, s->elevation, 0, false);
         p->hasLastState = true;
         // The avatar reached the clicked destination: the intent's outcome is
@@ -6263,6 +6420,40 @@ uint32_t MpGetObjNetId(Object* obj)
         }
     }
     return 0;
+}
+
+void MpToHitQuery(Object* target, int hitMode)
+{
+    if (!gMpIsClient || target == nullptr || gMpSession.hostPeer == nullptr) {
+        return;
+    }
+
+    NetToHitQueryPayload query;
+    memset(&query, 0, sizeof(query));
+    query.targetNetId = MpGetObjNetId(target);
+    query.hitMode = (uint8_t)hitMode;
+    if (query.targetNetId == 0) {
+        debugFilePrint("MP: to-hit query dropped (target has no netId) mode=%d", hitMode);
+        return;
+    }
+
+    NetSendPacket(gMpSession.hostPeer, NET_CHANNEL_RELIABLE,
+        NET_PKT_TO_HIT_QUERY, &query, sizeof(query));
+    debugFilePrint("MP: to-hit query sent targetNetId=%u mode=%d",
+        query.targetNetId, query.hitMode);
+}
+
+bool MpToHitResultTake(uint32_t* targetNetId, uint8_t* hitMode, int probs[8])
+{
+    if (!gToHitResultPending) {
+        return false;
+    }
+
+    *targetNetId = gToHitResultTarget;
+    *hitMode = gToHitResultMode;
+    memcpy(probs, gToHitResultProbs, sizeof(gToHitResultProbs));
+    gToHitResultPending = false;
+    return true;
 }
 
 bool MpIsNetworkedCritter(Object* obj)

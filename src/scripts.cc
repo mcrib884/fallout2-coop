@@ -1309,8 +1309,12 @@ int scriptsHandleRequests()
             memcpy(&gScriptsCSD, &gScriptsRequestedCSD, sizeof(gScriptsCSD));
 
             if (gMpActive) {
-                debugFilePrint("MPCOMBAT: host script combat request flag=0x%X",
-                    (gScriptsRequests & SCRIPT_REQUEST_0x40) != 0 ? 1 : 0);
+                debugFilePrint("MPCOMBAT: host script combat request flag=0x%X attacker=0x%X tile=%d defender=0x%X tile=%d",
+                    (gScriptsRequests & SCRIPT_REQUEST_0x40) != 0 ? 1 : 0,
+                    gScriptsRequestedCSD.attacker != nullptr ? gScriptsRequestedCSD.attacker->pid : 0,
+                    gScriptsRequestedCSD.attacker != nullptr ? gScriptsRequestedCSD.attacker->tile : -1,
+                    gScriptsRequestedCSD.defender != nullptr ? gScriptsRequestedCSD.defender->pid : 0,
+                    gScriptsRequestedCSD.defender != nullptr ? gScriptsRequestedCSD.defender->tile : -1);
             }
             if ((gScriptsRequests & SCRIPT_REQUEST_0x40) != 0) {
                 gScriptsRequests &= ~SCRIPT_REQUEST_0x40;
@@ -1410,6 +1414,13 @@ int scriptsRequestCombat(CombatStartData* combat)
     }
 
     if (combat) {
+        if (gMpActive && gMpIsHost) {
+            debugFilePrint("MPCOMBAT: script combat requested attacker=0x%X tile=%d defender=0x%X tile=%d",
+                combat->attacker != nullptr ? combat->attacker->pid : 0,
+                combat->attacker != nullptr ? combat->attacker->tile : -1,
+                combat->defender != nullptr ? combat->defender->pid : 0,
+                combat->defender != nullptr ? combat->defender->tile : -1);
+        }
         memcpy(&gScriptsRequestedCSD, combat, sizeof(gScriptsRequestedCSD));
     } else {
         gScriptsRequests |= SCRIPT_REQUEST_0x40;

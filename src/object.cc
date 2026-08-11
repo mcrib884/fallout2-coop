@@ -1259,6 +1259,8 @@ int _obj_offset(Object* obj, int x, int y, Rect* rect)
             _obj_offset(gEgg, x, y, nullptr);
         }
     } else {
+        Rect oldCircleRect;
+        bool hasCircleRect = rect != nullptr && MpGetPlayerCircleRect(obj, &oldCircleRect);
         if (rect != nullptr) {
             objectGetRect(obj, rect);
 
@@ -1287,6 +1289,14 @@ int _obj_offset(Object* obj, int x, int y, Rect* rect)
             rectOffset(&objectRect, x, y);
 
             rectUnion(rect, &objectRect, rect);
+
+            if (hasCircleRect) {
+                rectUnion(rect, &oldCircleRect, rect);
+                Rect newCircleRect;
+                if (MpGetPlayerCircleRect(obj, &newCircleRect)) {
+                    rectUnion(rect, &newCircleRect, rect);
+                }
+            }
         } else {
             if (previousNode != nullptr) {
                 previousNode->next = node->next;
@@ -1482,6 +1492,8 @@ int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
         return -1;
     }
 
+    Rect oldCircleRect;
+    bool hasCircleRect = rect != nullptr && MpGetPlayerCircleRect(obj, &oldCircleRect);
     Rect v23;
     int v5 = _obj_adjust_light(obj, 1, rect);
     if (rect != nullptr) {
@@ -1655,6 +1667,14 @@ int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
             if (elevation != _obj_last_elev && objectTypeFromPid(obj->pid) == OBJ_TYPE_CRITTER) {
                 _combat_delete_critter(obj);
             }
+        }
+    }
+
+    if (hasCircleRect) {
+        rectUnion(rect, &oldCircleRect, rect);
+        Rect newCircleRect;
+        if (MpGetPlayerCircleRect(obj, &newCircleRect)) {
+            rectUnion(rect, &newCircleRect, rect);
         }
     }
 

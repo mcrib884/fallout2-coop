@@ -411,7 +411,7 @@ jobs:
       - name: Package
         run: |
           mkdir -p out/dist/fallout2-ce-windows-${{ matrix.arch }}
-          cp out/build/windows-${{ matrix.arch }}/RelWithDebInfo/fallout2-ce.exe out/dist/fallout2-ce-windows-${{ matrix.arch }}/fallout2-ce.exe
+          cp out/build/windows-${{ matrix.arch }}/RelWithDebInfo/fallout2coop.exe out/dist/fallout2-ce-windows-${{ matrix.arch }}/fallout2coop.exe
           cp out/dist/ce.dat out/dist/fallout2-ce-windows-${{ matrix.arch }}/ce.dat
           cp files/fallout2.cfg out/dist/fallout2-ce-windows-${{ matrix.arch }}/EXAMPLE_fallout2.cfg
           cd out/dist

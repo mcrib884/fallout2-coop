@@ -10,7 +10,7 @@ set(EXECUTABLE_NAME fallout2-ce)
 # validates the release against them. Bump the game version before a new
 # game release; the launcher keeps its own version and only moves when the
 # launcher itself changes.
-set(FALLOUT2COOP_VERSION "0.1.1")
+set(FALLOUT2COOP_VERSION "0.1.0")
 set(FALLOUT2COOP_LAUNCHER_VERSION "0.1.0")
 
 # Embeds VERSION as a Windows version resource into a target
@@ -454,12 +454,13 @@ if(MINGW)
 endif()
 
 if(WIN32)
+    set_target_properties(${EXECUTABLE_NAME} PROPERTIES OUTPUT_NAME "fallout2coop")
     target_sources(${EXECUTABLE_NAME} PUBLIC
         "os/windows/fallout2-ce.ico"
         "os/windows/fallout2-ce.rc"
     )
     f2coop_embed_version(${EXECUTABLE_NAME} "${FALLOUT2COOP_VERSION}"
-        "Fallout 2 Co-op engine" "fallout2-ce" "fallout2-ce.exe")
+        "Fallout 2 Co-op engine" "fallout2coop" "fallout2coop.exe")
 endif()
 
 if(APPLE)

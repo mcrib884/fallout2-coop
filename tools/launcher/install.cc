@@ -18,7 +18,7 @@ namespace fs = std::filesystem;
 const char* ceExeName()
 {
 #ifdef _WIN32
-    return "fallout2-ce.exe";
+    return "fallout2coop.exe";
 #else
     return "fallout2-ce";
 #endif

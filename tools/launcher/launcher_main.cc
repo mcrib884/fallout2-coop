@@ -261,7 +261,7 @@ void tryStartInstall(App& app, SDL_Window* window)
     // when it is a full distribution), exe from next to the launcher.
     if (!fs::is_regular_file(app.ceExePath(), ec)) {
         tinyfd_messageBox("No internet connection",
-                          "theres no internet connection. please put the fallout2-ce.exe "
+                          "theres no internet connection. please put the fallout2coop.exe "
                           "next to the launcher and run again.",
                           "ok", "error", 0);
         return;
@@ -776,7 +776,7 @@ void renderUpdatePage(App& app, SDL_Renderer* renderer, float m, float cw)
     // --- card 2: game exe ---
     const float c2y = c1y + c1h + 16.0f, c2h = 104.0f;
     roundedRect(cardX, c2y, cardW, c2h, 12.0f, palette::card);
-    drawText(cardX + 16.0f, c2y + 14.0f, 11.0f, palette::textDim, "GAME  (fallout2-ce.exe)");
+    drawText(cardX + 16.0f, c2y + 14.0f, 11.0f, palette::textDim, "GAME  (fallout2coop.exe)");
 
     // cache the installed game version per destination (exe properties)
     if (app.ceCheckDest != app.destDir) {
@@ -1083,7 +1083,7 @@ void render(App& app, SDL_Renderer* renderer)
     } else if (!localExe) {
         drawText(m + 16, c3y + 34, 12, palette::error, "theres no internet connection.");
         drawText(m + 16, c3y + 56, 12, palette::error,
-                 "please put the fallout2-ce.exe next to the launcher and run again.");
+                 "please put the fallout2coop.exe next to the launcher and run again.");
     } else if (!filesAvailable) {
         drawText(m + 16, c3y + 38, 12, palette::error,
                  "No internet - pick the folder with the original");

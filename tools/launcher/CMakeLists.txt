@@ -31,6 +31,8 @@ target_sources(${LAUNCHER_TARGET} PRIVATE
     "detect.h"
     "install.cc"
     "install.h"
+    "updater.cc"
+    "updater.h"
     "launcher_config.cc"
     "launcher_config.h"
     "${CMAKE_SOURCE_DIR}/third_party/tinyfiledialogs/tinyfiledialogs.c"
@@ -55,4 +57,10 @@ target_link_libraries(${LAUNCHER_TARGET} PRIVATE Threads::Threads)
 if(WIN32)
     # Native file/message dialogs used by tinyfiledialogs.
     target_link_libraries(${LAUNCHER_TARGET} PRIVATE comdlg32 ole32 shell32)
+    # HTTP (WinINet) + SHA-256 (BCrypt) for the in-app updater.
+    target_link_libraries(${LAUNCHER_TARGET} PRIVATE wininet bcrypt)
+    # File version resource read by the updater (GetFileVersionInfo).
+    target_link_libraries(${LAUNCHER_TARGET} PRIVATE version)
+    f2coop_embed_version(${LAUNCHER_TARGET} "${FALLOUT2COOP_LAUNCHER_VERSION}"
+        "Fallout 2 Co-op launcher" "fallout2coop_launcher" "fallout2coop_launcher.exe")
 endif()

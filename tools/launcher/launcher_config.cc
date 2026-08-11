@@ -59,6 +59,8 @@ LauncherConfig LauncherConfig::load()
             cfg.installDir = value;
         else if (key == "minimize_while_playing")
             cfg.minimizeWhilePlaying = (value == "1" || value == "true" || value == "yes");
+        else if (key == "updates_repo")
+            cfg.updatesRepo = value;
     }
     return cfg;
 }
@@ -71,6 +73,7 @@ void LauncherConfig::save() const
     out << "source_dir=" << sourceDir << "\n";
     out << "install_dir=" << installDir << "\n";
     out << "minimize_while_playing=" << (minimizeWhilePlaying ? "1" : "0") << "\n";
+    out << "updates_repo=" << updatesRepo << "\n";
 }
 
 } // namespace launcher

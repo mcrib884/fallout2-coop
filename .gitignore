@@ -25,6 +25,10 @@ build_launcher.bat
 build_launcher.sh
 launch_two_instances.bat
 launch_two_instances.ps1
+publish.ps1
+
+# Co-op: local version record (written by publish.ps1 and the launcher)
+version.json
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs

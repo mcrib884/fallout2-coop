@@ -41,6 +41,20 @@ public:
                const std::filesystem::path& ceExe,
                std::string& precheckError);
 
+    // Offline fallback: copies only the engine exe (the one next to the
+    // launcher) into the destination, backing up an existing copy. No
+    // source installation is required.
+    bool startExeOnly(const std::filesystem::path& destDir,
+                      const std::filesystem::path& ceExe,
+                      std::string& precheckError);
+
+    // Copies the game files (root *.dat, root *.dll, data/**, sound/**)
+    // from a valid source installation, without touching the engine exe -
+    // used when the exe is delivered separately (downloaded version).
+    bool startFilesOnly(const std::filesystem::path& sourceDir,
+                        const std::filesystem::path& destDir,
+                        std::string& precheckError);
+
     bool busy() const;
     std::shared_ptr<InstallProgress> progress() const { return progress_; }
     void join();
@@ -49,6 +63,10 @@ private:
     void run(const std::filesystem::path& sourceDir,
              const std::filesystem::path& destDir,
              const std::filesystem::path& ceExe);
+    void runFilesOnly(const std::filesystem::path& sourceDir,
+                      const std::filesystem::path& destDir);
+    void runExeOnly(const std::filesystem::path& destDir,
+                    const std::filesystem::path& ceExe);
 
     std::thread worker_;
     std::shared_ptr<InstallProgress> progress_;

@@ -11,9 +11,10 @@ std::filesystem::path exeDir();
 
 // Persisted launcher state, stored in launcher.ini next to the executable.
 struct LauncherConfig {
-    std::string sourceDir;              // utf-8
+    std::string sourceDir;              // utf-8: where the game files are
     std::string installDir;             // utf-8
     bool minimizeWhilePlaying = true;
+    std::string updatesRepo = "mcrib884/fallout2-coop"; // owner/repo for update checks
 
     static std::filesystem::path iniPath();
     static LauncherConfig load();

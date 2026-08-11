@@ -32,8 +32,9 @@ float g_time = 0.0f;
 
 float g_mx = 0, g_my = 0;
 bool g_leftDown = false;
-bool g_clicked = false;   // left pressed this frame
-bool g_released = false;  // left released this frame
+bool g_clicked = false;    // left pressed this frame
+bool g_released = false;   // left released this frame
+bool g_clickEaten = false; // a popup handled this frame's click; widgets must ignore it
 float g_wheelDelta = 0.0f;
 
 std::string g_textInput;
@@ -388,6 +389,7 @@ void beginFrame(float dt)
     g_time += dt;
     g_clicked = false;
     g_released = false;
+    g_clickEaten = false;
     g_wheelDelta = 0.0f;
     g_textInput.clear();
     g_keys.clear();
@@ -515,7 +517,7 @@ bool button(const char* id, float x, float y, float w, float h, const std::strin
     s.pressT = approach(s.pressT, down ? 1.0f : 0.0f, 16.0f);
 
     bool clicked = false;
-    if (g_clicked && hovered)
+    if (g_clicked && hovered && !g_clickEaten)
         s.downInside = true;
     if (g_released) {
         if (enabled && s.downInside && hovered)
@@ -783,7 +785,7 @@ void toggle(const char* id, float x, float y, bool& value, const std::string& la
 
     float labelW = textWidth(13.0f, label);
     bool hovered = mouseInside(x, y, trackW + 10 + labelW, trackH);
-    if (g_clicked && hovered)
+    if (g_clicked && hovered && !g_clickEaten)
         value = !value;
 
     roundedRect(x, y, trackW, trackH, trackH * 0.5f, lerp(palette::track, palette::accent, s.knobT));
@@ -844,13 +846,17 @@ bool combo(const char* id, float x, float y, float w, float h,
         }
         g_openCombo.clear();
         open = false;
+        // The popup consumed this click (selection or dismiss); widgets
+        // underneath must not also react to it.
+        g_clickEaten = true;
     }
 
     bool hovered = mouseInside(x, y, w, h);
     s.hoverT = approach(s.hoverT, hovered ? 1.0f : 0.0f, 10.0f);
-    if (!open && g_clicked && hovered && !items.empty()) {
+    if (!open && g_clicked && hovered && !items.empty() && !g_clickEaten) {
         g_openCombo = id;
         open = true;
+        g_clickEaten = true;
     }
 
     // field

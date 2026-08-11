@@ -4,6 +4,37 @@ set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 
 set(EXECUTABLE_NAME fallout2-ce)
 
+# Co-op release version, embedded into the Windows binaries (file properties).
+# Version numbers embedded into the exes as Windows version resources. The
+# in-app updater reads them from the exe properties, and publish.ps1
+# validates the release against them. Bump the game version before a new
+# game release; the launcher keeps its own version and only moves when the
+# launcher itself changes.
+set(FALLOUT2COOP_VERSION "0.1.1")
+set(FALLOUT2COOP_LAUNCHER_VERSION "0.1.0")
+
+# Embeds VERSION as a Windows version resource into a target
+# (FileVersion/ProductVersion). Windows only; other platforms are untouched.
+function(f2coop_embed_version TARGET VERSION FILE_DESCRIPTION INTERNAL_NAME ORIGINAL_FILENAME)
+    if(WIN32)
+        string(REPLACE "." ";" _ver_parts "${VERSION}")
+        list(LENGTH _ver_parts _ver_len)
+        if(_ver_len LESS 3)
+            message(FATAL_ERROR "the version must look like x.y.z (got ${VERSION})")
+        endif()
+        list(GET _ver_parts 0 VERSION_MAJOR)
+        list(GET _ver_parts 1 VERSION_MINOR)
+        list(GET _ver_parts 2 VERSION_PATCH)
+        set(VERSION_STRING "${VERSION}")
+        set(FILE_DESCRIPTION "${FILE_DESCRIPTION}")
+        set(INTERNAL_NAME "${INTERNAL_NAME}")
+        set(ORIGINAL_FILENAME "${ORIGINAL_FILENAME}")
+        set(_rc_out "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}_version.rc")
+        configure_file("${CMAKE_SOURCE_DIR}/cmake/version.rc.in" "${_rc_out}" @ONLY)
+        target_sources(${TARGET} PRIVATE "${_rc_out}")
+    endif()
+endfunction()
+
 if(APPLE)
     if(IOS)
         set(CMAKE_OSX_DEPLOYMENT_TARGET "12" CACHE STRING "")
@@ -427,6 +458,8 @@ if(WIN32)
         "os/windows/fallout2-ce.ico"
         "os/windows/fallout2-ce.rc"
     )
+    f2coop_embed_version(${EXECUTABLE_NAME} "${FALLOUT2COOP_VERSION}"
+        "Fallout 2 Co-op engine" "fallout2-ce" "fallout2-ce.exe")
 endif()
 
 if(APPLE)

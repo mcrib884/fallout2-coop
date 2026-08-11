@@ -743,6 +743,10 @@ static void mpHostAcceptProfile(MultiplayerPlayer* player, ENetPeer* peer,
     // hook), so the client's quest mirror stays live for its own saves.
     mpHostSendGvarSnapshot(peer, player->netId);
 
+    // Session cheat policy: the joiner must know before it can open the F11
+    // cheat menu (client cheats may be disabled by the host).
+    MpDebugSendCheatPolicyTo(peer);
+
     // A client that joins while combat is already running never saw the
     // STARTED broadcast (it predates the connection). Enter it into the
     // mirror immediately, then tell it whose turn it is — without the turn
@@ -3379,9 +3383,15 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                     MpDebugApplyApRefill(p->obj);
                     break;
                 case NET_PLAYER_CMD_CHEAT_FLAGS:
-                    p->debugCheatFlags = (uint32_t)cmd->arg1 & MP_DEBUG_CHEAT_ALL;
-                    debugFilePrint("MP: cheat flags netId=%u flags=0x%X",
-                        p->netId, p->debugCheatFlags);
+                    if (MpDebugClientCheatsEnabled()) {
+                        p->debugCheatFlags = (uint32_t)cmd->arg1 & MP_DEBUG_CHEAT_ALL;
+                        debugFilePrint("MP: cheat flags netId=%u flags=0x%X",
+                            p->netId, p->debugCheatFlags);
+                    } else {
+                        p->debugCheatFlags = 0;
+                        debugFilePrint("MP: cheat flags rejected (client cheats disabled) netId=%u flags=0x%X",
+                            p->netId, (uint32_t)cmd->arg1);
+                    }
                     break;
                 default:
                     debugFilePrint("MP: player cmd unknown opcode=%u netId=%u",
@@ -3523,6 +3533,14 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             gToHitResultPending = true;
             debugFilePrint("MP: to-hit result received targetNetId=%u mode=%d",
                 result->targetNetId, result->hitMode);
+            break;
+        }
+        case NET_PKT_CHEAT_POLICY: {
+            if (payloadLen != sizeof(NetCheatPolicyPayload)) {
+                return;
+            }
+            const NetCheatPolicyPayload* policy = (const NetCheatPolicyPayload*)payload;
+            MpDebugSetClientCheatsEnabled(policy->clientCheatsEnabled != 0);
             break;
         }
         case NET_PKT_PLAYER_PROFILE_BEGIN:

@@ -3,6 +3,10 @@
 
 #include <stdint.h>
 
+// ENet forward declarations (same pattern as net.h): the game's peer type.
+struct _ENetPeer;
+typedef struct _ENetPeer ENetPeer;
+
 namespace fallout {
 
 struct Object;
@@ -50,6 +54,21 @@ bool MpDebugCheatEnabled(const Object* critter, uint32_t flag);
 
 // Applies active runtime cheats and relays changed client flags to the host.
 void MpDebugCheatsTick();
+
+// Host: flip the session's client-cheat policy (only the host may use cheats
+// when disabled) and broadcast the new policy to every connected client.
+void MpDebugToggleClientCheats();
+
+// Client: the host's cheat policy arrived (NET_PKT_CHEAT_POLICY). When
+// disabled, clears the local cheat flags so the menu reads OFF and the
+// local effects stop.
+void MpDebugSetClientCheatsEnabled(bool enabled);
+
+// Returns the session's client-cheat policy (true = clients may cheat).
+bool MpDebugClientCheatsEnabled();
+
+// Send the current cheat policy to one peer (join-time seeding).
+void MpDebugSendCheatPolicyTo(ENetPeer* peer);
 
 } // namespace fallout
 

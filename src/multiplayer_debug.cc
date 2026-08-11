@@ -7,6 +7,7 @@
 #include "combat.h"
 #include "critter.h"
 #include "debug.h"
+#include "display_monitor.h"
 #include "game.h"
 #include "input.h"
 #include "interface.h"
@@ -64,11 +65,12 @@ constexpr int DBG_BTN_CHEAT_AMMO = 732;
 constexpr int DBG_BTN_CHEAT_CARRY = 733;
 constexpr int DBG_BTN_CHEAT_SKILLS = 734;
 constexpr int DBG_BTN_CHEAT_ENCOUNTERS = 735;
-constexpr int DBG_BTN_CHEAT_PERF = 736;
+constexpr int DBG_BTN_PERF_METER = 736;
 constexpr int DBG_BTN_CHEAT_BACK = 737;
 constexpr int DBG_BTN_CHEAT_INSTA_KILL = 738;
+constexpr int DBG_BTN_CLIENT_CHEATS = 739;
 
-constexpr int kDbgWindowWidth = 320;
+constexpr int kDbgWindowWidth = 460;
 constexpr int kDbgWindowHeight = 305;
 constexpr int kDbgCheatWindowWidth = 380;
 constexpr int kDbgCheatWindowHeight = 220;
@@ -76,6 +78,12 @@ constexpr int kDbgCheatWindowHeight = 220;
 uint32_t gDbgCheatFlags = 0;
 bool gDbgCheatFlagsDirty = false;
 uint32_t gDbgCheatLastSyncTick = 0;
+
+// Session cheat policy: when false (the default) only the host may use the
+// co-op cheats. Host flips it in the F11 co-op settings menu; every change
+// is broadcast to the clients (NET_PKT_CHEAT_POLICY), which gate their
+// menus and local effects on it.
+bool gDbgClientCheatsEnabled = false;
 
 // Centered position for a window of the given (width, height).
 void dbgCenteredPos(int width, int height, int* outX, int* outY)
@@ -203,6 +211,13 @@ void dbgRefillWeaponAmmo(Object* critter)
 
 void dbgToggleCheat(uint32_t flag)
 {
+    // Client gate: when the host disabled client cheats, the client's
+    // toggles are inert (its flags were cleared by the policy packet).
+    if (gMpActive && gMpIsClient && !gDbgClientCheatsEnabled) {
+        debugFilePrint("MPDBG: cheat toggle blocked (disabled by host) flag=0x%X", flag);
+        displayMonitorAddMessage("Cheats are disabled by the host.");
+        return;
+    }
     gDbgCheatFlags ^= flag;
     gDbgCheatFlagsDirty = true;
     if (gMpActive && gMpIsHost) {
@@ -280,6 +295,13 @@ void dbgApplyCheats(Object* critter, uint32_t flags)
 
 void dbgCheatModal()
 {
+    // Client gate: the whole cheats area is host-policy controlled — a
+    // disabled client cannot even open the toggles.
+    if (gMpActive && gMpIsClient && !gDbgClientCheatsEnabled) {
+        debugFilePrint("MPDBG: cheat options blocked (disabled by host)");
+        displayMonitorAddMessage("Cheats are disabled by the host.");
+        return;
+    }
     int winX;
     int winY;
     dbgCenteredPos(kDbgCheatWindowWidth, kDbgCheatWindowHeight, &winX, &winY);
@@ -292,7 +314,7 @@ void dbgCheatModal()
     }
     windowDrawBorder(win);
 
-    const char* title = "CHEATS";
+    const char* title = "CHEAT TOGGLES";
     int titleX = (kDbgCheatWindowWidth - fontGetStringWidth(title)) / 2;
     windowDrawText(win, title, 0, titleX, 6, COLOR_WHITE);
     _win_register_text_button(win, 30, 30, -1, -1, -1, DBG_BTN_CHEAT_GOD, "God Mode", 0);
@@ -301,15 +323,14 @@ void dbgCheatModal()
     _win_register_text_button(win, 30, 55, -1, -1, -1, DBG_BTN_CHEAT_CARRY, "Unlimited Carry", 0);
     _win_register_text_button(win, 140, 55, -1, -1, -1, DBG_BTN_CHEAT_SKILLS, "Always Succeed", 0);
     _win_register_text_button(win, 250, 55, -1, -1, -1, DBG_BTN_CHEAT_ENCOUNTERS, "No Encounters", 0);
-    _win_register_text_button(win, 30, 80, -1, -1, -1, DBG_BTN_CHEAT_PERF, "Perf Meter", 0);
-    _win_register_text_button(win, 140, 80, -1, -1, -1, DBG_BTN_CHEAT_INSTA_KILL, "Insta Kill", 0);
+    _win_register_text_button(win, 30, 80, -1, -1, -1, DBG_BTN_CHEAT_INSTA_KILL, "Insta Kill", 0);
     _win_register_text_button(win, 250, 80, -1, -1, -1, DBG_BTN_CHEAT_BACK, "Back", 0);
     windowRefresh(win);
 
     bool keepGoing = true;
     while (keepGoing) {
         sharedFpsLimiter.mark();
-        windowFill(win, 8, 132, kDbgCheatWindowWidth - 16, 34, COLOR_BLACK);
+        windowFill(win, 8, 132, kDbgCheatWindowWidth - 16, 42, COLOR_BLACK);
         char status1[128];
         char status2[128];
         snprintf(status1, sizeof(status1), "God: %s   AP: %s   Ammo: %s   Carry: %s",
@@ -325,6 +346,11 @@ void dbgCheatModal()
             (kDbgCheatWindowWidth - fontGetStringWidth(status1)) / 2, 135, COLOR_WHITE);
         windowDrawText(win, status2, 0,
             (kDbgCheatWindowWidth - fontGetStringWidth(status2)) / 2, 151, COLOR_WHITE);
+        if (gMpActive && gMpIsClient && !gDbgClientCheatsEnabled) {
+            const char* blocked = "CHEATS DISABLED BY HOST";
+            windowDrawText(win, blocked, 0,
+                (kDbgCheatWindowWidth - fontGetStringWidth(blocked)) / 2, 167, COLOR_WHITE);
+        }
         windowRefresh(win);
         renderPresent();
         MpTick();
@@ -355,9 +381,6 @@ void dbgCheatModal()
             break;
         case DBG_BTN_CHEAT_INSTA_KILL:
             dbgToggleCheat(MP_DEBUG_CHEAT_INSTA_KILL);
-            break;
-        case DBG_BTN_CHEAT_PERF:
-            MpPerfSetEnabled(!MpPerfIsEnabled());
             break;
         default:
             break;
@@ -688,6 +711,60 @@ void dbgSubmenuShow(const SubmenuCallbacks* cb)
 
 } // namespace
 
+void MpDebugToggleClientCheats()
+{
+    if (!gMpActive || !gMpIsHost) {
+        return;
+    }
+    gDbgClientCheatsEnabled = !gDbgClientCheatsEnabled;
+    if (!gDbgClientCheatsEnabled) {
+        // Revoke every connected client's cheat flags host-side; their local
+        // copies are cleared by the policy packet below.
+        for (int index = 1; index < NET_MAX_PLAYERS; index++) {
+            MultiplayerPlayer* player = &gMpSession.players[index];
+            if (player->isConnected && !player->isLocal) {
+                player->debugCheatFlags = 0;
+            }
+        }
+    }
+    debugFilePrint("MPDBG: client cheats %s",
+        gDbgClientCheatsEnabled ? "enabled" : "disabled");
+    for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+        MultiplayerPlayer* player = &gMpSession.players[index];
+        if (player->isConnected && !player->isLocal && player->peer != nullptr) {
+            MpDebugSendCheatPolicyTo(player->peer);
+        }
+    }
+}
+
+void MpDebugSetClientCheatsEnabled(bool enabled)
+{
+    gDbgClientCheatsEnabled = enabled;
+    if (!enabled) {
+        // The host revoked client cheats: clear the local flags so the menu
+        // reads OFF and no local effect keeps running.
+        gDbgCheatFlags = 0;
+        gDbgCheatFlagsDirty = false;
+    }
+    debugFilePrint("MPDBG: client cheats policy %s", enabled ? "enabled" : "disabled");
+}
+
+bool MpDebugClientCheatsEnabled()
+{
+    return gDbgClientCheatsEnabled;
+}
+
+void MpDebugSendCheatPolicyTo(ENetPeer* peer)
+{
+    if (peer == nullptr) {
+        return;
+    }
+    NetCheatPolicyPayload payload;
+    payload.clientCheatsEnabled = gDbgClientCheatsEnabled ? 1 : 0;
+    NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_CHEAT_POLICY,
+        &payload, sizeof(payload));
+}
+
 uint32_t MpDebugCheatFlagsFor(const Object* critter)
 {
     return dbgCheatFlagsFor(critter);
@@ -721,18 +798,35 @@ void MpDebugCheatsTick()
         for (int index = 0; index < NET_MAX_PLAYERS; index++) {
             MultiplayerPlayer* player = &gMpSession.players[index];
             if (player->isConnected && player->obj != nullptr) {
-                dbgApplyCheats(player->obj, player->debugCheatFlags);
+                // Client cheats apply only when the host enabled them; the
+                // host's own flags are never gated.
+                uint32_t flags = player->isLocal || gDbgClientCheatsEnabled
+                    ? player->debugCheatFlags : 0;
+                dbgApplyCheats(player->obj, flags);
             }
+        }
+    } else if (gMpActive && gMpIsClient) {
+        if (gDbgClientCheatsEnabled) {
+            dbgApplyCheats(gDude, gDbgCheatFlags);
         }
     } else {
         dbgApplyCheats(gDude, gDbgCheatFlags);
     }
 }
 
-// === MpDebugMenuShow ===
-void MpDebugMenuShow()
+// === Cheats menu (the old F11 debug editor — everything except the co-op
+// settings now lives here, opened via the Cheats button in the settings
+// menu) ===
+static void dbgCheatsMenuShow()
 {
-    debugFilePrint("MPDBG: menu show begin");
+    debugFilePrint("MPDBG: cheats menu begin");
+    // Client gate: the whole cheats area (money/heal/xp editors included) is
+    // host-policy controlled — a disabled client gets no access at all.
+    if (gMpActive && gMpIsClient && !gDbgClientCheatsEnabled) {
+        debugFilePrint("MPDBG: cheats menu blocked (disabled by host)");
+        displayMonitorAddMessage("Cheats are disabled by the host.");
+        return;
+    }
     if (gDude == nullptr) {
         return;
     }
@@ -753,7 +847,7 @@ void MpDebugMenuShow()
     }
     windowDrawBorder(win);
 
-    const char* title = "CO-OP DEBUG";
+    const char* title = "CHEATS MENU";
     int titleX = (kDbgWindowWidth - fontGetStringWidth(title)) / 2;
     windowDrawText(win, title, 0, titleX, 6, COLOR_WHITE);
 
@@ -776,7 +870,7 @@ void MpDebugMenuShow()
     _win_register_text_button(win, 30, 230, -1, -1, -1, DBG_BTN_SKILLS, "Skills...", 0);
     _win_register_text_button(win, 170, 230, -1, -1, -1, DBG_BTN_STATS, "Stats...", 0);
     _win_register_text_button(win, 30, 255, -1, -1, -1, DBG_BTN_PERKS, "Perks...", 0);
-    _win_register_text_button(win, 170, 255, -1, -1, -1, DBG_BTN_CHEATS, "Cheats...", 0);
+    _win_register_text_button(win, 170, 255, -1, -1, -1, DBG_BTN_CHEATS, "Cheat Options...", 0);
     _win_register_text_button(win, 30, 280, -1, -1, -1, DBG_BTN_CLOSE, "Close", 0);
     windowRefresh(win);
 
@@ -839,6 +933,16 @@ void MpDebugMenuShow()
 
             renderPresent();
             sharedFpsLimiter.throttle();
+        }
+
+        // Individual-action gate (defense in depth): even if this menu is
+        // somehow open, every action is inert for a disabled client. Close
+        // and ESC always pass so the window can always be exited.
+        if (rc != 0 && rc != DBG_BTN_CLOSE && gMpActive && gMpIsClient
+            && !gDbgClientCheatsEnabled) {
+            debugFilePrint("MPDBG: cheats action blocked (disabled by host) rc=%d", rc);
+            displayMonitorAddMessage("Cheats are disabled by the host.");
+            continue;
         }
 
         switch (rc) {
@@ -910,6 +1014,133 @@ void MpDebugMenuShow()
             break;
         case DBG_BTN_CHEATS:
             dbgCheatModal();
+            break;
+        }
+    }
+
+    windowDestroy(win);
+    if (cursorWasHidden) {
+        mouseHideCursor();
+    }
+    debugFilePrint("MPDBG: cheats menu end");
+}
+
+// === MpDebugMenuShow ===
+void MpDebugMenuShow()
+{
+    debugFilePrint("MPDBG: menu show begin");
+    if (gDude == nullptr) {
+        return;
+    }
+    bool cursorWasHidden = cursorIsHidden();
+    if (cursorWasHidden) {
+        mouseShowCursor();
+    }
+
+    int winX, winY;
+    dbgCenteredPos(kDbgWindowWidth, kDbgWindowHeight, &winX, &winY);
+
+    int win = windowCreate(winX, winY, kDbgWindowWidth, kDbgWindowHeight, COLOR_BLACK, WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
+    if (win == -1) {
+        if (cursorWasHidden) {
+            mouseHideCursor();
+        }
+        return;
+    }
+    windowDrawBorder(win);
+
+    const char* title = "CO-OP SETTINGS";
+    int titleX = (kDbgWindowWidth - fontGetStringWidth(title)) / 2;
+    windowDrawText(win, title, 0, titleX, 6, COLOR_WHITE);
+
+    _win_register_text_button(win, 30, 30, -1, -1, -1, DBG_BTN_CHEATS, "Cheats...", 0);
+    _win_register_text_button(win, 30, 55, -1, -1, -1, DBG_BTN_CLOSE, "Close", 0);
+
+    // --- Settings column (right side): the perf meter is a per-machine
+    // render toggle available to everyone (singleplayer included); the
+    // co-op host policy toggles sit below it ---
+    char perfStatus[64];
+    snprintf(perfStatus, sizeof(perfStatus), "Perf: %s", MpPerfIsEnabled() ? "ON" : "OFF");
+    _win_register_text_button(win, 330, 30, -1, -1, -1, DBG_BTN_PERF_METER, "Perf Meter", 0);
+    windowDrawText(win, perfStatus, 0, 330, 58, COLOR_WHITE);
+    char clientCheatsStatus[64];
+    if (gMpActive) {
+        if (gMpIsHost) {
+            // Host: toggle button; the status line below carries the state
+            // (buttons keep a static label, so the state is drawn here and
+            // redrawn after each toggle).
+            _win_register_text_button(win, 330, 88, -1, -1, -1, DBG_BTN_CLIENT_CHEATS, "Client Cheats", 0);
+            snprintf(clientCheatsStatus, sizeof(clientCheatsStatus), "Clients: %s",
+                gDbgClientCheatsEnabled ? "ON" : "OFF");
+            windowDrawText(win, clientCheatsStatus, 0, 330, 116, COLOR_WHITE);
+        } else {
+            // Client: informational only — the host controls this setting.
+            windowDrawText(win, "Client Cheats:", 0, 330, 92, COLOR_WHITE);
+            snprintf(clientCheatsStatus, sizeof(clientCheatsStatus), "%s",
+                gDbgClientCheatsEnabled ? "enabled" : "disabled by host");
+            windowDrawText(win, clientCheatsStatus, 0, 330, 110, COLOR_WHITE);
+        }
+    }
+    windowRefresh(win);
+
+    bool keepGoing = true;
+    while (keepGoing) {
+        int rc = -1;
+        while (rc == -1) {
+            sharedFpsLimiter.mark();
+
+            // Keep the session alive behind the modal: the profile sync,
+            // deferred drains and host detect all run from MpTick, which the
+            // main loop cannot reach while this modal blocks it. Same pattern
+            // as the vote modal. No-ops when not in a session.
+            MpTick();
+            int keyCode = inputGetInput();
+            switch (keyCode) {
+            case KEY_ESCAPE:
+                rc = 0;
+                break;
+            case DBG_BTN_CHEATS:
+            case DBG_BTN_CLOSE:
+                rc = keyCode;
+                break;
+            case DBG_BTN_PERF_METER:
+                MpPerfSetEnabled(!MpPerfIsEnabled());
+                // Redraw the toggle status line (the button label is static).
+                snprintf(perfStatus, sizeof(perfStatus), "Perf: %s",
+                    MpPerfIsEnabled() ? "ON" : "OFF");
+                windowFill(win, 330, 56, 130, 20, COLOR_BLACK);
+                windowDrawText(win, perfStatus, 0, 330, 58, COLOR_WHITE);
+                windowRefresh(win);
+                break;
+            case DBG_BTN_CLIENT_CHEATS:
+                MpDebugToggleClientCheats();
+                // Redraw the toggle status line (the button label is static).
+                snprintf(clientCheatsStatus, sizeof(clientCheatsStatus), "Clients: %s",
+                    gDbgClientCheatsEnabled ? "ON" : "OFF");
+                windowFill(win, 330, 114, 130, 20, COLOR_BLACK);
+                windowDrawText(win, clientCheatsStatus, 0, 330, 116, COLOR_WHITE);
+                windowRefresh(win);
+                break;
+            default:
+                break;
+            }
+
+            renderPresent();
+            sharedFpsLimiter.throttle();
+        }
+
+        switch (rc) {
+        case 0:
+        case DBG_BTN_CLOSE:
+            keepGoing = false;
+            break;
+        case DBG_BTN_CHEATS:
+            if (gMpActive && gMpIsClient && !gDbgClientCheatsEnabled) {
+                debugFilePrint("MPDBG: cheats menu blocked (disabled by host)");
+                displayMonitorAddMessage("Cheats are disabled by the host.");
+            } else {
+                dbgCheatsMenuShow();
+            }
             break;
         }
     }

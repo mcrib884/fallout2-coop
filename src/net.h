@@ -88,6 +88,7 @@ enum NetPacketType {
     NET_PKT_GAME_TIME = 58,       // host -> clients: authoritative game clock (client keeps a mirror)
     NET_PKT_TO_HIT_QUERY = 59,    // client -> host: called-shot probabilities for a target (host-owned rolls)
     NET_PKT_TO_HIT_RESULT = 60,   // host -> client: the 8 called-shot probabilities computed host-side
+    NET_PKT_CHEAT_POLICY = 61,    // host -> clients: session cheat policy (client cheats enabled?)
 };
 
 enum NetUnreliablePacketType {
@@ -456,6 +457,13 @@ typedef struct NetToHitResultPayload {
     uint8_t hitMode;
     int16_t probs[8];
 } NetToHitResultPayload;
+
+// Host -> clients: the session's cheat policy. When clientCheatsEnabled is 0
+// only the host may use the co-op cheats; clients are told so at join and on
+// every change (their menus and local effects are gated).
+typedef struct NetCheatPolicyPayload {
+    uint8_t clientCheatsEnabled;
+} NetCheatPolicyPayload;
 
 // Generic host -> client player event (reliable). Discrete player lifecycle
 // and combat outcomes ride this single route. (DEPRECATED: NET_PKT_PLAYER_STATUS,

@@ -1199,6 +1199,10 @@ static void opConditionalOperatorGreaterThanEquals(Program* program)
         value[arg] = programStackPopValue(program);
     }
 
+    auto fatalInvalidComparison = [&value]() {
+        programFatalError("Invalid comparison: >= does not support %s and %s.", value[1].typeDebugString(), value[0].typeDebugString());
+    };
+
     switch (value[1].opcode) {
     case VALUE_TYPE_STRING:
     case VALUE_TYPE_DYNAMIC_STRING:
@@ -1218,7 +1222,7 @@ static void opConditionalOperatorGreaterThanEquals(Program* program)
             strings[0] = stringBuffers[0];
             break;
         default:
-            assert(false && "Should be unreachable");
+            fatalInvalidComparison();
         }
 
         result = strcmp(strings[1], strings[0]) >= 0;
@@ -1239,7 +1243,7 @@ static void opConditionalOperatorGreaterThanEquals(Program* program)
             result = value[1].floatValue >= (float)value[0].integerValue;
             break;
         default:
-            assert(false && "Should be unreachable");
+            fatalInvalidComparison();
         }
         break;
     case VALUE_TYPE_INT:
@@ -1258,11 +1262,25 @@ static void opConditionalOperatorGreaterThanEquals(Program* program)
             result = value[1].integerValue >= value[0].integerValue;
             break;
         default:
-            assert(false && "Should be unreachable");
+            fatalInvalidComparison();
+        }
+        break;
+    case VALUE_TYPE_PTR:
+        switch (value[0].opcode) {
+        case VALUE_TYPE_INT:
+            if (value[0].integerValue != 0) {
+                programFatalError("Invalid pointer comparison: >= only supports comparison to 0.");
+            }
+            // allows PTR >= 0 comparison, which always returns true (old RPU support).
+            // This is basically a shortcut for "does variable contain a pointer type".
+            result = true;
+            break;
+        default:
+            fatalInvalidComparison();
         }
         break;
     default:
-        assert(false && "Should be unreachable");
+        fatalInvalidComparison();
     }
 
     programStackPushInteger(program, result);
@@ -1279,6 +1297,10 @@ static void opConditionalOperatorLessThan(Program* program)
     for (int arg = 0; arg < 2; arg++) {
         value[arg] = programStackPopValue(program);
     }
+
+    auto fatalInvalidComparison = [&value]() {
+        programFatalError("Invalid comparison: < does not support %s and %s.", value[1].typeDebugString(), value[0].typeDebugString());
+    };
 
     switch (value[1].opcode) {
     case VALUE_TYPE_STRING:
@@ -1299,7 +1321,7 @@ static void opConditionalOperatorLessThan(Program* program)
             str_ptr[0] = text[0];
             break;
         default:
-            assert(false && "Should be unreachable");
+            fatalInvalidComparison();
         }
 
         result = strcmp(str_ptr[1], str_ptr[0]) < 0;
@@ -1320,7 +1342,7 @@ static void opConditionalOperatorLessThan(Program* program)
             result = value[1].floatValue < (float)value[0].integerValue;
             break;
         default:
-            assert(false && "Should be unreachable");
+            fatalInvalidComparison();
         }
         break;
     case VALUE_TYPE_INT:
@@ -1339,11 +1361,11 @@ static void opConditionalOperatorLessThan(Program* program)
             result = value[1].integerValue < value[0].integerValue;
             break;
         default:
-            assert(false && "Should be unreachable");
+            fatalInvalidComparison();
         }
         break;
     default:
-        assert(false && "Should be unreachable");
+        fatalInvalidComparison();
     }
 
     programStackPushInteger(program, result);
@@ -1360,6 +1382,10 @@ static void opConditionalOperatorGreaterThan(Program* program)
     for (int arg = 0; arg < 2; arg++) {
         value[arg] = programStackPopValue(program);
     }
+
+    auto fatalInvalidComparison = [&value]() {
+        programFatalError("Invalid comparison: > does not support %s and %s.", value[1].typeDebugString(), value[0].typeDebugString());
+    };
 
     switch (value[1].opcode) {
     case VALUE_TYPE_STRING:
@@ -1380,7 +1406,7 @@ static void opConditionalOperatorGreaterThan(Program* program)
             strings[0] = stringBuffers[0];
             break;
         default:
-            assert(false && "Should be unreachable");
+            fatalInvalidComparison();
         }
 
         result = strcmp(strings[1], strings[0]) > 0;
@@ -1401,7 +1427,7 @@ static void opConditionalOperatorGreaterThan(Program* program)
             result = value[1].floatValue > (float)value[0].integerValue;
             break;
         default:
-            assert(false && "Should be unreachable");
+            fatalInvalidComparison();
         }
         break;
     case VALUE_TYPE_INT:
@@ -1420,26 +1446,24 @@ static void opConditionalOperatorGreaterThan(Program* program)
             result = value[1].integerValue > value[0].integerValue;
             break;
         default:
-            assert(false && "Should be unreachable");
+            fatalInvalidComparison();
         }
         break;
     // Sonora folks tend to use "object > 0" to test objects for nulls.
     case VALUE_TYPE_PTR:
         switch (value[0].opcode) {
         case VALUE_TYPE_INT:
-            if (value[0].integerValue > 0) {
-                result = (uintptr_t)value[1].pointerValue > (uintptr_t)value[0].integerValue;
-            } else {
-                // (ptr > int{0 or negative}) means (ptr != nullptr)
-                result = nullptr != value[1].pointerValue;
+            if (value[0].integerValue != 0) {
+                programFatalError("Invalid pointer comparison: > only supports comparison to 0.");
             }
+            result = nullptr != value[1].pointerValue;
             break;
         default:
-            assert(false && "Should be unreachable");
+            fatalInvalidComparison();
         }
         break;
     default:
-        assert(false && "Should be unreachable");
+        fatalInvalidComparison();
     }
 
     programStackPushInteger(program, result);

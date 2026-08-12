@@ -1139,6 +1139,8 @@ void render(App& app, SDL_Renderer* renderer)
     } else if (!filesAvailable) {
         drawText(m, statusY, 12, palette::error,
                  "Pick the folder with the original Fallout 2 files above first.");
+    } else if (!app.updateNotice.empty() && app.updateNotice != "Up to date.") {
+        drawText(m, statusY, 12, palette::accent, fitConfigText(app.updateNotice, 12.0f, cw));
     } else if (app.startEnabled()) {
         drawText(m, statusY, 12, palette::success, "Ready to play.");
     }

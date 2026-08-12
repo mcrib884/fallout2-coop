@@ -105,6 +105,12 @@ struct JsonParser {
 
     void skipWs()
     {
+        while (i + 2 < s.size()
+               && (unsigned char)s[i] == 0xEF
+               && (unsigned char)s[i + 1] == 0xBB
+               && (unsigned char)s[i + 2] == 0xBF) {
+            i += 3;
+        }
         while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r'))
             ++i;
     }

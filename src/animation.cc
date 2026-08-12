@@ -2854,6 +2854,13 @@ void _object_animate()
         // bookkeeping draining; the host's state updates still drive what
         // the player actually sees.
         if (gMpIsClient && gMpActive && MpIsNetworkedCritter(object) && object != gDude) {
+            // (Commented: Bloody Mess trace — remote deaths fast-complete by
+            // design; the client's gore comes from the state-snapped fid.)
+            // if (animationTypeFromFid(sad->fid) >= ANIM_FALL_BACK) {
+            //     debugFilePrint("MPDBG death: sad fast-complete anim=%d obj=%p fid=0x%X net=%u",
+            //         (int)animationTypeFromFid(sad->fid), (void*)object, sad->fid,
+            //         MpGetObjNetId(object));
+            // }
             sad->step = ANIM_COMPLETE;
             _anim_set_continue(sad->animationSequenceIndex, 1);
             continue;
@@ -2865,6 +2872,13 @@ void _object_animate()
         }
 
         sad->animationTimestamp = time;
+
+        // (Commented: Bloody Mess trace — gore confirmed working.)
+        // if (sad->step == 0 && animationTypeFromFid(sad->fid) >= ANIM_FALL_BACK) {
+        //     debugFilePrint("MPDBG death: sad play anim=%d obj=%p fid=0x%X net=%u",
+        //         (int)animationTypeFromFid(sad->fid), (void*)object, sad->fid,
+        //         MpGetObjNetId(object));
+        // }
 
         if (animationRunSequence(sad->animationSequenceIndex) == -1) {
             // Co-op: a sequence that is already ANIM_COMPLETE can never

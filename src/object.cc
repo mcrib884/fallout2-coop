@@ -4165,8 +4165,10 @@ static int _obj_remove(ObjectListNode* a1, ObjectListNode* a2)
         return -1;
     }
 
-    debugFilePrint("OBJ: remove pid=0x%X fid=0x%X tile=%d elev=%d flags=0x%X",
-        a1->obj->pid, a1->obj->fid, a1->obj->tile, a1->obj->elevation, a1->obj->flags);
+    // (Commented: per-object remove spam — fires for every object on every
+    // map load/removal walk; kept the sequence markers around it.)
+    // debugFilePrint("OBJ: remove pid=0x%X fid=0x%X tile=%d elev=%d flags=0x%X",
+    //     a1->obj->pid, a1->obj->fid, a1->obj->tile, a1->obj->elevation, a1->obj->flags);
     _obj_inven_free(&(a1->obj->data.inventory));
 
     if (a1->obj->sid != -1) {
@@ -5175,13 +5177,11 @@ static void _obj_render_object(Object* object, Rect* rect, int light)
 
     // Co-op render probe (throttled): ground truth of what the viewer draws
     // for a networked player avatar — the resolved file path and the frame
-    // against the art's frame count.
-    // (Commented: skin-pick render mystery resolved — see git history.)
-    if (false && gMpActive && type == OBJ_TYPE_CRITTER && MpGetObjNetId(object) != 0) {
-        // Per-object throttle: the old single-tick gate only logged the FIRST
-        // networked critter drawn each second — a visible map critter (e.g. a
-        // gecko) drowned out the player avatars. Each networked critter now
-        // logs at most once per second.
+    // (Commented: Bloody Mess render probe — gore confirmed working, see git
+    // history for the trace; re-enable by flipping the gate.)
+    if (false && gMpActive && type == OBJ_TYPE_CRITTER && MpGetObjNetId(object) != 0
+        && animationTypeFromFid(object->fid) >= 20) {
+        // Per-object throttle: at most one line per second per object.
         static struct { const void* obj; uint32_t tick; } gMpRenderProbeLast[8] = {};
         uint32_t nowTicks = getTicks();
         int slot = -1;
@@ -5203,8 +5203,9 @@ static void _obj_render_object(Object* object, Rect* rect, int light)
             || nowTicks - gMpRenderProbeLast[slot].tick >= 1000) {
             gMpRenderProbeLast[slot].tick = nowTicks;
             char* probePath = artBuildFilePath(object->fid);
-            debugFilePrint("MPDBG renderprobe obj=%p fid=0x%X model=%d file='%s' frames=%d objFrame=%d rot=%d",
+            debugFilePrint("MPDBG renderprobe obj=%p fid=0x%X model=%d anim=%d file='%s' frames=%d objFrame=%d rot=%d",
                 (void*)object, object->fid, object->fid & 0xFFF,
+                (int)animationTypeFromFid(object->fid),
                 probePath != nullptr ? probePath : "?",
                 artGetFrameCount(art), object->frame, object->rotation);
         }

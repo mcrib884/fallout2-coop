@@ -196,6 +196,7 @@ static void mpBroadcastProfileToClients(uint8_t netId, uint32_t objNetId,
 static void mpApplyReceivedProfile(uint8_t netId, uint32_t objNetId,
     const MpPlayerProfile& profile, uint32_t changedSections);
 static void mpClientTryFinishMapSync();
+static void mpDestroyNetworkObject(Object* obj);
 static void mpDebugDumpLightState(const char* tag);
 
 // _obj_remove_all() (run by the map load) destroys every object in the head
@@ -859,7 +860,7 @@ static void mpHandleProfileChunk(ENetPeer* peer, const void* payload, size_t pay
     memcpy(state.bytes.data() + state.receivedBytes, bytes, chunk.dataLength);
     state.receivedBytes += chunk.dataLength;
     state.nextChunk++;
-    if (state.nextChunk % 50 == 0 || state.nextChunk == state.expectedChunks) {
+    if (state.nextChunk % 500 == 0 || state.nextChunk == state.expectedChunks) {
         debugFilePrint("MP: profile chunk progress netId=%u stream=%u %u/%u bytes=%u/%u",
             actualNetId, chunk.streamId, state.nextChunk, state.expectedChunks,
             state.receivedBytes, state.expectedBytes);
@@ -1229,6 +1230,28 @@ static void mpClientTryFinishMapSync()
     }
 
     mpClientApplyMapMetadata();
+
+    // Phantom pruning: the client's map/save copies of objects the host no
+    // longer has (enemies killed or removed before the sync, opened doors,
+    // despawned items) were never covered by the full sync and would linger
+    // as fake enemies at stale positions. The host registers and syncs every
+    // object it holds, so any on-map object without a netId after the sync
+    // is a leftover — destroy it. Local helpers (egg, interface fids) and
+    // carried items (tile -1) are excluded.
+    Object* probe = objectFindFirst();
+    while (probe != nullptr) {
+        Object* next = objectFindNext();
+        if (probe != gDude && probe != gEgg
+            && objectTypeFromFid(probe->fid) != OBJ_TYPE_INTERFACE
+            && hexGridTileIsValid(probe->tile) && elevationIsValid(probe->elevation)
+            && !mpObjectIsInCritterInventory(probe, gDude)
+            && MpGetObjNetId(probe) == 0) {
+            debugFilePrint("MP: prune phantom pid=0x%X fid=0x%X tile=%d elev=%d",
+                probe->pid, probe->fid, probe->tile, probe->elevation);
+            mpDestroyNetworkObject(probe);
+        }
+        probe = next;
+    }
     // debugFilePrint("MPDBG sync done: dude=%p pid=0x%X pt=%d fid=0x%X anim=%d tile=%d elev=%d hidden=%d st=%d carry=%d weight=%d center=%d",
     //     (void*)gDude,
     //     gDude != nullptr ? gDude->pid : 0,
@@ -2695,7 +2718,9 @@ void MpTick()
         gMpDrainingDeferredPackets = false;
         gMpDeferredPackets.erase(gMpDeferredPackets.begin(),
             gMpDeferredPackets.begin() + deferredCount);
-        debugFilePrint("MP: drained deferred packets count=%zu", deferredCount);
+        // (Commented: drained-deferred spam — fires per tick while the queue
+        // drains during/after modals.)
+        // debugFilePrint("MP: drained deferred packets count=%zu", deferredCount);
     }
 
     NetHostService(gMpSession.enetHost, mpOnNetEvent, nullptr);

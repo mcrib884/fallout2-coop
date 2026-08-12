@@ -30,6 +30,7 @@
 #include "skill.h"
 #include "sfall_script_hooks.h"
 #include "stat.h"
+#include "trait.h"
 #include "svga.h"
 #include "text_font.h"
 #include "tile.h"
@@ -78,6 +79,12 @@ constexpr int DBG_BTN_PERF_METER = 736;
 constexpr int DBG_BTN_CHEAT_BACK = 737;
 constexpr int DBG_BTN_CHEAT_INSTA_KILL = 738;
 constexpr int DBG_BTN_CLIENT_CHEATS = 739;
+constexpr int DBG_BTN_CHEAT_HOSTILE = 740;
+constexpr int DBG_BTN_ITEM_ROW_BASE = 900;
+constexpr int DBG_BTN_ITEM_PREV = 942;
+constexpr int DBG_BTN_ITEM_NEXT = 943;
+constexpr int DBG_BTN_ITEM_QTY = 944;
+constexpr int DBG_BTN_ITEM_BACK = 945;
 constexpr int DBG_BTN_SKIN_RESTORE = 741;
 constexpr int DBG_BTN_SKIN_BACK = 742;
 constexpr int DBG_BTN_SKIN_CAT_PREV = 743;
@@ -87,6 +94,14 @@ constexpr int DBG_BTN_SKIN_MODEL_NEXT = 746;
 constexpr int DBG_BTN_SKIN = 747;
 constexpr int DBG_BTN_SKIN_CAT_BASE = 750;
 constexpr int DBG_BTN_SKIN_MODEL_BASE = 770;
+constexpr int DBG_BTN_PERK_ROW_BASE = 780; // + 0..41 = rows of the current perk page
+constexpr int DBG_BTN_PERK_PREV = 850;
+constexpr int DBG_BTN_PERK_NEXT = 851;
+constexpr int DBG_BTN_PERK_DEC = 852;
+constexpr int DBG_BTN_PERK_BACK = 853;
+constexpr int DBG_BTN_TRAITS = 621;
+constexpr int DBG_BTN_TRAIT_ROW_BASE = 860; // + 0..15 = the trait list
+constexpr int DBG_BTN_TRAIT_BACK = 861;
 
 constexpr int kDbgWindowWidth = 460;
 constexpr int kDbgWindowHeight = 305;
@@ -342,15 +357,17 @@ void dbgCheatModal()
     _win_register_text_button(win, 140, 55, -1, -1, -1, DBG_BTN_CHEAT_SKILLS, "Always Succeed", 0);
     _win_register_text_button(win, 250, 55, -1, -1, -1, DBG_BTN_CHEAT_ENCOUNTERS, "No Encounters", 0);
     _win_register_text_button(win, 30, 80, -1, -1, -1, DBG_BTN_CHEAT_INSTA_KILL, "Insta Kill", 0);
+    _win_register_text_button(win, 140, 80, -1, -1, -1, DBG_BTN_CHEAT_HOSTILE, "Kill Hostile", 0);
     _win_register_text_button(win, 250, 80, -1, -1, -1, DBG_BTN_CHEAT_BACK, "Back", 0);
     windowRefresh(win);
 
     bool keepGoing = true;
     while (keepGoing) {
         sharedFpsLimiter.mark();
-        windowFill(win, 8, 132, kDbgCheatWindowWidth - 16, 42, COLOR_BLACK);
+        windowFill(win, 8, 132, kDbgCheatWindowWidth - 16, 56, COLOR_BLACK);
         char status1[128];
         char status2[128];
+        char status3[128];
         snprintf(status1, sizeof(status1), "God: %s   AP: %s   Ammo: %s   Carry: %s",
             dbgOnOff(MP_DEBUG_CHEAT_GOD_MODE),
             dbgOnOff(MP_DEBUG_CHEAT_INFINITE_AP),
@@ -360,22 +377,28 @@ void dbgCheatModal()
             dbgOnOff(MP_DEBUG_CHEAT_ALWAYS_SUCCEED),
             dbgOnOff(MP_DEBUG_CHEAT_NO_RANDOM_ENCOUNTERS),
             dbgOnOff(MP_DEBUG_CHEAT_INSTA_KILL));
+        snprintf(status3, sizeof(status3), "Hostile: %s",
+            dbgOnOff(MP_DEBUG_CHEAT_KILL_HOSTILE));
         windowDrawText(win, status1, 0,
             (kDbgCheatWindowWidth - fontGetStringWidth(status1)) / 2, 135, COLOR_WHITE);
         windowDrawText(win, status2, 0,
             (kDbgCheatWindowWidth - fontGetStringWidth(status2)) / 2, 151, COLOR_WHITE);
+        windowDrawText(win, status3, 0,
+            (kDbgCheatWindowWidth - fontGetStringWidth(status3)) / 2, 167, COLOR_WHITE);
         if (gMpActive && gMpIsClient && !gDbgClientCheatsEnabled) {
             const char* blocked = "CHEATS DISABLED BY HOST";
             windowDrawText(win, blocked, 0,
-                (kDbgCheatWindowWidth - fontGetStringWidth(blocked)) / 2, 167, COLOR_WHITE);
+                (kDbgCheatWindowWidth - fontGetStringWidth(blocked)) / 2, 183, COLOR_WHITE);
         }
         windowRefresh(win);
         renderPresent();
         MpTick();
+        mouseShowCursor();
 
         int keyCode = inputGetInput();
         switch (keyCode) {
         case KEY_ESCAPE:
+            debugFilePrint("MPDBG: modal close via ESC menu='cheat-toggles'");
         case DBG_BTN_CHEAT_BACK:
             keepGoing = false;
             break;
@@ -399,6 +422,9 @@ void dbgCheatModal()
             break;
         case DBG_BTN_CHEAT_INSTA_KILL:
             dbgToggleCheat(MP_DEBUG_CHEAT_INSTA_KILL);
+            break;
+        case DBG_BTN_CHEAT_HOSTILE:
+            dbgToggleCheat(MP_DEBUG_CHEAT_KILL_HOSTILE);
             break;
         default:
             break;
@@ -650,9 +676,11 @@ int dbgSubmenuModal(int win, const SubmenuCallbacks* cb, int current)
         // cannot reach while this modal blocks it. Same pattern as the vote
         // modal. No-ops when not in a session.
         MpTick();
+        mouseShowCursor();
         int keyCode = inputGetInput();
         switch (keyCode) {
         case KEY_ESCAPE:
+            debugFilePrint("MPDBG: modal close via ESC menu='submenu-cycler'");
             rc = 0;
             break;
         case DBG_BTN_PREV:
@@ -722,6 +750,425 @@ void dbgSubmenuShow(const SubmenuCallbacks* cb)
             cb->modify(current, cb->incAmount);
             break;
         }
+    }
+
+    windowDestroy(win);
+}
+
+// Perk editor as a paged list: 3 columns x 14 rows = 42 perks per page;
+// PERK_COUNT (121) fits in 3 pages. The old single-item cycler needed up
+// to 120 clicks to reach the last perk.
+static void dbgPerkListShow()
+{
+    if (gDude == nullptr) {
+        return;
+    }
+    constexpr int kPerkCols = 3;
+    constexpr int kPerkRows = 14;
+    constexpr int kPerkPageSize = kPerkCols * kPerkRows;
+    constexpr int kPerkPages = (PERK_COUNT + kPerkPageSize - 1) / kPerkPageSize;
+    constexpr int kPerkWidth = 640;
+    constexpr int kPerkHeight = 460;
+
+    int page = 0;
+    int selected = 0;
+    int win = -1;
+
+    auto perkIndex = [&](int slot) {
+        return page * kPerkPageSize + slot;
+    };
+
+    auto rebuild = [&]() {
+        if (win != -1) {
+            windowDestroy(win);
+            win = -1;
+        }
+        int winX, winY;
+        dbgCenteredPos(kPerkWidth, kPerkHeight, &winX, &winY);
+        win = windowCreate(winX, winY, kPerkWidth, kPerkHeight, COLOR_BLACK,
+            WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
+        if (win == -1) {
+            return;
+        }
+        windowDrawBorder(win);
+        const char* title = "PERKS";
+        int titleX = (kPerkWidth - fontGetStringWidth(title)) / 2;
+        windowDrawText(win, title, 0, titleX, 6, COLOR_WHITE);
+
+        char status[128];
+        const char* selName = perkGetName(static_cast<Perk>(selected));
+        int selRank = perkGetRank(gDude, static_cast<Perk>(selected));
+        snprintf(status, sizeof(status), "Page %d/%d   Selected: %s [%d]",
+            page + 1, kPerkPages,
+            selName != nullptr ? selName : "?", selRank);
+        windowDrawText(win, status, 0, 30, 28, COLOR_WHITE);
+
+        for (int slot = 0; slot < kPerkPageSize; slot++) {
+            int perk = perkIndex(slot);
+            if (perk >= PERK_COUNT) {
+                break;
+            }
+            const char* name = perkGetName(static_cast<Perk>(perk));
+            if (name == nullptr) {
+                continue;
+            }
+            int rank = perkGetRank(gDude, static_cast<Perk>(perk));
+            char label[40];
+            if (rank > 0) {
+                // 24 chars keeps the widest labels inside their column slot.
+                snprintf(label, sizeof(label), "%.24s [%d]", name, rank);
+            } else {
+                snprintf(label, sizeof(label), "%.24s", name);
+            }
+            int col = slot % kPerkCols;
+            int row = slot / kPerkCols;
+            _win_register_text_button(win, 30 + col * 210, 62 + row * 24,
+                -1, -1, -1, DBG_BTN_PERK_ROW_BASE + slot, label, 0);
+        }
+        _win_register_text_button(win, 30, 410, -1, -1, -1, DBG_BTN_PERK_PREV, "Prev", 0);
+        _win_register_text_button(win, 170, 410, -1, -1, -1, DBG_BTN_PERK_NEXT, "Next", 0);
+        _win_register_text_button(win, 330, 410, -1, -1, -1, DBG_BTN_PERK_DEC, "Remove", 0);
+        _win_register_text_button(win, 530, 410, -1, -1, -1, DBG_BTN_PERK_BACK, "Back", 0);
+        windowRefresh(win);
+    };
+
+    rebuild();
+    if (win == -1) {
+        return;
+    }
+
+    bool keepGoing = true;
+    while (keepGoing) {
+        sharedFpsLimiter.mark();
+        // Keep the session alive behind the modal (same pattern as every
+        // other debug modal).
+        MpTick();
+        mouseShowCursor();
+        int keyCode = inputGetInput();
+        switch (keyCode) {
+        case KEY_ESCAPE:
+            debugFilePrint("MPDBG: modal close via ESC menu='perks'");
+        case DBG_BTN_PERK_BACK:
+            keepGoing = false;
+            break;
+        case DBG_BTN_PERK_PREV:
+            page = (page + kPerkPages - 1) % kPerkPages;
+            selected = perkIndex(0);
+            rebuild();
+            break;
+        case DBG_BTN_PERK_NEXT:
+            page = (page + 1) % kPerkPages;
+            selected = perkIndex(0);
+            rebuild();
+            break;
+        case DBG_BTN_PERK_DEC:
+            perkRemove(gDude, static_cast<Perk>(selected));
+            debugFilePrint("MPDBG: perk remove index=%d name='%s'",
+                selected, perkGetName(static_cast<Perk>(selected)));
+            rebuild();
+            break;
+        default:
+            if (keyCode >= DBG_BTN_PERK_ROW_BASE
+                && keyCode < DBG_BTN_PERK_ROW_BASE + kPerkPageSize) {
+                int perk = perkIndex(keyCode - DBG_BTN_PERK_ROW_BASE);
+                if (perk >= 0 && perk < PERK_COUNT) {
+                    selected = perk;
+                    perkAddForce(gDude, static_cast<Perk>(perk));
+                    debugFilePrint("MPDBG: perk add index=%d name='%s'",
+                        perk, perkGetName(static_cast<Perk>(perk)));
+                    rebuild();
+                }
+            }
+            break;
+        }
+        renderPresent();
+        sharedFpsLimiter.throttle();
+    }
+
+    if (win != -1) {
+        windowDestroy(win);
+    }
+}
+
+// Trait editor: all 16 traits in one 2-column list (Bloody Mess lives here —
+// it is a trait, not a perk). Click toggles the trait in/out of the two
+// selected slots (slot 1 replaced when both are full).
+static void dbgTraitListShow()
+{
+    if (gDude == nullptr) {
+        return;
+    }
+    constexpr int kTraitCols = 2;
+    constexpr int kTraitRows = 8;
+    constexpr int kTraitWidth = kDbgWindowWidth;
+    constexpr int kTraitHeight = 305;
+
+    int winX, winY;
+    dbgCenteredPos(kTraitWidth, kTraitHeight, &winX, &winY);
+    int win = windowCreate(winX, winY, kTraitWidth, kTraitHeight, COLOR_BLACK,
+        WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
+    if (win == -1) {
+        return;
+    }
+    windowDrawBorder(win);
+    const char* title = "TRAITS";
+    int titleX = (kTraitWidth - fontGetStringWidth(title)) / 2;
+    windowDrawText(win, title, 0, titleX, 6, COLOR_WHITE);
+
+    auto drawStatus = [&]() {
+        Trait selected[2];
+        traitsGetSelected(&selected[0], &selected[1]);
+        char status[128];
+        if (selected[0] != TRAIT_INVALID && selected[1] != TRAIT_INVALID) {
+            snprintf(status, sizeof(status), "Selected: %s, %s",
+                traitGetName(selected[0]), traitGetName(selected[1]));
+        } else if (selected[0] != TRAIT_INVALID) {
+            snprintf(status, sizeof(status), "Selected: %s",
+                traitGetName(selected[0]));
+        } else {
+            snprintf(status, sizeof(status), "Selected: none");
+        }
+        windowFill(win, 8, 24, kTraitWidth - 16, 20, COLOR_BLACK);
+        windowDrawText(win, status, 0, 30, 28, COLOR_WHITE);
+    };
+
+    auto rebuild = [&]() {
+        for (int index = 0; index < TRAIT_COUNT; index++) {
+            Trait trait = static_cast<Trait>(index);
+            const char* name = traitGetName(trait);
+            if (name == nullptr) {
+                continue;
+            }
+            Trait selected[2];
+            traitsGetSelected(&selected[0], &selected[1]);
+            char label[40];
+            if (selected[0] == trait) {
+                snprintf(label, sizeof(label), "%.24s [1]", name);
+            } else if (selected[1] == trait) {
+                snprintf(label, sizeof(label), "%.24s [2]", name);
+            } else {
+                snprintf(label, sizeof(label), "%.24s", name);
+            }
+            int col = index % kTraitCols;
+            int row = index / kTraitCols;
+            _win_register_text_button(win, 30 + col * 210, 62 + row * 24,
+                -1, -1, -1, DBG_BTN_TRAIT_ROW_BASE + index, label, 0);
+        }
+        _win_register_text_button(win, 330, 260, -1, -1, -1, DBG_BTN_TRAIT_BACK, "Back", 0);
+        drawStatus();
+        windowRefresh(win);
+    };
+
+    rebuild();
+
+    bool keepGoing = true;
+    while (keepGoing) {
+        sharedFpsLimiter.mark();
+        MpTick();
+        mouseShowCursor();
+        int keyCode = inputGetInput();
+        switch (keyCode) {
+        case KEY_ESCAPE:
+            debugFilePrint("MPDBG: modal close via ESC menu='traits'");
+        case DBG_BTN_TRAIT_BACK:
+            keepGoing = false;
+            break;
+        default:
+            if (keyCode >= DBG_BTN_TRAIT_ROW_BASE
+                && keyCode < DBG_BTN_TRAIT_ROW_BASE + TRAIT_COUNT) {
+                Trait trait = static_cast<Trait>(keyCode - DBG_BTN_TRAIT_ROW_BASE);
+                Trait selected[2];
+                traitsGetSelected(&selected[0], &selected[1]);
+                if (selected[0] == trait) {
+                    selected[0] = selected[1];
+                    selected[1] = TRAIT_INVALID;
+                } else if (selected[1] == trait) {
+                    selected[1] = TRAIT_INVALID;
+                } else if (selected[0] == TRAIT_INVALID) {
+                    selected[0] = trait;
+                } else {
+                    selected[1] = trait;
+                }
+                traitsSetSelected(selected[0], selected[1]);
+                debugFilePrint("MPDBG: traits set %d %d (%s %s)",
+                    (int)selected[0], (int)selected[1],
+                    traitGetName(selected[0]) != nullptr ? traitGetName(selected[0]) : "none",
+                    traitGetName(selected[1]) != nullptr ? traitGetName(selected[1]) : "none");
+                rebuild();
+            }
+            break;
+        }
+        renderPresent();
+        sharedFpsLimiter.throttle();
+    }
+
+    windowDestroy(win);
+}
+
+// Kill Hostile: one-shot action — executes once and self-clears. Kills every
+// living critter on the map that is hostile to the local player's team (the
+// same predicate the end-combat check uses), excluding the co-op players.
+static int dbgKillHostiles()
+{
+    int executed = 0;
+    Object* probe = objectFindFirst();
+    while (probe != nullptr) {
+        if (objectTypeFromFid(probe->fid) == OBJ_TYPE_CRITTER
+            && probe != gDude
+            && !MpIsCoopPlayerCritter(probe)
+            && critterGetStat(probe, STAT_CURRENT_HIT_POINTS) > 0
+            && (probe->data.critter.combat.results & DAM_DEAD) == 0
+            && probe->data.critter.combat.team != gDude->data.critter.combat.team) {
+            critterKill(probe, ANIM_INVALID, true);
+            executed++;
+        }
+        probe = objectFindNext();
+    }
+    debugFilePrint("MPDBG: kill hostile executed=%d", executed);
+    return executed;
+}
+
+// Item browser: every item proto in paged form; a row click hands the item
+// to the local dude in the current quantity. Stays open for repeated grabs.
+static void dbgItemBrowserShow()
+{
+    // One-time enumeration: FO2 item protos are contiguous from 0x1000001;
+    // stop after a run of 16 misses.
+    static std::vector<int> sItemPids;
+    if (sItemPids.empty()) {
+        int miss = 0;
+        for (int n = 1; n <= 4096 && miss < 16; n++) {
+            Proto* proto = nullptr;
+            if (protoGetProto(0x1000000 + n, &proto) == 0) {
+                sItemPids.push_back(0x1000000 + n);
+                miss = 0;
+            } else {
+                miss++;
+            }
+        }
+        debugFilePrint("MPDBG: item browser enumerated %zu pids", sItemPids.size());
+    }
+    if (sItemPids.empty()) {
+        win_timed_msg("No item protos found", COLOR_RED);
+        return;
+    }
+
+    constexpr int kWindowWidth = 640;
+    constexpr int kWindowHeight = 460;
+    constexpr int kCols = 3;
+    constexpr int kRows = 14;
+    constexpr int kPageSize = kCols * kRows;
+    const int pageCount = (int)((sItemPids.size() + kPageSize - 1) / kPageSize);
+
+    int qty = 1;
+    int page = 0;
+    int selected = -1;
+
+    auto rebuild = [&]() {
+        int winX;
+        int winY;
+        dbgCenteredPos(kWindowWidth, kWindowHeight, &winX, &winY);
+        int win = windowCreate(winX, winY, kWindowWidth, kWindowHeight,
+            COLOR_BLACK, WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
+        if (win == -1) {
+            return -1;
+        }
+        windowDrawBorder(win);
+        const char* title = "ITEMS";
+        windowDrawText(win, title, 0,
+            (kWindowWidth - fontGetStringWidth(title)) / 2, 6, COLOR_WHITE);
+
+        char status[96];
+        snprintf(status, sizeof(status), "Page %d/%d   Qty: %d",
+            page + 1, pageCount, qty);
+        windowFill(win, 8, 24, kWindowWidth - 16, 24, COLOR_BLACK);
+        windowDrawText(win, status, 0,
+            (kWindowWidth - fontGetStringWidth(status)) / 2, 28, COLOR_WHITE);
+
+        int start = page * kPageSize;
+        for (int slot = 0; slot < kPageSize; slot++) {
+            int index = start + slot;
+            if (index >= (int)sItemPids.size()) {
+                break;
+            }
+            int pid = sItemPids[index];
+            char* name = protoGetName(pid);
+            char label[40];
+            if (name == nullptr || name[0] == '\0') {
+                snprintf(label, sizeof(label), "pid 0x%X", pid);
+            } else {
+                snprintf(label, sizeof(label), "%.22s", name);
+            }
+            int col = slot % kCols;
+            int row = slot / kCols;
+            _win_register_text_button(win, 30 + col * 210, 62 + row * 24, -1, -1, -1,
+                DBG_BTN_ITEM_ROW_BASE + slot, label, 0);
+        }
+        _win_register_text_button(win, 30, 410, -1, -1, -1, DBG_BTN_ITEM_PREV, "Prev", 0);
+        _win_register_text_button(win, 170, 410, -1, -1, -1, DBG_BTN_ITEM_NEXT, "Next", 0);
+        _win_register_text_button(win, 330, 410, -1, -1, -1, DBG_BTN_ITEM_QTY, "Qty", 0);
+        _win_register_text_button(win, 530, 410, -1, -1, -1, DBG_BTN_ITEM_BACK, "Back", 0);
+        windowRefresh(win);
+        return win;
+    };
+
+    int win = rebuild();
+    if (win == -1) {
+        return;
+    }
+
+    bool keepGoing = true;
+    while (keepGoing) {
+        sharedFpsLimiter.mark();
+        MpTick();
+        mouseShowCursor();
+        int keyCode = inputGetInput();
+        switch (keyCode) {
+        case KEY_ESCAPE:
+            debugFilePrint("MPDBG: modal close via ESC menu='items'");
+        case DBG_BTN_ITEM_BACK:
+            keepGoing = false;
+            break;
+        case DBG_BTN_ITEM_PREV:
+            page = (page + pageCount - 1) % pageCount;
+            selected = -1;
+            windowDestroy(win);
+            win = rebuild();
+            break;
+        case DBG_BTN_ITEM_NEXT:
+            page = (page + 1) % pageCount;
+            selected = -1;
+            windowDestroy(win);
+            win = rebuild();
+            break;
+        case DBG_BTN_ITEM_QTY:
+            qty = (qty == 1) ? 10 : (qty == 10) ? 100 : 1;
+            windowDestroy(win);
+            win = rebuild();
+            break;
+        default:
+            if (keyCode >= DBG_BTN_ITEM_ROW_BASE && keyCode < DBG_BTN_ITEM_ROW_BASE + kPageSize) {
+                int slot = keyCode - DBG_BTN_ITEM_ROW_BASE;
+                int index = page * kPageSize + slot;
+                if (index < (int)sItemPids.size()) {
+                    selected = index;
+                    dbgGiveItem(sItemPids[index], qty);
+                    // Keep the window; just refresh the status beat.
+                    char status[96];
+                    snprintf(status, sizeof(status), "Page %d/%d   Qty: %d   Gave %d x%s",
+                        page + 1, pageCount, qty, qty,
+                        protoGetName(sItemPids[index]) != nullptr
+                            ? protoGetName(sItemPids[index]) : "");
+                    windowFill(win, 8, 24, kWindowWidth - 16, 24, COLOR_BLACK);
+                    windowDrawText(win, status, 0,
+                        (kWindowWidth - fontGetStringWidth(status)) / 2, 28, COLOR_WHITE);
+                    windowRefresh(win);
+                }
+            }
+            break;
+        }
+        renderPresent();
+        sharedFpsLimiter.throttle();
     }
 
     windowDestroy(win);
@@ -812,6 +1259,14 @@ void MpDebugCheatsTick()
     }
 
     if (gMpActive && gMpIsHost) {
+        // Kill Hostile is one-shot: execute and clear the local flag before
+        // it is mirrored into players[0] below (the cleared copy then rides
+        // the next flag push instead of re-triggering).
+        if ((gDbgCheatFlags & MP_DEBUG_CHEAT_KILL_HOSTILE) != 0) {
+            dbgKillHostiles();
+            gDbgCheatFlags &= ~MP_DEBUG_CHEAT_KILL_HOSTILE;
+            gDbgCheatFlagsDirty = true;
+        }
         gMpSession.players[0].debugCheatFlags = gDbgCheatFlags;
         for (int index = 0; index < NET_MAX_PLAYERS; index++) {
             MultiplayerPlayer* player = &gMpSession.players[index];
@@ -820,14 +1275,32 @@ void MpDebugCheatsTick()
                 // host's own flags are never gated.
                 uint32_t flags = player->isLocal || gDbgClientCheatsEnabled
                     ? player->debugCheatFlags : 0;
+                // A remote Kill Hostile request fires once and clears.
+                if ((flags & MP_DEBUG_CHEAT_KILL_HOSTILE) != 0) {
+                    dbgKillHostiles();
+                    flags &= ~MP_DEBUG_CHEAT_KILL_HOSTILE;
+                    if (!player->isLocal) {
+                        player->debugCheatFlags = flags;
+                    }
+                }
                 dbgApplyCheats(player->obj, flags);
             }
         }
     } else if (gMpActive && gMpIsClient) {
+        // The KILL bit rode the send above; the host executes and clears its
+        // copy. Clear the local bit so it never re-sends.
+        if ((gDbgCheatFlags & MP_DEBUG_CHEAT_KILL_HOSTILE) != 0) {
+            gDbgCheatFlags &= ~MP_DEBUG_CHEAT_KILL_HOSTILE;
+            gDbgCheatFlagsDirty = true;
+        }
         if (gDbgClientCheatsEnabled) {
             dbgApplyCheats(gDude, gDbgCheatFlags);
         }
     } else {
+        if ((gDbgCheatFlags & MP_DEBUG_CHEAT_KILL_HOSTILE) != 0) {
+            dbgKillHostiles();
+            gDbgCheatFlags &= ~MP_DEBUG_CHEAT_KILL_HOSTILE;
+        }
         dbgApplyCheats(gDude, gDbgCheatFlags);
     }
 }
@@ -890,6 +1363,7 @@ static void dbgCheatsMenuShow()
     _win_register_text_button(win, 30, 255, -1, -1, -1, DBG_BTN_PERKS, "Perks...", 0);
     _win_register_text_button(win, 170, 255, -1, -1, -1, DBG_BTN_CHEATS, "Cheat Options...", 0);
     _win_register_text_button(win, 30, 280, -1, -1, -1, DBG_BTN_CLOSE, "Close", 0);
+    _win_register_text_button(win, 170, 280, -1, -1, -1, DBG_BTN_TRAITS, "Traits...", 0);
     windowRefresh(win);
 
     SubmenuCallbacks skillsCb {
@@ -897,9 +1371,6 @@ static void dbgCheatsMenuShow()
     };
     SubmenuCallbacks statsCb {
         "STATS", 7, 1, dbgStatName, dbgStatValue, dbgStatModify,
-    };
-    SubmenuCallbacks perksCb {
-        "PERKS", PERK_COUNT, 1, dbgPerkName, dbgPerkValue, dbgPerkModify,
     };
     SubmenuCallbacks itemsCb {
         "ITEMS", (int)(sizeof(kDbgItems) / sizeof(kDbgItems[0])), 5,
@@ -917,9 +1388,11 @@ static void dbgCheatsMenuShow()
             // main loop cannot reach while this modal blocks it. Same pattern
             // as the vote modal. No-ops when not in a session.
             MpTick();
+            mouseShowCursor();
             int keyCode = inputGetInput();
             switch (keyCode) {
             case KEY_ESCAPE:
+                debugFilePrint("MPDBG: modal close via ESC menu='cheats-menu'");
                 rc = 0;
                 break;
             case DBG_BTN_MONEY_1000:
@@ -941,6 +1414,7 @@ static void dbgCheatsMenuShow()
             case DBG_BTN_STATS:
             case DBG_BTN_PERKS:
             case DBG_BTN_ITEMS:
+            case DBG_BTN_TRAITS:
             case DBG_BTN_CHEATS:
             case DBG_BTN_CLOSE:
                 rc = keyCode;
@@ -1025,10 +1499,13 @@ static void dbgCheatsMenuShow()
             dbgSubmenuShow(&statsCb);
             break;
         case DBG_BTN_PERKS:
-            dbgSubmenuShow(&perksCb);
+            dbgPerkListShow();
             break;
         case DBG_BTN_ITEMS:
-            dbgSubmenuShow(&itemsCb);
+            dbgItemBrowserShow();
+            break;
+        case DBG_BTN_TRAITS:
+            dbgTraitListShow();
             break;
         case DBG_BTN_CHEATS:
             dbgCheatModal();
@@ -1122,9 +1599,11 @@ void MpDebugMenuShow()
             // main loop cannot reach while this modal blocks it. Same pattern
             // as the vote modal. No-ops when not in a session.
             MpTick();
+            mouseShowCursor();
             int keyCode = inputGetInput();
             switch (keyCode) {
             case KEY_ESCAPE:
+                debugFilePrint("MPDBG: modal close via ESC menu='f11-settings'");
                 rc = 0;
                 break;
             case DBG_BTN_CHEATS:
@@ -1483,10 +1962,12 @@ void MpDebugModelPickerShow()
         // Keep the session alive behind the modal (profile sync runs from
         // MpTick, so a picked skin propagates even while the picker is open).
         MpTick();
+        mouseShowCursor();
 
         int keyCode = inputGetInput();
         switch (keyCode) {
         case KEY_ESCAPE:
+            debugFilePrint("MPDBG: modal close via ESC menu='skin-picker'");
         case DBG_BTN_SKIN_BACK:
             keepGoing = false;
             break;

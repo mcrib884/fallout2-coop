@@ -2737,10 +2737,12 @@ void programInterpret(Program* program, int numInstructions)
         // nested vanilla call (dialog/movie/animation) that never returns.
         if (gMpIsClient && gMpAllowClientScriptExec) {
             static int sMpClientExecCount = 0;
-            if (sMpClientExecCount < 300 || (sMpClientExecCount % 1000) == 0) {
-                debugFilePrint("MPSCR: client exec #%d opcode=0x%X ip=%d",
-                    sMpClientExecCount, opcode, program->instructionPointer);
-            }
+            // (Commented: per-opcode cutscene spam on the client — the
+            // deferred map-enter script logs every opcode it runs.)
+            // if (sMpClientExecCount < 300 || (sMpClientExecCount % 1000) == 0) {
+            //     debugFilePrint("MPSCR: client exec #%d opcode=0x%X ip=%d",
+            //         sMpClientExecCount, opcode, program->instructionPointer);
+            // }
             sMpClientExecCount++;
         }
 

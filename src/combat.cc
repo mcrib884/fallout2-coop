@@ -5026,6 +5026,11 @@ static int attackDetermineToHit(Object* attacker, int tile, Object* defender, Hi
     }
 
     toHit = scriptHooks_ToHit(attacker, defender, tile, hitMode, hitLocation, toHit, toHitUncapped, useDistance);
+    // Co-op cheat: always succeed — every attack connects regardless of
+    // modifiers, the 95% cap, or script hooks (100 beats any 1..100 roll).
+    if (MpDebugCheatEnabled(attacker, MP_DEBUG_CHEAT_ALWAYS_SUCCEED)) {
+        toHit = 100;
+    }
     return toHit;
 }
 

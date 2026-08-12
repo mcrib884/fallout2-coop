@@ -179,7 +179,7 @@ static void mpCombatCreateCards()
         // Right above the bottom interface bar, never over it.
         int y = screenGetHeight() - INTERFACE_BAR_HEIGHT - MP_COMBAT_CARD_HEIGHT - 8;
         int win = windowCreate(x, y, MP_COMBAT_CARD_WIDTH, MP_COMBAT_CARD_HEIGHT,
-            COLOR_BLACK, WINDOW_MOVE_ON_TOP);
+            COLOR_BLACK, WINDOW_DONT_MOVE_TOP);
         if (win == -1) {
             continue;
         }

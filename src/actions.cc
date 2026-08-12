@@ -200,6 +200,12 @@ AnimationType pickDeathAnim(Object* attacker, Object* defender, Object* weapon, 
         return checkDeathAnim(defender, attackerAnimation, VIOLENCE_LEVEL_MAXIMUM_BLOOD, hitFromFront);
     }
 
+    // (Commented: Bloody Mess trace — gore confirmed working, see git history.)
+    // debugFilePrint("MPDBG death: attackerPid=0x%X defenderPid=0x%X model=%d dmg=%d violence=%d atkAnim=%d dmgType=%d front=%d",
+    //     attacker->pid, defender->pid, defender->fid & 0xFFF, damage,
+    //     settings.preferences.violence_level, (int)attackerAnimation,
+    //     (int)weaponGetDamageType(attacker, weapon), hitFromFront ? 1 : 0);
+
     int normalViolenceLevelDamageThreshold = 15;
     int maximumBloodViolenceLevelDamageThreshold = 45;
 
@@ -271,7 +277,11 @@ AnimationType pickDeathAnim(Object* attacker, Object* defender, Object* weapon, 
         deathAnim = ANIM_FALL_FRONT;
     }
 
-    return checkDeathAnim(defender, deathAnim, VIOLENCE_LEVEL_NONE, hitFromFront);
+    AnimationType finalAnim = checkDeathAnim(defender, deathAnim, VIOLENCE_LEVEL_NONE, hitFromFront);
+    // (Commented: Bloody Mess trace.)
+    // debugFilePrint("MPDBG death: chosen=%d bloodyMess=%d final=%d",
+    //     (int)deathAnim, hasBloodyMess ? 1 : 0, (int)finalAnim);
+    return finalAnim;
 }
 
 // Returns anim if art for it exists and selected violence_level >= minViolenceLevel.
@@ -287,6 +297,8 @@ AnimationType checkDeathAnim(Object* obj, AnimationType anim, int minViolenceLev
         if (artExists(fid)) {
             return anim;
         }
+        // (Commented: Bloody Mess trace — gore confirmed working.)
+        // debugFilePrint("MPDBG death: art missing anim=%d fid=0x%X - falling back", (int)anim, fid);
     }
 
     if (hitFromFront) {

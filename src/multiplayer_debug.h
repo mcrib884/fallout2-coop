@@ -19,6 +19,7 @@ enum MpDebugCheatFlags : uint32_t {
     MP_DEBUG_CHEAT_ALWAYS_SUCCEED = 1u << 4,
     MP_DEBUG_CHEAT_NO_RANDOM_ENCOUNTERS = 1u << 5,
     MP_DEBUG_CHEAT_INSTA_KILL = 1u << 6,
+    MP_DEBUG_CHEAT_KILL_HOSTILE = 1u << 7,
 };
 
 constexpr uint32_t MP_DEBUG_CHEAT_ALL = MP_DEBUG_CHEAT_GOD_MODE
@@ -27,7 +28,8 @@ constexpr uint32_t MP_DEBUG_CHEAT_ALL = MP_DEBUG_CHEAT_GOD_MODE
     | MP_DEBUG_CHEAT_UNLIMITED_CARRY
     | MP_DEBUG_CHEAT_ALWAYS_SUCCEED
     | MP_DEBUG_CHEAT_NO_RANDOM_ENCOUNTERS
-    | MP_DEBUG_CHEAT_INSTA_KILL;
+    | MP_DEBUG_CHEAT_INSTA_KILL
+    | MP_DEBUG_CHEAT_KILL_HOSTILE;
 
 // Per-player co-op debug menu (F11): money, XP, HP, skill points, level,
 // skills, SPECIAL stats and perks — every player edits their own sheet.

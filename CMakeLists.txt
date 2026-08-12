@@ -232,6 +232,8 @@ set(FALLOUT_ENGINE_SOURCES
     "src/multiplayer_chat.h"
     "src/multiplayer_log.cc"
     "src/multiplayer_log.h"
+    "src/multiplayer_worldmap.cc"
+    "src/multiplayer_worldmap.h"
     "src/net.cc"
     "src/net.h"
     "src/nevs.cc"

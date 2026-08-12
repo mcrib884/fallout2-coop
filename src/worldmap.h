@@ -1,6 +1,8 @@
 #ifndef WORLD_MAP_H
 #define WORLD_MAP_H
 
+#include <stdint.h>
+
 #include "db.h"
 
 namespace fallout {
@@ -244,6 +246,7 @@ int wmWorldMap_reset();
 int wmWorldMap_save(File* stream);
 int wmWorldMap_load(File* stream);
 int wmMapMaxCount();
+int wmAreaCount();
 int wmMapIdxToName(int mapIdx, char* dest, size_t size);
 int wmMapMatchNameToIdx(char* name);
 bool wmMapIdxIsSaveable(int mapIdx);
@@ -260,6 +263,10 @@ bool wmMapPipboyActive();
 int wmMapMarkVisited(int mapIdx);
 int wmMapMarkMapEntranceState(int mapIdx, int elevation, int state);
 void wmWorldMap();
+// Co-op: the shared worldmap modal loop, 0 = world map, 1 = town map. The
+// client mirror runs it read-only (gMpWorldmapReadOnly gates every travel
+// input inside the loop).
+int wmWorldMapFunc(int a1);
 int wmCheckGameAreaEvents();
 int wmSetupRandomEncounter();
 bool wmEvalTileNumForPlacement(int tile);
@@ -296,6 +303,10 @@ bool wmStartWorldPosIsConfigured();
 void wmSetPartyCurArea(int areaIdx);
 void wmClearPartyWalking();
 void wmSetPartyWorldPos(int x, int y);
+// Co-op: travel part of the party state (destination, walking flag, car
+// flag). Host reads for the WORLDMAP_STATE broadcast; client mirror writes.
+void wmGetPartyTravelState(int* destXPtr, int* destYPtr, bool* walkingPtr, bool* inCarPtr);
+void wmSetPartyTravelState(int destX, int destY, bool walking, bool inCar);
 void wmCarSetCurrentArea(int area);
 void wmForceEncounter(int map, unsigned int flags);
 void wmSetScriptWorldMapMulti(float value);
@@ -306,6 +317,52 @@ const char* wmGetCurrentTerrainName();
 void wmSetTownTitle(int areaIdx, const char* title);
 void wmRemoveTownNames(bool state);
 int worldmapGetWindow();
+
+// --- Co-op: discovery sync (host snapshots/diffs, client applies) ---
+// The host's walking marks subtiles visited/known and areas visited; the
+// client mirror applies the same marks so its fog and town list match the
+// host's, and its own save persists them.
+#define WM_DISCOVERY_SUBTILES_PER_TILE (42) // 6 rows x 7 columns
+#define WM_DISCOVERY_BYTES_PER_TILE (11)    // 42 states * 2 bits, packed
+#define WM_DISCOVERY_CHANGE_MAX (512)
+// Sentinel tile in the incremental change stream: an area state change
+// (subX = areaIdx, subY = visitedState, state = state).
+#define WM_DISCOVERY_AREA_CHANGE_TILE (0xFFFF)
+
+typedef struct WmDiscoveryChange {
+    uint16_t tile;
+    uint8_t subX;
+    uint8_t subY;
+    uint8_t state;
+} WmDiscoveryChange;
+
+// Host: (re)set the diff baseline to the current discovery state. Call after
+// shipping a full snapshot.
+void wmDiscoveryBaseline();
+// Host: diff the current discovery state against the baseline and append the
+// changes (subtitle marks + area marks, the latter tagged with
+// WM_DISCOVERY_AREA_CHANGE_TILE) up to `capacity`. Sets *fullDirty when more
+// changes exist than fit — the caller should send a full snapshot instead.
+void wmDiscoveryTakeChanges(WmDiscoveryChange* changes, int capacity, int* countPtr, bool* fullDirty);
+// Host: pack the FULL discovery state (2-bit packed subtile states per tile,
+// then visited/state pairs per area) for the initial sync. Returns the tile
+// count written (0 when the buffers are too small).
+int wmDiscoveryBuildFull(uint8_t* subtileBits, int subtileBitsCapacity,
+    uint8_t* areaVisited, uint8_t* areaState, int areaCapacity);
+// Client: apply a full snapshot to the local worldmap (tileCount = tiles in
+// the packet; areaCount = visited/state pairs present).
+void wmDiscoveryApplyFull(const uint8_t* subtileBits, int tileCount,
+    const uint8_t* areaVisited, const uint8_t* areaState, int areaCount);
+// Client: apply incremental changes (area marks tagged with
+// WM_DISCOVERY_AREA_CHANGE_TILE) to the local worldmap.
+void wmDiscoveryApplyChanges(const WmDiscoveryChange* changes, int count);
+
+// --- Co-op: encounter state (host -> client mirror) ---
+// The encounter selection (wmRndEncounterPick) only runs on the host; the
+// client's deferred map-enter needs the ids to run wmSetupRandomEncounter
+// and spawn its own copy of the encounter critters.
+void wmGetEncounterState(int* mapId, int* tableId, int* entryId);
+void wmSetEncounterState(int mapId, int tableId, int entryId);
 
 } // namespace fallout
 

@@ -10,6 +10,14 @@ namespace fallout {
 // message was sent, 0 when it was dismissed without sending.
 int MpChatShow();
 
+// Open the transcript-only chat modal: the full history, live appends, and
+// scrolling — but no input field, no text capture, no send keys (ESC closes;
+// UP/DOWN/PGUP/PGDN and the wheel still scroll). Auto-closes after
+// MP_CHAT_TRANSCRIPT_IDLE_MS of silence so it never covers the game
+// indefinitely. Used for auto-opens: the worldmap, and in-game when the
+// sender's critter is off this player's screen. Always returns 0.
+int MpChatShowTranscriptOnly();
+
 // Combat-log mirror: every line the display monitor actually shows is
 // appended to the chat history verbatim (1:1). Called from
 // displayMonitorAddMessage on the same path that draws the green monitor,
@@ -36,6 +44,15 @@ void MpChatHostOnMessage(uint8_t senderNetId, const char* text);
 // Client side: the host relayed another player's message. Appends locally
 // and floats above the sender's critter.
 void MpChatClientOnIncoming(uint8_t senderNetId, const char* text);
+
+// Co-op: open the TRANSCRIPT-ONLY chat modal when a message arrived while
+// the worldmap is up, or in-game when the sender's critter is not on this
+// player's screen (the float would be invisible there). The worldmap loop
+// and the main loop call the check every frame — never from inside a
+// NetHostService callback (it blocks).
+void MpChatAutoOpenCheck();
+// Cancel a pending auto-open (the worldmap ended before the check ran).
+void MpChatAutoOpenCancel();
 
 } // namespace fallout
 

@@ -35,7 +35,10 @@
 #include "item.h"
 #include "kb.h"
 #include "memory.h"
+#include "multiplayer_chat.h"
 #include "multiplayer_debug.h"
+#include "multiplayer.h"
+#include "multiplayer_worldmap.h"
 #include "mouse.h"
 #include "object.h"
 #include "palette.h"
@@ -532,7 +535,7 @@ static int wmRStartSlotInit(MapStartPointInfo* rsp);
 static int wmMatchEntranceFromMap(int areaIdx, int mapIdx, int* entranceIdxPtr);
 static int wmMatchEntranceElevFromMap(int areaIdx, int mapIdx, int elevation, int* entranceIdxPtr);
 static int wmMatchAreaFromMap(int mapIdx, int* areaIdxPtr);
-static int wmWorldMapFunc(int a1);
+int wmWorldMapFunc(int a1);
 static int wmInterfaceCenterOnParty();
 static void wmCheckGameEvents();
 static void wmClearRandomEncounterState();
@@ -3131,6 +3134,11 @@ int wmMapMaxCount()
     return wmMaxMapNum;
 }
 
+int wmAreaCount()
+{
+    return wmMaxAreaNum;
+}
+
 // 0x4BF974 wmMapIdxToName
 int wmMapIdxToName(int mapIdx, char* dest, size_t size)
 {
@@ -3359,7 +3367,8 @@ void wmWorldMap()
 }
 
 // 0x4BFE10 wmWorldMapFunc
-static int wmWorldMapFunc(int a1)
+// Co-op: non-static so the client's read-only mirror can run the same loop.
+int wmWorldMapFunc(int a1)
 {
     ScopedGameMode gm(GameMode::kWorldmap);
 
@@ -3388,6 +3397,16 @@ static int wmWorldMapFunc(int a1)
         sharedFpsLimiter.mark();
 
         int keyCode = inputGetInput();
+
+        // Co-op: pump the network every worldmap frame. The host keeps the
+        // session alive (broadcasts player states, game time, worldmap state)
+        // while traveling, and the client mirror receives those packets.
+        if (gMpActive) {
+            MpTick();
+            // A chat message landed while traveling — surface it now (the
+            // check never runs inside NetHostService; MpChatShow blocks).
+            MpChatAutoOpenCheck();
+        }
 
         // SFALL: WorldmapLoopHook.
         sfall_gl_scr_process_worldmap();
@@ -3426,7 +3445,10 @@ static int wmWorldMapFunc(int a1)
 
         int mouseEvent = mouseGetEvent();
 
-        if (wmGenData.isWalking && wmTravelTickDue(now)) {
+        // Co-op client mirror: the host walks, the client only renders. The
+        // whole walking block (steps, car extras, healing, time increment,
+        // random encounters) is host-side.
+        if (!gMpWorldmapReadOnly && wmGenData.isWalking && wmTravelTickDue(now)) {
             wmPartyWalkingStep();
 
             if (wmGenData.isInCar) {
@@ -3522,14 +3544,29 @@ static int wmWorldMapFunc(int a1)
                         }
 
                         wmFadeOut();
-                        mapLoadById(mapToLoad);
+                        // Co-op: the host loads through the sync pipeline
+                        // (prepare / load / finish / MAP_CHANGED / FULL_SYNC).
+                        if (gMpIsHost) {
+                            MpWorldmapHostLoadMap(mapToLoad);
+                        } else {
+                            mapLoadById(mapToLoad);
+                        }
                     }
                     break;
                 }
             }
         }
 
-        if ((mouseEvent & MOUSE_EVENT_LEFT_BUTTON_DOWN) != 0 && (mouseEvent & MOUSE_EVENT_LEFT_BUTTON_REPEAT) == 0) {
+        // Co-op host: ship the authoritative party state after walking steps,
+        // arrival, or car state changes. Throttled inside the broadcast.
+        if (gMpIsHost && gMpWorldmapActive) {
+            MpWorldmapBroadcastState(false);
+        }
+
+        // Co-op client mirror: no travel input. Press/up clicks and quick
+        // travel are host-only; the client keeps quit keys, scrolling, HOME,
+        // the wheel, and chat.
+        if (!gMpWorldmapReadOnly && (mouseEvent & MOUSE_EVENT_LEFT_BUTTON_DOWN) != 0 && (mouseEvent & MOUSE_EVENT_LEFT_BUTTON_REPEAT) == 0) {
             if (mouseHitTestInWindow(wmBkWin, WM_VIEW_X, WM_VIEW_Y, WM_VIEW_WIDTH + WM_VIEW_X, WM_VIEW_HEIGHT + WM_VIEW_Y)) {
                 if (!wmGenData.isWalking && !mousePressed && abs(wmGenData.worldPosX - worldX) < 5 && abs(wmGenData.worldPosY - worldY) < 5) {
                     mousePressed = true;
@@ -3541,7 +3578,7 @@ static int wmWorldMapFunc(int a1)
             }
         }
 
-        if ((mouseEvent & MOUSE_EVENT_LEFT_BUTTON_UP) != 0) {
+        if (!gMpWorldmapReadOnly && (mouseEvent & MOUSE_EVENT_LEFT_BUTTON_UP) != 0) {
             if (mousePressed) {
                 mousePressed = false;
                 wmInterfaceRefresh();
@@ -3585,13 +3622,23 @@ static int wmWorldMapFunc(int a1)
                         }
 
                         wmFadeOut();
-                        mapLoadById(map);
+                        // Co-op: the host loads through the sync pipeline.
+                        if (gMpIsHost) {
+                            MpWorldmapHostLoadMap(map);
+                        } else {
+                            mapLoadById(map);
+                        }
                         break;
                     }
                 }
             } else {
                 if (mouseHitTestInWindow(wmBkWin, WM_VIEW_X, WM_VIEW_Y, WM_VIEW_WIDTH + WM_VIEW_X, WM_VIEW_HEIGHT + WM_VIEW_Y)) {
                     wmPartyInitWalking(worldX, worldY);
+                    // Co-op host: the destination changed — ship it now so
+                    // the client mirror shows the new target immediately.
+                    if (gMpIsHost && gMpWorldmapActive) {
+                        MpWorldmapBroadcastState(true);
+                    }
                 }
 
                 mousePressed = false;
@@ -3601,7 +3648,10 @@ static int wmWorldMapFunc(int a1)
         // NOTE: Uninline.
         wmInterfaceScrollTabsUpdate();
 
-        if (keyCode == KEY_UPPERCASE_T || keyCode == KEY_LOWERCASE_T) {
+        // Co-op: T is chat everywhere, worldmap included (host and mirror).
+        if (gMpActive && (keyCode == KEY_UPPERCASE_T || keyCode == KEY_LOWERCASE_T)) {
+            MpChatShow();
+        } else if (keyCode == KEY_UPPERCASE_T || keyCode == KEY_LOWERCASE_T) {
             if (!wmGenData.isWalking && wmGenData.currentAreaId != -1) {
                 CityInfo* city = &(wmAreaInfoList[wmGenData.currentAreaId]);
                 if (city->visitedState == 2 && city->mapFid != -1) {
@@ -3647,7 +3697,7 @@ static int wmWorldMapFunc(int a1)
             wmInterfaceScrollTabsStart(-WM_TOWN_LIST_SLOT_HEIGHT);
         } else if (keyCode == KEY_CTRL_ARROW_DOWN) {
             wmInterfaceScrollTabsStart(WM_TOWN_LIST_SLOT_HEIGHT);
-        } else if (keyCode >= KEY_CTRL_F1 && keyCode <= KEY_CTRL_F7) {
+        } else if (!gMpWorldmapReadOnly && keyCode >= KEY_CTRL_F1 && keyCode <= KEY_CTRL_F7) {
             int quickDestinationIndex = wmGenData.tabsOffsetY / WM_TOWN_LIST_SLOT_HEIGHT + (keyCode - KEY_CTRL_F1);
             if (quickDestinationIndex < wmLabelCount) {
                 int areaIdx = wmLabelList[quickDestinationIndex];
@@ -3663,6 +3713,10 @@ static int wmWorldMapFunc(int a1)
                         int destX = city->x + citySizeDescription->frmImage.getWidth() / 2 - WM_VIEW_X;
                         int destY = city->y + citySizeDescription->frmImage.getHeight() / 2 - WM_VIEW_Y;
                         wmPartyInitWalking(destX, destY);
+                        // Co-op host: destination changed — ship it now.
+                        if (gMpIsHost && gMpWorldmapActive) {
+                            MpWorldmapBroadcastState(true);
+                        }
                         mousePressed = 0;
                     }
                 }
@@ -3687,7 +3741,17 @@ static int wmWorldMapFunc(int a1)
             }
         }
 
-        if (map != -1 || rc == -1) {
+        // Co-op client mirror: repaint the worldmap surface when the host's
+        // STATE packet changed party position/destination/car state.
+        if (gMpWorldmapReadOnly && gMpWorldmapDirty) {
+            gMpWorldmapDirty = false;
+            wmInterfaceRefresh();
+        }
+
+        // Co-op: the host left the worldmap (EXIT received on the mirror, or
+        // the map change that follows it) — leave the loop. Single player
+        // keeps the vanilla break conditions only.
+        if (map != -1 || rc == -1 || (gMpActive && !gMpWorldmapActive)) {
             break;
         }
 
@@ -3780,7 +3844,12 @@ static int wmRndEncounterOccurred(int* mapToLoadPtr)
             }
 
             wmFadeOut();
-            mapLoadById(MAP_IN_GAME_MOVIE1);
+            // Co-op: the host loads through the sync pipeline.
+            if (gMpIsHost) {
+                MpWorldmapHostLoadMap(MAP_IN_GAME_MOVIE1);
+            } else {
+                mapLoadById(MAP_IN_GAME_MOVIE1);
+            }
             return 1;
         }
     }
@@ -3804,7 +3873,12 @@ static int wmRndEncounterOccurred(int* mapToLoadPtr)
             wmBlinkRndEncounterIcon(special);
         }
 
-        mapLoadById(wmForceEncounterMapId);
+        // Co-op: the host loads through the sync pipeline.
+        if (gMpIsHost) {
+            MpWorldmapHostLoadMap(wmForceEncounterMapId);
+        } else {
+            mapLoadById(wmForceEncounterMapId);
+        }
 
         wmForceEncounterMapId = -1;
         wmForceEncounterFlags = 0;
@@ -4211,7 +4285,16 @@ int wmSetupRandomEncounter()
                                 combat.overrideAttackResults = 0;
 
                                 _caiSetupTeamCombat(critter, prevCritter);
-                                _scripts_request_combat_locked(&combat);
+                                // Co-op: the client's mirror spawn is visual
+                                // only — it must never request combat. The
+                                // critters it just created are client-local
+                                // (no netIds yet), so the request the combat
+                                // path would forward to the host carries
+                                // garbage references; the host owns combat
+                                // initiation from its own authoritative spawn.
+                                if (!gMpIsClient) {
+                                    _scripts_request_combat_locked(&combat);
+                                }
                             }
                         } else {
                             if (!isInCombat()) {
@@ -4228,7 +4311,12 @@ int wmSetupRandomEncounter()
                                 combat.overrideAttackResults = 0;
 
                                 _caiSetupTeamCombat(gDude, prevCritter);
-                                _scripts_request_combat_locked(&combat);
+                                // Co-op: see the two-sub-entry branch above —
+                                // the client's mirror spawn never requests
+                                // combat (host-authoritative).
+                                if (!gMpIsClient) {
+                                    _scripts_request_combat_locked(&combat);
+                                }
                             }
                         }
                     }
@@ -7452,9 +7540,60 @@ void wmSetPartyWorldPos(int x, int y)
     wmGenData.worldPosY = y;
 }
 
+// Co-op: the travel part of the party state (destination target + walking
+// flag + car flag). Read by the host's WORLDMAP_STATE broadcast, written by
+// the client's mirror apply.
+void wmGetPartyTravelState(int* destXPtr, int* destYPtr, bool* walkingPtr, bool* inCarPtr)
+{
+    if (destXPtr != nullptr) {
+        *destXPtr = wmGenData.walkDestinationX;
+    }
+    if (destYPtr != nullptr) {
+        *destYPtr = wmGenData.walkDestinationY;
+    }
+    if (walkingPtr != nullptr) {
+        *walkingPtr = wmGenData.isWalking;
+    }
+    if (inCarPtr != nullptr) {
+        *inCarPtr = wmGenData.isInCar;
+    }
+}
+
+void wmSetPartyTravelState(int destX, int destY, bool walking, bool inCar)
+{
+    wmGenData.walkDestinationX = destX;
+    wmGenData.walkDestinationY = destY;
+    wmGenData.isWalking = walking;
+    wmGenData.isInCar = inCar;
+}
+
 void wmSetPartyCurArea(int areaIdx)
 {
     wmGenData.currentAreaId = cityIsValid(areaIdx) ? areaIdx : -1;
+}
+
+// Co-op: encounter selection state accessors. The host picks the encounter
+// (wmRndEncounterPick) right before loading its map; the client mirror needs
+// the same ids to spawn its own encounter critters after its deferred
+// map-enter script.
+void wmGetEncounterState(int* mapId, int* tableId, int* entryId)
+{
+    if (mapId != nullptr) {
+        *mapId = wmGenData.encounterMapId;
+    }
+    if (tableId != nullptr) {
+        *tableId = wmGenData.encounterTableId;
+    }
+    if (entryId != nullptr) {
+        *entryId = wmGenData.encounterEntryId;
+    }
+}
+
+void wmSetEncounterState(int mapId, int tableId, int entryId)
+{
+    wmGenData.encounterMapId = mapId;
+    wmGenData.encounterTableId = tableId;
+    wmGenData.encounterEntryId = entryId;
 }
 
 void wmClearPartyWalking()
@@ -7483,6 +7622,204 @@ void wmForceEncounter(int map, unsigned int flags)
         wmForceEncounterFlags |= (1 << 31);
     } else {
         wmForceEncounterFlags &= ~(1 << 31);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Co-op: worldmap discovery sync.
+//
+// The host's walking marks subtiles known/visited (wmMarkSubTileRadiusVisited
+// per step) and areas visited/known (arrival, special encounters, scripts).
+// The client mirror never takes travel action, so its fog and town list would
+// stay frozen at its own save state. These helpers snapshot/diff the host
+// state (WORLDMAP_DISCOVERY) and apply it onto the client's local arrays —
+// the client's own worldmap save then persists exactly what the host has.
+// ---------------------------------------------------------------------------
+
+static uint8_t* gWmDiscoverySentSubTiles = nullptr;
+static int gWmDiscoverySentTileCount = 0;
+static uint8_t gWmDiscoverySentAreaVisited[CITY_COUNT];
+static uint8_t gWmDiscoverySentAreaState[CITY_COUNT];
+
+void wmDiscoveryBaseline()
+{
+    if (wmMaxTileNum <= 0 || wmTileInfoList == nullptr || wmAreaInfoList == nullptr) {
+        return;
+    }
+
+    int byteCount = wmMaxTileNum * WM_DISCOVERY_SUBTILES_PER_TILE;
+    if (gWmDiscoverySentSubTiles == nullptr || gWmDiscoverySentTileCount < wmMaxTileNum) {
+        gWmDiscoverySentSubTiles = (uint8_t*)internal_realloc(gWmDiscoverySentSubTiles, byteCount);
+        gWmDiscoverySentTileCount = wmMaxTileNum;
+    }
+
+    uint8_t* out = gWmDiscoverySentSubTiles;
+    for (int tileIndex = 0; tileIndex < wmMaxTileNum; tileIndex++) {
+        TileInfo* tileInfo = &(wmTileInfoList[tileIndex]);
+        for (int column = 0; column < SUBTILE_GRID_HEIGHT; column++) {
+            for (int row = 0; row < SUBTILE_GRID_WIDTH; row++) {
+                *out++ = (uint8_t)tileInfo->subtiles[column][row].state;
+            }
+        }
+    }
+
+    int areaCount = wmMaxAreaNum < CITY_COUNT ? wmMaxAreaNum : CITY_COUNT;
+    for (int i = 0; i < areaCount; i++) {
+        gWmDiscoverySentAreaVisited[i] = (uint8_t)wmAreaInfoList[i].visitedState;
+        gWmDiscoverySentAreaState[i] = (uint8_t)wmAreaInfoList[i].state;
+    }
+    if (areaCount < CITY_COUNT) {
+        memset(gWmDiscoverySentAreaVisited + areaCount, 0, CITY_COUNT - areaCount);
+        memset(gWmDiscoverySentAreaState + areaCount, 0, CITY_COUNT - areaCount);
+    }
+}
+
+void wmDiscoveryTakeChanges(WmDiscoveryChange* changes, int capacity, int* countPtr, bool* fullDirty)
+{
+    *countPtr = 0;
+    *fullDirty = false;
+    if (wmMaxTileNum <= 0 || wmTileInfoList == nullptr || gWmDiscoverySentSubTiles == nullptr) {
+        return;
+    }
+
+    int count = 0;
+    for (int tileIndex = 0; tileIndex < wmMaxTileNum; tileIndex++) {
+        TileInfo* tileInfo = &(wmTileInfoList[tileIndex]);
+        const uint8_t* sent = gWmDiscoverySentSubTiles + (size_t)tileIndex * WM_DISCOVERY_SUBTILES_PER_TILE;
+        for (int column = 0; column < SUBTILE_GRID_HEIGHT; column++) {
+            for (int row = 0; row < SUBTILE_GRID_WIDTH; row++) {
+                uint8_t state = (uint8_t)tileInfo->subtiles[column][row].state;
+                if (state == sent[column * SUBTILE_GRID_WIDTH + row]) {
+                    continue;
+                }
+                if (count >= capacity) {
+                    *fullDirty = true;
+                    return;
+                }
+                changes[count].tile = (uint16_t)tileIndex;
+                changes[count].subX = (uint8_t)row;
+                changes[count].subY = (uint8_t)column;
+                changes[count].state = state;
+                count++;
+            }
+        }
+    }
+
+    // The shipped changes are now the baseline.
+    for (int i = 0; i < count; i++) {
+        size_t index = (size_t)changes[i].tile * WM_DISCOVERY_SUBTILES_PER_TILE
+            + changes[i].subY * SUBTILE_GRID_WIDTH + changes[i].subX;
+        gWmDiscoverySentSubTiles[index] = changes[i].state;
+    }
+
+    int areaCount = wmMaxAreaNum < CITY_COUNT ? wmMaxAreaNum : CITY_COUNT;
+    for (int i = 0; i < areaCount; i++) {
+        uint8_t visited = (uint8_t)wmAreaInfoList[i].visitedState;
+        uint8_t state = (uint8_t)wmAreaInfoList[i].state;
+        if (visited == gWmDiscoverySentAreaVisited[i] && state == gWmDiscoverySentAreaState[i]) {
+            continue;
+        }
+        if (count >= capacity) {
+            *fullDirty = true;
+            return;
+        }
+        changes[count].tile = WM_DISCOVERY_AREA_CHANGE_TILE;
+        changes[count].subX = (uint8_t)i;
+        changes[count].subY = visited;
+        changes[count].state = state;
+        count++;
+        gWmDiscoverySentAreaVisited[i] = visited;
+        gWmDiscoverySentAreaState[i] = state;
+    }
+
+    *countPtr = count;
+}
+
+int wmDiscoveryBuildFull(uint8_t* subtileBits, int subtileBitsCapacity,
+    uint8_t* areaVisited, uint8_t* areaState, int areaCapacity)
+{
+    if (wmMaxTileNum <= 0 || wmTileInfoList == nullptr || wmAreaInfoList == nullptr) {
+        return 0;
+    }
+    if (subtileBitsCapacity < wmMaxTileNum * WM_DISCOVERY_BYTES_PER_TILE) {
+        return 0;
+    }
+
+    memset(subtileBits, 0, wmMaxTileNum * WM_DISCOVERY_BYTES_PER_TILE);
+    for (int tileIndex = 0; tileIndex < wmMaxTileNum; tileIndex++) {
+        TileInfo* tileInfo = &(wmTileInfoList[tileIndex]);
+        uint8_t* packed = subtileBits + (size_t)tileIndex * WM_DISCOVERY_BYTES_PER_TILE;
+        for (int column = 0; column < SUBTILE_GRID_HEIGHT; column++) {
+            for (int row = 0; row < SUBTILE_GRID_WIDTH; row++) {
+                int slot = column * SUBTILE_GRID_WIDTH + row;
+                uint8_t state = (uint8_t)tileInfo->subtiles[column][row].state;
+                packed[slot / 4] |= (uint8_t)(state << ((slot % 4) * 2));
+            }
+        }
+    }
+
+    int areaCount = wmMaxAreaNum < CITY_COUNT ? wmMaxAreaNum : CITY_COUNT;
+    if (areaCapacity < areaCount) {
+        areaCount = areaCapacity;
+    }
+    for (int i = 0; i < areaCount; i++) {
+        areaVisited[i] = (uint8_t)wmAreaInfoList[i].visitedState;
+        areaState[i] = (uint8_t)wmAreaInfoList[i].state;
+    }
+
+    return wmMaxTileNum;
+}
+
+void wmDiscoveryApplyFull(const uint8_t* subtileBits, int tileCount,
+    const uint8_t* areaVisited, const uint8_t* areaState, int areaCount)
+{
+    if (wmMaxTileNum <= 0 || wmTileInfoList == nullptr || wmAreaInfoList == nullptr) {
+        return;
+    }
+
+    int applyTiles = tileCount < wmMaxTileNum ? tileCount : wmMaxTileNum;
+    if (applyTiles > 0 && subtileBits != nullptr) {
+        for (int tileIndex = 0; tileIndex < applyTiles; tileIndex++) {
+            TileInfo* tileInfo = &(wmTileInfoList[tileIndex]);
+            const uint8_t* packed = subtileBits + (size_t)tileIndex * WM_DISCOVERY_BYTES_PER_TILE;
+            for (int column = 0; column < SUBTILE_GRID_HEIGHT; column++) {
+                for (int row = 0; row < SUBTILE_GRID_WIDTH; row++) {
+                    int slot = column * SUBTILE_GRID_WIDTH + row;
+                    uint8_t state = (uint8_t)((packed[slot / 4] >> ((slot % 4) * 2)) & 0x3);
+                    tileInfo->subtiles[column][row].state = state;
+                }
+            }
+        }
+    }
+
+    int applyAreas = areaCount < CITY_COUNT ? areaCount : CITY_COUNT;
+    if (applyAreas > wmMaxAreaNum) {
+        applyAreas = wmMaxAreaNum;
+    }
+    for (int i = 0; i < applyAreas; i++) {
+        wmAreaInfoList[i].visitedState = areaVisited[i];
+        wmAreaInfoList[i].state = areaState[i];
+    }
+}
+
+void wmDiscoveryApplyChanges(const WmDiscoveryChange* changes, int count)
+{
+    if (changes == nullptr || wmTileInfoList == nullptr || wmAreaInfoList == nullptr) {
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        const WmDiscoveryChange* c = &changes[i];
+        if (c->tile == WM_DISCOVERY_AREA_CHANGE_TILE) {
+            if (c->subX < wmMaxAreaNum) {
+                wmAreaInfoList[c->subX].visitedState = c->subY;
+                wmAreaInfoList[c->subX].state = c->state;
+            }
+            continue;
+        }
+        if (c->tile >= wmMaxTileNum || c->subY >= SUBTILE_GRID_HEIGHT || c->subX >= SUBTILE_GRID_WIDTH) {
+            continue;
+        }
+        wmTileInfoList[c->tile].subtiles[c->subY][c->subX].state = c->state;
     }
 }
 

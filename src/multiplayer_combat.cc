@@ -1600,6 +1600,16 @@ void MpCombatTick()
             gPendingStartAttacker = nullptr;
             gPendingStartTargetNetId = 0;
 
+            // The request was queued when combat was off, but a local start
+            // (e.g. the host's own encounter spawn requesting combat) may
+            // have won the race since. Re-entering _combat mid-fight rebuilds
+            // the teams from a stale/incomplete csd and half the combatants
+            // can fall out — never double-start.
+            if (gMpCombat.inCombat || isInCombat()) {
+                MpLogAlways(MP_LOG_COMBAT, "host deferred start skipped (combat already active)");
+                return;
+            }
+
             if (attacker != nullptr && MpCombatIsPlayerCritter(attacker)
                 && !critterIsDead(attacker)) {
                 CombatStartData csd;

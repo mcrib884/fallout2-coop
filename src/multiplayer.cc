@@ -1208,6 +1208,51 @@ static void mpClientApplyMapMetadata()
     mpShowClientPlayer(gDude);
 }
 
+// Client object-state backlog: object states that arrive while the client
+// is not yet PLAYING (map transition / sync) used to be silently dropped —
+// that is exactly how encounter critters vanished: the host's reliable
+// first broadcasts arrive inside the client's SYNCING window and were
+// discarded, so the objects only materialized when later per-tick updates
+// (unreliable) flowed after the flip. Queued states are applied once the
+// session reaches PLAYING.
+static NetMapFullSyncObjectPayload gMpClientPendingObjStates[128];
+static int gMpClientPendingObjStateCount = 0;
+
+static void mpClientQueueObjState(const NetMapFullSyncObjectPayload* st)
+{
+    if (gMpClientPendingObjStateCount >= 128) {
+        // Drop the oldest; the per-tick unreliable updates will carry fresh
+        // states for it once the session is PLAYING.
+        memmove(&gMpClientPendingObjStates[0], &gMpClientPendingObjStates[1],
+            sizeof(NetMapFullSyncObjectPayload) * (128 - 1));
+        gMpClientPendingObjStateCount--;
+        MpLogAlways(MP_LOG_SYNC, "client obj state queue overflow (dropped oldest)");
+    }
+    gMpClientPendingObjStates[gMpClientPendingObjStateCount++] = *st;
+    MpLog(MP_LOG_SYNC, "client obj state queued (state=%d) netId=%u pid=0x%X tile=%d fid=0x%X",
+        gMpSession.state, st->netId, st->pid, st->tile, st->fid);
+}
+
+static void mpClientDrainObjStates()
+{
+    if (gMpClientPendingObjStateCount <= 0) {
+        return;
+    }
+    int applied = 0;
+    int skipped = 0;
+    for (int i = 0; i < gMpClientPendingObjStateCount; i++) {
+        const NetMapFullSyncObjectPayload* st = &gMpClientPendingObjStates[i];
+        if (MpFindObjByNetId(st->netId) != nullptr) {
+            skipped++; // already materialized by a newer update
+            continue;
+        }
+        MpApplyObjectState(st);
+        applied++;
+    }
+    MpLog(MP_LOG_SYNC, "client obj state drain applied=%d skipped=%d", applied, skipped);
+    gMpClientPendingObjStateCount = 0;
+}
+
 static void mpClientTryFinishMapSync()
 {
     if (!gMpIsClient || gMpSession.state != MP_STATE_CLIENT_SYNCING) {
@@ -1329,6 +1374,10 @@ static void mpClientTryFinishMapSync()
     }
     tileWindowRefreshFull();
     gMpSession.state = MP_STATE_CLIENT_PLAYING;
+    // Object states that arrived during the transition window (reliable
+    // first broadcasts for host-spawned objects) apply now that the session
+    // is PLAYING.
+    mpClientDrainObjStates();
     mpJoinBlackoutHide();
 }
 
@@ -2815,6 +2864,20 @@ void MpTick()
         MpLog(MP_LOG_SYNC, "client deferred map script enter done sid=%d rc=%d", gMapSid, execRc);
         // debugFilePrint("MAPDBG ambient after client deferred map script enter=%d",
         //     lightGetAmbientIntensity());
+        // Mirror the host's post-script encounter spawn. The encounter ids
+        // were shipped in the final worldmap state (MpWorldmapHostLoadMap
+        // broadcasts them right before MAP_CHANGED); -1 means no encounter.
+        // The state-apply stash survives whatever resets wmGenData in the
+        // transition window; fall back to wmGenData for robustness.
+        int encMap = -1, encTable = -1, encEntry = -1;
+        mpWorldmapClientTakeEncounterState(&encMap, &encTable, &encEntry);
+        if (encMap == -1) {
+            wmGetEncounterState(&encMap, &encTable, &encEntry);
+        } else {
+            wmSetEncounterState(encMap, encTable, encEntry);
+        }
+        MpLog(MP_LOG_WORLDMAP, "client encounter setup map=%d table=%d entry=%d",
+            encMap, encTable, encEntry);
         if (wmSetupRandomEncounter() == -1) {
             debugPrint("\nError: couldn't set up random encounter after deferred client map enter!");
         }
@@ -4181,11 +4244,19 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             break;
         }
         case NET_PKT_OBJECT_STATE_UPDATE: {
-            if (payloadLen != sizeof(NetMapFullSyncObjectPayload)
-                || gMpSession.state != MP_STATE_CLIENT_PLAYING) {
+            if (payloadLen != sizeof(NetMapFullSyncObjectPayload)) {
+                MpLogAlways(MP_LOG_SYNC, "client obj state bad len=%zu", payloadLen);
                 return;
             }
-            MpApplyObjectState((const NetMapFullSyncObjectPayload*)payload);
+            const NetMapFullSyncObjectPayload* st = (const NetMapFullSyncObjectPayload*)payload;
+            if (gMpSession.state != MP_STATE_CLIENT_PLAYING) {
+                // Not PLAYING (map transition / syncing): queue instead of
+                // dropping — the state drains once the session flips.
+                mpClientQueueObjState(st);
+                return;
+            }
+            MpApplyObjectState(st);
+            mpClientDrainObjStates();
             break;
         }
         case NET_PKT_PLAYER_JOINED: {
@@ -4393,6 +4464,14 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
         }
         case NET_PKT_WORLDMAP_EXIT: {
             MpWorldmapOnExit();
+            break;
+        }
+        case NET_PKT_WORLDMAP_DISCOVERY: {
+            if (payloadLen < sizeof(NetWorldmapDiscoveryPayload)) {
+                MpLogAlways(MP_LOG_WORLDMAP, "client reject discovery bad length=%zu", payloadLen);
+                return;
+            }
+            MpWorldmapOnDiscovery(payload, payloadLen);
             break;
         }
         default:
@@ -5114,40 +5193,20 @@ void MpBroadcastObjectStates()
                 || memcmp(&gMpHostObjectRecords[oldIndex].state, &state, sizeof(state)) != 0;
             MultiplayerPlayer* player = mpHostFindPlayerByObject(obj);
             if (changed && player == nullptr) {
-                // MPDIAG (temporary): watch critter state broadcasts to verify
-                // the dialogue speaker stays in the object stream.
-                // (Commented: per-frame spam — see git history.)
-                if (false && objectTypeFromFid(state.fid) == OBJ_TYPE_CRITTER) {
-                    static struct { uint32_t netId; uint32_t ms; uint32_t key; } last[32] = {};
-                    uint32_t nowMs = getTicks();
-                    uint32_t key = state.fid ^ (state.tile << 7) ^ (state.flags << 15) ^ (state.hp << 3);
-                    int found = -1;
-                    int freeSlot = -1;
-                    for (int d = 0; d < 32; d++) {
-                        if (last[d].netId == state.netId) {
-                            found = d;
-                            break;
-                        }
-                        if (freeSlot < 0 && last[d].netId == 0) {
-                            freeSlot = d;
-                        }
-                    }
-                    if (found >= 0) {
-                        if (nowMs - last[found].ms > 500 || key != last[found].key) {
-                            last[found].ms = nowMs;
-                            last[found].key = key;
-                            MpLog(MP_LOG_SYNC, "host broadcast netId=%u pid=0x%X tile=%d fid=0x%X flags=0x%X hp=%d",
-                                state.netId, state.pid, state.tile, state.fid, state.flags, state.hp);
-                        }
-                    } else if (freeSlot >= 0) {
-                        last[freeSlot].netId = state.netId;
-                        last[freeSlot].ms = nowMs;
-                        last[freeSlot].key = key;
-                        MpLog(MP_LOG_SYNC, "host broadcast netId=%u pid=0x%X tile=%d fid=0x%X flags=0x%X hp=%d (first)",
-                            state.netId, state.pid, state.tile, state.fid, state.flags, state.hp);
-                    }
+                // NEW objects ride the reliable channel: their first (and
+                // often only) broadcast is the client's one chance to learn
+                // the object exists — an unreliable drop would leave it
+                // permanently absent (runtime-spawned encounter critters
+                // were the first victim: spawned after the full sync, seen
+                // by the host, invisible on the client).
+                int broadcastChannel = oldIndex < 0
+                    ? NET_CHANNEL_RELIABLE
+                    : NET_CHANNEL_UNRELIABLE;
+                if (oldIndex < 0) {
+                    MpLog(MP_LOG_SYNC, "host object first broadcast netId=%u pid=0x%X tile=%d fid=0x%X elev=%d",
+                        state.netId, state.pid, state.tile, state.fid, state.elevation);
                 }
-                NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_UNRELIABLE,
+                NetBroadcastPacket(gMpSession.enetHost, broadcastChannel,
                     NET_PKT_OBJECT_STATE_UPDATE, &state, sizeof(state));
                 MpPerfAddCounter(MP_PERF_CNT_OBJ_CHANGED, 1);
                 MpPerfAddCounter(MP_PERF_CNT_OBJ_PKTS, 1);
@@ -5875,10 +5934,10 @@ static Object* mpApplyObjectStateInternal(const NetMapFullSyncObjectPayload* sta
         return nullptr;
     }
 
-    // MPDIAG (temporary): watch critter state applies to verify the dialogue
-    // speaker keeps a visible mirror on the client.
-    // (Commented: per-state spam — see git history.)
-    if (false && player == nullptr && objectTypeFromFid(state->fid) == OBJ_TYPE_CRITTER) {
+    // Co-op diagnostic (throttled): watch critter state applies so the
+    // encounter stream is verifiable end to end (host first-broadcast ->
+    // client apply). Fires at most once per 500ms per netId.
+    if (player == nullptr && objectTypeFromFid(state->fid) == OBJ_TYPE_CRITTER) {
         static struct { uint32_t netId; uint32_t ms; uint32_t key; } last[32] = {};
         uint32_t nowMs = getTicks();
         uint32_t key = state->fid ^ (state->tile << 7) ^ (state->flags << 15) ^ (state->hp << 3);

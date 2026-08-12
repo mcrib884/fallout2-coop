@@ -26,6 +26,7 @@
 #include "map.h"
 #include "mouse.h"
 #include "multiplayer.h"
+#include "multiplayer_chat.h"
 #include "multiplayer_menu.h"
 #include "multiplayer_perf.h"
 #include "object.h"
@@ -693,6 +694,12 @@ static void mainLoop()
         if (logFirstLoop) {
             MpLog(MP_LOG_LIFECYCLE, "first loop after MpTick");
         }
+
+        // Co-op: a chat line whose sender is off this player's screen opens
+        // the transcript-only chat (armed by the packet handler above; the
+        // check must run here, in the top-level loop, never inside
+        // NetHostService — the modal blocks).
+        MpChatAutoOpenCheck();
 
         // Co-op: edge indicators for remote players outside the viewport.
         MpDrawPlayerIndicators();

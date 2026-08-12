@@ -32,14 +32,17 @@
 #include "game.h"
 #include "game_sound.h"
 #include "input.h"
+#include "interface.h"
 #include "kb.h"
 #include "map.h"
 #include "mouse.h"
 #include "multiplayer.h"
 #include "multiplayer_debug.h"
 #include "multiplayer_log.h"
+#include "multiplayer_worldmap.h"
 #include "net.h"
 #include "obj_types.h"
+#include "scripts.h"
 #include "svga.h"
 #include "text_font.h"
 #include "text_object.h"
@@ -66,6 +69,11 @@ namespace {
 // How much darker the captured background becomes (0..255, 255 = opaque).
 #define MP_CHAT_DARKEN (128)
 
+// Transcript-only mode auto-closes after this many ms without a new line,
+// so it never covers the worldmap or the game indefinitely. Any appended
+// line (user message or combat-log mirror) resets the timer.
+#define MP_CHAT_TRANSCRIPT_IDLE_MS (8000)
+
 struct ChatLine {
     char text[MP_CHAT_LINE_LENGTH];
     bool isUser;
@@ -77,6 +85,10 @@ struct ChatLine {
 static ChatLine gChatLines[MP_CHAT_MAX_LINES];
 static int gChatCount = 0;
 static int gChatHead = 0;
+
+// Tick of the last appended line; the transcript modal's idle auto-close
+// counts from here (see MP_CHAT_TRANSCRIPT_IDLE_MS).
+static uint32_t gChatLastActivity = 0;
 
 // Scroll offset in lines; 0 = newest at the bottom.
 static int gChatScroll = 0;
@@ -103,6 +115,7 @@ void mpChatAppendLine(const ChatLine& line)
         gChatHead = (gChatHead + 1) % MP_CHAT_MAX_LINES;
     }
     gChatScroll = 0; // stick to the newest lines
+    gChatLastActivity = getTicks();
 }
 
 // The critter that owns [netId] on this side of the session. Client: the
@@ -157,6 +170,33 @@ int mpChatSenderColor(uint8_t netId)
         }
     }
     return COLOR_LIGHT_GREEN_3;
+}
+
+// True when the sender's critter is plausibly on this player's screen — the
+// message float would be visible there. Mirrors the nametag pass's own
+// guards (hidden object, elevation, screen anchor) with a ~half-tile pad so
+// a sprite poking into the viewport edge counts as visible.
+bool mpChatSenderOnScreen(uint8_t netId)
+{
+    Object* obj = mpChatSenderCritter(netId);
+    if (obj == nullptr || (obj->flags & OBJECT_HIDDEN) != 0
+        || !tileIsValid(obj->tile)) {
+        return false;
+    }
+    if (obj->elevation != gElevation) {
+        return false;
+    }
+    int sx;
+    int sy;
+    if (tileToScreenXY(obj->tile, &sx, &sy) == -1) {
+        return false;
+    }
+    sx += obj->x;
+    sy += obj->y;
+    const int marginX = 40; // about half a world tile (~80px wide)
+    const int marginY = 20; // about half a tile's height (~40px)
+    return sx >= -marginX && sx <= gSdlSurface->w + marginX
+        && sy >= -marginY && sy <= gSdlSurface->h + marginY;
 }
 
 // Max pixel width of a chat float in the world; anything longer is
@@ -436,7 +476,7 @@ void mpChatCaptureBackground(int x, int y, int width, int height)
 // next row), and a wrapping multi-line input field with a blinking caret on
 // the last row. Typing past the right edge cuts to a new row instead of
 // running off the window.
-void mpChatRedraw(int win, int width, int height)
+void mpChatRedraw(int win, int width, int height, bool transcriptOnly)
 {
     unsigned char* buffer = windowGetBuffer(win);
     if (buffer == nullptr || gChatBackground == nullptr) {
@@ -456,32 +496,36 @@ void mpChatRedraw(int win, int width, int height)
 
     // The input wraps like the history: when the typed text reaches the
     // right edge it continues on the next row. Its height decides how many
-    // history rows fit above it, so the wrap must run first.
+    // history rows fit above it, so the wrap must run first. Transcript-only
+    // mode has no input area — the history owns the whole window.
     bool caretVisible = (getTicks() % 800) < 400;
     char inputDisplay[MP_CHAT_MESSAGE_MAX_LENGTH + 4];
     short inputBeginnings[WORD_WRAP_MAX_COUNT];
-    snprintf(inputDisplay, sizeof(inputDisplay), "> %s", gChatInput);
-    int inputRows = mpChatWrapManual(inputDisplay, maxTextWidth, inputBeginnings);
-    if (inputRows < 1) {
-        inputRows = 1;
-    }
-    // A break right after a trailing space yields an empty final row
-    // (boundary == strlen); drop it so the caret always rides the last
-    // real text row, never a blank line.
-    while (inputRows > 1
-        && inputBeginnings[inputRows] <= inputBeginnings[inputRows - 1]) {
-        inputRows--;
-    }
-    // Cap the input area so the history keeps room; when the input grows
-    // past the cap the oldest rows scroll out of view, never the caret row.
-    const int maxInputRows = 4;
+    int inputRows = 0;
     int inputRowOffset = 0;
-    if (inputRows > maxInputRows) {
-        inputRowOffset = inputRows - maxInputRows;
-        inputRows = maxInputRows;
+    if (!transcriptOnly) {
+        snprintf(inputDisplay, sizeof(inputDisplay), "> %s", gChatInput);
+        inputRows = mpChatWrapManual(inputDisplay, maxTextWidth, inputBeginnings);
+        if (inputRows < 1) {
+            inputRows = 1;
+        }
+        // A break right after a trailing space yields an empty final row
+        // (boundary == strlen); drop it so the caret always rides the last
+        // real text row, never a blank line.
+        while (inputRows > 1
+            && inputBeginnings[inputRows] <= inputBeginnings[inputRows - 1]) {
+            inputRows--;
+        }
+        // Cap the input area so the history keeps room; when the input grows
+        // past the cap the oldest rows scroll out of view, never the caret row.
+        const int maxInputRows = 4;
+        if (inputRows > maxInputRows) {
+            inputRowOffset = inputRows - maxInputRows;
+            inputRows = maxInputRows;
+        }
     }
 
-    int inputHeight = inputRows * lineHeight + 6;
+    int inputHeight = transcriptOnly ? 0 : inputRows * lineHeight + 6;
     int visibleRows = (height - inputHeight - 4) / lineHeight;
     if (visibleRows < 1) {
         visibleRows = 1;
@@ -576,39 +620,42 @@ void mpChatRedraw(int win, int width, int height)
     // Input area: the wrapped rows sit at the bottom, the caret rides the
     // last row. Rows are drawn from inputBeginnings (separate from the
     // history's beginnings, which the wrap pass above reused per line).
-    unsigned char* inputArea = buffer + (size_t)(height - inputHeight) * width;
-    for (int drawnRow = 0; drawnRow < inputRows; drawnRow++) {
-        int row = inputRowOffset + drawnRow;
-        int rowStart = inputBeginnings[row];
-        int rowEnd = inputBeginnings[row + 1];
-        if (rowEnd > rowStart && inputDisplay[rowEnd - 1] == ' ') {
-            rowEnd--; // the wrap trims a trailing space from the row
-        }
-        if (rowEnd <= rowStart && drawnRow != inputRows - 1) {
-            continue;
-        }
-        // Row stride: lineHeight PIXEL rows per text row — a plain
-        // drawnRow*width would stack every row on the same pixel line.
-        unsigned char* inputRow = inputArea + (size_t)drawnRow * lineHeight * width;
-        if (drawnRow == inputRows - 1) {
-            // Final row: append the caret, then clip at the width limit.
-            // If the row is exactly full the caret falls off, but the next
-            // character wraps to a new row anyway.
-            int len = rowEnd - rowStart;
-            if (len < 0) {
-                len = 0;
+    // Transcript-only mode skips this entirely — no input, no caret.
+    if (!transcriptOnly) {
+        unsigned char* inputArea = buffer + (size_t)(height - inputHeight) * width;
+        for (int drawnRow = 0; drawnRow < inputRows; drawnRow++) {
+            int row = inputRowOffset + drawnRow;
+            int rowStart = inputBeginnings[row];
+            int rowEnd = inputBeginnings[row + 1];
+            if (rowEnd > rowStart && inputDisplay[rowEnd - 1] == ' ') {
+                rowEnd--; // the wrap trims a trailing space from the row
             }
-            char caretBuffer[MP_CHAT_MESSAGE_MAX_LENGTH + 8];
-            memcpy(caretBuffer, inputDisplay + rowStart, len);
-            caretBuffer[len] = caretVisible ? '|' : ' ';
-            caretBuffer[len + 1] = '\0';
-            mpChatTruncateToWidth(caretBuffer, maxTextWidth);
-            fontDrawText(inputRow + 4, caretBuffer, maxTextWidth, width, COLOR_WHITE);
-        } else {
-            char saved = inputDisplay[rowEnd];
-            inputDisplay[rowEnd] = '\0';
-            fontDrawText(inputRow + 4, inputDisplay + rowStart, maxTextWidth, width, COLOR_WHITE);
-            inputDisplay[rowEnd] = saved;
+            if (rowEnd <= rowStart && drawnRow != inputRows - 1) {
+                continue;
+            }
+            // Row stride: lineHeight PIXEL rows per text row — a plain
+            // drawnRow*width would stack every row on the same pixel line.
+            unsigned char* inputRow = inputArea + (size_t)drawnRow * lineHeight * width;
+            if (drawnRow == inputRows - 1) {
+                // Final row: append the caret, then clip at the width limit.
+                // If the row is exactly full the caret falls off, but the next
+                // character wraps to a new row anyway.
+                int len = rowEnd - rowStart;
+                if (len < 0) {
+                    len = 0;
+                }
+                char caretBuffer[MP_CHAT_MESSAGE_MAX_LENGTH + 8];
+                memcpy(caretBuffer, inputDisplay + rowStart, len);
+                caretBuffer[len] = caretVisible ? '|' : ' ';
+                caretBuffer[len + 1] = '\0';
+                mpChatTruncateToWidth(caretBuffer, maxTextWidth);
+                fontDrawText(inputRow + 4, caretBuffer, maxTextWidth, width, COLOR_WHITE);
+            } else {
+                char saved = inputDisplay[rowEnd];
+                inputDisplay[rowEnd] = '\0';
+                fontDrawText(inputRow + 4, inputDisplay + rowStart, maxTextWidth, width, COLOR_WHITE);
+                inputDisplay[rowEnd] = saved;
+            }
         }
     }
 
@@ -674,14 +721,23 @@ void mpChatAppendTextInput(const char* utf8)
     gChatInput[len] = '\0';
 }
 
-int MpChatShow()
+// Shared chat modal runner. transcriptOnly = passive transcript: full
+// history + live appends + scrolling, but no input field, no text capture,
+// no send keys, and an idle auto-close (MP_CHAT_TRANSCRIPT_IDLE_MS) so it
+// never covers the game indefinitely. Full mode keeps the vanilla behavior:
+// typing, Enter to send, ESC to dismiss.
+static int mpChatRunModal(bool transcriptOnly)
 {
     if (gChatWindow != -1 || gSdlSurface == nullptr) {
         return 0;
     }
 
-    const int winWidth = screenGetWidth() * 2 / 5;   // 2x the original 1/5 width
-    const int winHeight = screenGetHeight() * 3 / 8; // 2.25x the original 1/6 height
+    // Full mode: 2x the original 1/5 width, 2.25x the original 1/6 height.
+    // Transcript mode is shorter (1/4 screen) — it only shows history.
+    const int winWidth = screenGetWidth() * 2 / 5;
+    const int winHeight = transcriptOnly
+        ? screenGetHeight() / 4
+        : screenGetHeight() * 3 / 8;
     if (winWidth < 40 || winHeight < 30) {
         return 0;
     }
@@ -706,10 +762,16 @@ int MpChatShow()
     gChatScroll = 0;
     gChatInput[0] = '\0';
 
-    MpLog(MP_LOG_CHAT, "open x=%d y=%d w=%d h=%d", winX, winY, winWidth, winHeight);
+    MpLog(MP_LOG_CHAT, "open %s x=%d y=%d w=%d h=%d",
+        transcriptOnly ? "transcript" : "full", winX, winY, winWidth, winHeight);
 
     int sent = 0;
-    SDL_StartTextInput();
+    if (!transcriptOnly) {
+        SDL_StartTextInput();
+    }
+    // Idle auto-close base: count from open, not from the message that armed
+    // the open (it may have arrived long ago, e.g. deferred through a modal).
+    gChatLastActivity = getTicks();
     bool keepGoing = true;
     while (gChatWindow == win && keepGoing) {
         sharedFpsLimiter.mark();
@@ -720,33 +782,39 @@ int MpChatShow()
         // wrong (log proof: typing 'i' appended 0x27, the US apostrophe).
         // TEXTINPUT carries the layout-correct characters; KEYDOWN is used
         // only for the control keys, which sit on the same physical
-        // positions on every layout.
+        // positions on every layout. Transcript mode never starts text
+        // input and ignores TEXTINPUT/TYPE keys entirely.
         SDL_Event event;
         while (SDL_PollEvent(&event) != 0) {
             switch (event.type) {
             case SDL_TEXTINPUT:
-                mpChatAppendTextInput(event.text.text);
+                if (!transcriptOnly) {
+                    mpChatAppendTextInput(event.text.text);
+                }
                 break;
             case SDL_KEYDOWN:
                 switch (event.key.keysym.scancode) {
                 case SDL_SCANCODE_RETURN:
-                    if (gChatInput[0] != '\0') {
-                        MpLog(MP_LOG_CHAT, "send text='%s'", gChatInput);
-                        MpChatSendMessage(gChatInput);
-                        sent = 1;
+                    if (!transcriptOnly) {
+                        if (gChatInput[0] != '\0') {
+                            MpLog(MP_LOG_CHAT, "send text='%s'", gChatInput);
+                            MpChatSendMessage(gChatInput);
+                            sent = 1;
+                        }
+                        keepGoing = false;
                     }
-                    keepGoing = false;
                     break;
                 case SDL_SCANCODE_ESCAPE:
                     keepGoing = false; // close without sending
                     break;
-                case SDL_SCANCODE_BACKSPACE: {
-                    size_t len = strlen(gChatInput);
-                    if (len > 0) {
-                        gChatInput[len - 1] = '\0';
+                case SDL_SCANCODE_BACKSPACE:
+                    if (!transcriptOnly) {
+                        size_t len = strlen(gChatInput);
+                        if (len > 0) {
+                            gChatInput[len - 1] = '\0';
+                        }
                     }
                     break;
-                }
                 case SDL_SCANCODE_UP:
                     gChatScroll++;
                     break;
@@ -789,13 +857,45 @@ int MpChatShow()
             }
         }
 
+        // The chat must not stop the game (macu: "chat shouldnt block
+        // anything"): pump what the main loop pumps — minus input routing
+        // (the chat consumes keys via SDL directly, so inputGetInput is never
+        // called and the game keys stay dead while typing). Tickers advance
+        // animations and script timers, script requests (incl. combat) flow,
+        // pending map transitions proceed, and the network keeps broadcasting
+        // states — without this the host freezes the world for everyone and
+        // the client's clicks die on the host's blocked main loop.
+        tickersExecute();
+        scriptsHandleRequests();
+        mapHandleTransition();
         MpTick(); // live lines while the modal is up
-        mpChatRedraw(win, winWidth, winHeight);
+        MpDrawPlayerIndicators();
+
+        // Full redraw so the world visibly updates around the chat, then
+        // re-capture the chat region from the LIVE frame — the world moves
+        // under the darkened panel instead of showing the open-time snapshot.
+        Rect fullScreen;
+        fullScreen.left = 0;
+        fullScreen.top = 0;
+        fullScreen.right = screenGetWidth() - 1;
+        fullScreen.bottom = screenGetHeight() - 1;
+        windowRefreshAll(&fullScreen);
+        mpChatCaptureBackground(winX, winY, winWidth, winHeight);
+        mpChatRedraw(win, winWidth, winHeight, transcriptOnly);
         windowRefresh(win);
         renderPresent();
         sharedFpsLimiter.throttle();
+
+        // Transcript auto-close: a silence gap closes the window. Any line
+        // appended during the modal (MpTick above) resets the timer.
+        if (transcriptOnly && getTicksSince(gChatLastActivity) >= MP_CHAT_TRANSCRIPT_IDLE_MS) {
+            MpLog(MP_LOG_CHAT, "transcript idle close");
+            keepGoing = false;
+        }
     }
-    SDL_StopTextInput();
+    if (!transcriptOnly) {
+        SDL_StopTextInput();
+    }
 
     // Drain any SDL events still queued around the close, then reset the
     // engine's key-repeat bookkeeping. This is the reopen-loop root cause:
@@ -817,9 +917,27 @@ int MpChatShow()
     gChatWindow = -1;
     delete[] gChatBackground;
     gChatBackground = nullptr;
-    MpLog(MP_LOG_CHAT, "close input='%s' sent=%d", gChatInput, sent);
+    MpLog(MP_LOG_CHAT, "close %s input='%s' sent=%d",
+        transcriptOnly ? "transcript" : "full", gChatInput, sent);
     return sent;
 }
+
+int MpChatShow()
+{
+    return mpChatRunModal(false);
+}
+
+int MpChatShowTranscriptOnly()
+{
+    return mpChatRunModal(true);
+}
+
+// Auto-open: armed by the incoming-message handlers when a line lands while
+// the worldmap modal is up, or in-game when the sender's critter is off this
+// player's screen; consumed by the worldmap loop's / main loop's per-frame
+// check (never inside NetHostService — the modal blocks).
+static bool gChatAutoOpenWanted = false;
+static void mpChatNoteAutoOpen(uint8_t senderNetId);
 
 void MpChatAppendCombatLine(const char* text)
 {
@@ -913,6 +1031,7 @@ void MpChatHostOnMessage(uint8_t senderNetId, const char* text)
 
     mpChatAppendUserLine(senderNetId, text);
     mpChatFloatMessage(senderNetId, text);
+    mpChatNoteAutoOpen(senderNetId);
 
     // Forward to every other connected player. The sender already has its
     // own line and never gets an echo.
@@ -941,6 +1060,56 @@ void MpChatClientOnIncoming(uint8_t senderNetId, const char* text)
     MpLog(MP_LOG_CHAT, "client received netId=%u text='%s'", senderNetId, text);
     mpChatAppendUserLine(senderNetId, text);
     mpChatFloatMessage(senderNetId, text);
+    mpChatNoteAutoOpen(senderNetId);
+}
+
+// Arm the transcript auto-open when the incoming line is invisible to this
+// player: on the worldmap (no world view at all), or in-game when the
+// sender's critter is off this player's screen (the float would not show).
+// Own echoes are excluded — the typist is looking at their own text.
+static void mpChatNoteAutoOpen(uint8_t senderNetId)
+{
+    if (gChatWindow != -1 || !gMpActive) {
+        return;
+    }
+    if (senderNetId == 0 || senderNetId > NET_MAX_PLAYERS
+        || senderNetId == gMpSession.localNetId) {
+        return;
+    }
+    if (gMpWorldmapActive) {
+        gChatAutoOpenWanted = true;
+        return;
+    }
+    if (!mpChatSenderOnScreen(senderNetId)) {
+        gChatAutoOpenWanted = true;
+    }
+}
+
+void MpChatAutoOpenCheck()
+{
+    if (!gChatAutoOpenWanted) {
+        return;
+    }
+    gChatAutoOpenWanted = false;
+    if (!gMpWorldmapActive) {
+        // In-game auto-open only in normal world mode; a modal context
+        // (dialogue, barter, pipboy, ...) keeps the flag armed and the next
+        // main-loop check fires after the modal closes — the line is not
+        // lost, just deferred.
+        if (!interfaceBarEnabled()) {
+            gChatAutoOpenWanted = true;
+            return;
+        }
+        MpLog(MP_LOG_CHAT, "auto-open transcript (sender off screen)");
+    } else {
+        MpLog(MP_LOG_CHAT, "auto-open transcript (worldmap)");
+    }
+    MpChatShowTranscriptOnly();
+}
+
+void MpChatAutoOpenCancel()
+{
+    gChatAutoOpenWanted = false;
 }
 
 } // namespace fallout

@@ -47,6 +47,8 @@ const char* MpLogCategoryTag(MpLogCategory cat)
         return "LOOT";
     case MP_LOG_MOVIE:
         return "MOVIE";
+    case MP_LOG_WORLDMAP:
+        return "WORLDMAP";
     case MP_LOG_MISC:
         return "MISC";
     }
@@ -135,6 +137,7 @@ void MpLogInit()
         { MP_LOG_DIALOG, "coop_log_dialog" },
         { MP_LOG_LOOT, "coop_log_loot" },
         { MP_LOG_MOVIE, "coop_log_movie" },
+        { MP_LOG_WORLDMAP, "coop_log_worldmap" },
         { MP_LOG_MISC, "coop_log_misc" },
     };
 

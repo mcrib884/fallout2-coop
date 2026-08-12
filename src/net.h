@@ -92,6 +92,11 @@ enum NetPacketType {
     NET_PKT_TO_HIT_RESULT = 60,   // host -> client: the 8 called-shot probabilities computed host-side
     NET_PKT_CHEAT_POLICY = 61,    // host -> clients: session cheat policy (client cheats enabled?)
     NET_PKT_CHAT_MESSAGE = 62,    // client -> host -> other clients: user chat relay
+    NET_PKT_WORLDMAP_ENTER = 63,  // host -> clients: host entered the worldmap (mode: 0=world, 1=town)
+    NET_PKT_WORLDMAP_STATE = 64,  // host -> clients: authoritative worldmap state (party pos, walking, car)
+    NET_PKT_WORLDMAP_EXIT = 65,   // host -> clients: host left the worldmap (no map load follows)
+    NET_PKT_WALK_INTERRUPTED = 66, // host -> client: the avatar's walk was stopped short of its target (trap/script interrupt)
+    NET_PKT_WORLDMAP_DISCOVERY = 67, // host -> clients: discovered worldmap subtiles/areas (full snapshot or incremental)
 };
 
 enum NetUnreliablePacketType {
@@ -745,6 +750,57 @@ typedef struct NetGvarChangePayload {
     int32_t index;
     int32_t value;
 } NetGvarChangePayload;
+
+// Worldmap travel (co-op): the host drives the vanilla worldmap and clients
+// mirror it read-only. ENTER carries the screen mode so the client renders
+// the same loop the host is in (0 = world map, 1 = town map). STATE carries
+// the authoritative party state: world position, walking target, current
+// area, and car state — applied onto the client's WmGenData each update.
+// EXIT closes the mirror when the host leaves without loading a map (a map
+// load always follows MAP_CHANGED, which supersedes EXIT).
+typedef struct NetWorldmapEnterPayload {
+    uint8_t mode;        // 0 = wmWorldMapFunc(0), 1 = wmWorldMapFunc(1) (town map)
+} NetWorldmapEnterPayload;
+
+typedef struct NetWorldmapStatePayload {
+    int32_t worldPosX;
+    int32_t worldPosY;
+    int32_t walkDestinationX;
+    int32_t walkDestinationY;
+    uint8_t isWalking;
+    uint8_t isInCar;
+    int32_t currentAreaId;
+    int32_t carFuel;
+    int32_t currentCarAreaId;
+    // Random-encounter selection (wmRndEncounterPick ran on the host right
+    // before the map load): the client mirror needs these ids to run
+    // wmSetupRandomEncounter after its deferred map-enter and spawn its own
+    // copy of the encounter critters. -1 = no encounter pending.
+    int32_t encounterMapId;
+    int32_t encounterTableId;
+    int32_t encounterEntryId;
+} NetWorldmapStatePayload;
+
+// Host -> acting client: the avatar's walk ended before reaching its
+// registered destination (pressure plate, script interrupt, knockback).
+// The client's optimistic walk must stop and snap to the authoritative
+// position instead of continuing to the clicked tile.
+typedef struct NetWalkInterruptedPayload {
+    int32_t tile;
+    int32_t elevation;
+} NetWalkInterruptedPayload;
+
+// Worldmap discovery sync (host -> clients): the host's walking marks subtiles
+// visited/known and areas visited; the client mirror must show the same fog
+// and town list, and its own save must persist them. mode 1 = full snapshot
+// (count = tile count, body = 2-bit packed subtile states, 11 bytes per tile,
+// then visited/state pairs for each area), mode 2 = incremental (count =
+// change count, body = count * 5 bytes: u16 tile, u8 subX, u8 subY, u8 state).
+typedef struct NetWorldmapDiscoveryPayload {
+    uint8_t mode;
+    uint16_t count;
+    uint16_t reserved;
+} NetWorldmapDiscoveryPayload;
 #pragma pack(pop)
 
 // --- Transport API ---

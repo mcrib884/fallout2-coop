@@ -26,7 +26,8 @@
 //   coop_log_all=0                     - start from everything off
 //   coop_log_<category>=1              - turn one area on (names below)
 // Names: lifecycle, handshake, net, sync, profile, model, combat, chat,
-// ui, input, object, stats, script, vote, dialog, loot, movie, misc.
+// ui, input, object, stats, script, vote, dialog, loot, movie, worldmap,
+// misc.
 
 namespace fallout {
 
@@ -48,7 +49,8 @@ enum MpLogCategory : uint32_t {
     MP_LOG_DIALOG = 1u << 14,    // synchronized dialogue + barter
     MP_LOG_LOOT = 1u << 15,      // loot windows, pickups, steal/take-all
     MP_LOG_MOVIE = 1u << 16,     // synchronized movie playback
-    MP_LOG_MISC = 1u << 17,      // everything else
+    MP_LOG_WORLDMAP = 1u << 17,  // worldmap travel: entry/exit, state sync, mirror
+    MP_LOG_MISC = 1u << 18,      // everything else
     MP_LOG_ALL = 0xFFFFFFFFu,
 };
 

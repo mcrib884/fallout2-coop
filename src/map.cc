@@ -1549,9 +1549,16 @@ int mapHandleTransition()
                     MpLog(MP_LOG_SYNC, "deferred map script enter done sid=%d", gMapSid);
                     MpLog(MP_LOG_SYNC, "ambient after deferred map script enter=%d",
                         lightGetAmbientIntensity());
+                    // Vanilla spawns the encounter critters inside mapLoad
+                    // BEFORE the start/enter pass, so their scripts initialize
+                    // hostility in map_enter. The deferred runner spawns after
+                    // the pass already ran — snapshot the lists and replay the
+                    // two procs for the freshly added scripts.
+                    mpScriptListSnapshot();
                     if (wmSetupRandomEncounter() == -1) {
                         debugPrint("\nError: couldn't set up random encounter after deferred map enter!");
                     }
+                    mpScriptRunStartAndEnterForNew();
                 }
             }
         }

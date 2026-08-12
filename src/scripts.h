@@ -269,6 +269,14 @@ void _scr_spatials_disable();
 bool scriptsExecSpatialProc(Object* obj, int tile, int elevation);
 int scriptsExecStartProc();
 void scriptsExecMapEnterProc();
+// Co-op: snapshot the script lists right before the deferred encounter spawn,
+// then replay start + map-enter for the scripts added after the snapshot.
+// Vanilla runs the encounter spawn INSIDE mapLoad before the start/enter
+// pass, so spawn-time critters initialize their hostility in map_enter
+// (e.g. ECSlaver.int sets LV[5]=2 there); the co-op deferred runner spawns
+// after the pass already ran, so without this those critters never attack.
+void mpScriptListSnapshot();
+void mpScriptRunStartAndEnterForNew();
 void scriptsExecMapUpdateProc();
 void scriptsExecMapUpdateScripts(int proc);
 void scriptsExecMapExitProc();

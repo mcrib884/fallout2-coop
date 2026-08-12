@@ -3051,6 +3051,66 @@ void scriptsExecMapEnterProc()
     scriptsExecMapUpdateScripts(SCRIPT_PROC_MAP_ENTER);
 }
 
+// --- Co-op: spawn-time critters (random encounters) ---
+// Vanilla mapLoad order: map script enter (1127), wmSetupRandomEncounter
+// (critters spawn, 1133), then the start/enter pass for ALL scripts (1173 /
+// 1177) — encounter critters initialize their hostility in map_enter_p_proc
+// (ECSlaver.int sets LV[5]=2 there, gated on global 11; without it slavers
+// never attack). The co-op deferred runner executes the map script and the
+// encounter spawn AFTER the vanilla pass already ran, so the new critters'
+// scripts never see their start/enter procs. These helpers snapshot the
+// script lists before the spawn and replay the two procs for the scripts
+// added after the snapshot.
+static ScriptListExtent* gMpScriptSnapTail[SCRIPT_TYPE_COUNT];
+static int gMpScriptSnapLength[SCRIPT_TYPE_COUNT];
+
+void mpScriptListSnapshot()
+{
+    for (int index = 0; index < SCRIPT_TYPE_COUNT; index++) {
+        gMpScriptSnapTail[index] = gScriptLists[index].tail;
+        gMpScriptSnapLength[index] = gScriptLists[index].tail != nullptr
+            ? gScriptLists[index].tail->length
+            : 0;
+    }
+    MpLog(MP_LOG_SCRIPT, "script snapshot taken");
+}
+
+void mpScriptRunStartAndEnterForNew()
+{
+    if (gMpIsClient) {
+        return;
+    }
+
+    int ran = 0;
+    bool spatialsWereEnabled = gSpatialsEnabled;
+    gSpatialsEnabled = false;
+    for (int scriptType = 0; scriptType < SCRIPT_TYPE_COUNT; scriptType++) {
+        ScriptListExtent* extent = gMpScriptSnapTail[scriptType];
+        if (extent == nullptr) {
+            continue;
+        }
+        bool firstExtent = true;
+        while (extent != nullptr) {
+            int start = firstExtent ? gMpScriptSnapLength[scriptType] : 0;
+            for (int scriptIndex = start; scriptIndex < extent->length; scriptIndex++) {
+                Script* script = &(extent->scripts[scriptIndex]);
+                if (script->procs[SCRIPT_PROC_START] > 0) {
+                    scriptExecProc(script->sid, SCRIPT_PROC_START);
+                }
+                if (script->procs[SCRIPT_PROC_MAP_ENTER] > 0) {
+                    scriptSetFixedParam(script->sid, (gMapHeader.flags & 1) == 0);
+                    scriptExecProc(script->sid, SCRIPT_PROC_MAP_ENTER);
+                }
+                ran++;
+            }
+            firstExtent = false;
+            extent = extent->next;
+        }
+    }
+    gSpatialsEnabled = spatialsWereEnabled;
+    MpLog(MP_LOG_SCRIPT, "new-script start/enter pass ran=%d", ran);
+}
+
 // 0x4A67E4
 void scriptsExecMapUpdateProc()
 {

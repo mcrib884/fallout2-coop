@@ -874,6 +874,23 @@ static void opStore(Program* program)
     ProgramValue value = programStackPopValue(program);
     const size_t pos = program->framePointer + addr;
 
+    // Guarded frame access: a malformed script frame (e.g. a co-op-written
+    // map-state whose map-local-var table is empty) must not crash the VM.
+    // The vanilla interpreter read raw stack memory past the frame; dropping
+    // the store (with refcount care) is the safe equivalent.
+    if (pos >= program->stackValues->size()) {
+        static int sLogged = 0;
+        if (sLogged < 5) {
+            sLogged++;
+            debugFilePrint("MPSCR: store overrun pos=%zu size=%zu basePtr=%d framePtr=%d",
+                pos, program->stackValues->size(), program->basePointer, program->framePointer);
+        }
+        if (value.opcode == VALUE_TYPE_DYNAMIC_STRING) {
+            interpreterStringRefCountDecrease(program, value.opcode, value.integerValue);
+        }
+        return;
+    }
+
     const ProgramValue oldValue = program->stackValues->at(pos);
 
     if (oldValue.opcode == VALUE_TYPE_DYNAMIC_STRING) {
@@ -893,6 +910,20 @@ static void opStore(Program* program)
 static void opFetch(Program* program)
 {
     const int addr = programStackPopInteger(program);
+
+    const size_t pos = program->framePointer + addr;
+    if (pos >= program->stackValues->size()) {
+        // Guarded read: out-of-frame local-var reads return a zero instead of
+        // throwing (see opStore).
+        static int sLogged = 0;
+        if (sLogged < 5) {
+            sLogged++;
+            debugFilePrint("MPSCR: fetch overrun pos=%zu size=%zu basePtr=%d framePtr=%d",
+                pos, program->stackValues->size(), program->basePointer, program->framePointer);
+        }
+        programStackPushValue(program, ProgramValue(0));
+        return;
+    }
 
     const ProgramValue value = program->stackValues->at(program->framePointer + addr);
     programStackPushValue(program, value);
@@ -2281,6 +2312,20 @@ static void opFetchGlobalVariable(Program* program)
 {
     const int addr = programStackPopInteger(program);
 
+    const size_t pos = program->basePointer + addr;
+    if (pos >= program->stackValues->size()) {
+        // Guarded read: an empty script global frame (map-state with no
+        // local vars) must not crash the VM — return a zero instead.
+        static int sLogged = 0;
+        if (sLogged < 5) {
+            sLogged++;
+            debugFilePrint("MPSCR: fetch-global overrun pos=%zu size=%zu basePtr=%d framePtr=%d",
+                pos, program->stackValues->size(), program->basePointer, program->framePointer);
+        }
+        programStackPushValue(program, ProgramValue(0));
+        return;
+    }
+
     const ProgramValue value = program->stackValues->at(program->basePointer + addr);
     programStackPushValue(program, value);
 }
@@ -2290,6 +2335,22 @@ static void opStoreGlobalVariable(Program* program)
 {
     const int addr = programStackPopInteger(program);
     ProgramValue value = programStackPopValue(program);
+
+    const size_t pos = program->basePointer + addr;
+    if (pos >= program->stackValues->size()) {
+        // Guarded store: drop the write instead of throwing (see
+        // opFetchGlobalVariable).
+        static int sLogged = 0;
+        if (sLogged < 5) {
+            sLogged++;
+            debugFilePrint("MPSCR: store-global overrun pos=%zu size=%zu basePtr=%d framePtr=%d",
+                pos, program->stackValues->size(), program->basePointer, program->framePointer);
+        }
+        if (value.opcode == VALUE_TYPE_DYNAMIC_STRING) {
+            interpreterStringRefCountDecrease(program, value.opcode, value.integerValue);
+        }
+        return;
+    }
 
     const ProgramValue oldValue = program->stackValues->at(program->basePointer + addr);
     if (oldValue.opcode == VALUE_TYPE_DYNAMIC_STRING) {

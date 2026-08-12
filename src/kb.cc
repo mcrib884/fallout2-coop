@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "debug.h"
 #include "input.h"
 #include "svga.h"
 
@@ -465,6 +466,17 @@ static int keyboardDequeueLogicalKeyCode()
     if (gKeyboardEventQueueReadIndex != gKeyboardEventQueueWriteIndex) {
         gKeyboardEventQueueReadIndex++;
         gKeyboardEventQueueReadIndex &= (KEY_QUEUE_SIZE - 1);
+    }
+
+    // Key-input diagnostics (first 60 distinct logical keys): the scan code
+    // and modifiers the SDL event carried, and what the layout table mapped
+    // them to. Pairs with the MPCHAT key logs to pinpoint any wrong
+    // character at its source.
+    static int sLoggedKeyCount = 0;
+    if (logicalKey != -1 && sLoggedKeyCount < 60) {
+        sLoggedKeyCount++;
+        debugFilePrint("MPKB: scan=%d mods=0x%X key=%d",
+            keyboardEvent->scanCode, keyboardEvent->modifiers, logicalKey);
     }
 
     return logicalKey;

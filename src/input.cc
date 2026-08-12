@@ -655,6 +655,18 @@ unsigned int getTicks()
     return SDL_GetTicks();
 }
 
+// Refresh the cached ticker timestamp (gTickerLastTimestamp). The cache is
+// normally updated once per tickersExecute pass, so modals that poll SDL
+// directly never refresh it and _get_bk_time() goes stale. Anything that
+// stamps time-sensitive state from such a context (e.g. chat floats added
+// from the chat modal) must refresh the cache first, or the ticker ages the
+// state as if it had been created before the modal opened and collapses its
+// lifetime.
+void inputRefreshTickerTimestamp()
+{
+    gTickerLastTimestamp = SDL_GetTicks();
+}
+
 // 0x4C937C
 void inputPauseForTocks(unsigned int delay)
 {

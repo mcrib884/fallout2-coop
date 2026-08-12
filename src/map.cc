@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <exception>
 #include <vector>
 
 #include "animation.h"
@@ -1040,6 +1041,12 @@ static int mapLoad(File* stream)
     gMapHeader.index = wmMapMatchNameToIdx(gMapHeader.name);
     debugFilePrint("MAP: load dude placed tile=%d elev=%d idx=%d", gDude->tile, gElevation, gMapHeader.index);
 
+    // Diagnosis: the co-op-written map-state file crashes the client here
+    // with an unhandled C++ exception. Log every stage and catch the
+    // exception message so the failing piece is identifiable.
+    try {
+    debugFilePrint("MAP: load stage gvar block flags=0x%X name='%s'", gMapHeader.flags, gMapHeader.name);
+
     if ((gMapHeader.flags & 1) == 0) {
         char path[COMPAT_MAX_PATH];
         snprintf(path, sizeof(path), "maps\\%s", gMapHeader.name);
@@ -1062,13 +1069,15 @@ static int mapLoad(File* stream)
         gMapHeader.globalVariablesCount = gMapGlobalVarsLength;
     }
 
-    scriptsEnable();
+        scriptsEnable();
+        debugFilePrint("MAP: load stage scripts enabled");
 
-    if (gMapHeader.scriptIndex > 0) {
-        error = "Error creating new map script";
-        if (scriptAdd(&gMapSid, SCRIPT_TYPE_SYSTEM) == -1) {
-            goto err;
-        }
+        if (gMapHeader.scriptIndex > 0) {
+            debugFilePrint("MAP: load stage map script setup sid=%d", gMapSid);
+            error = "Error creating new map script";
+            if (scriptAdd(&gMapSid, SCRIPT_TYPE_SYSTEM) == -1) {
+                goto err;
+            }
 
         Object* object;
         int fid = buildFid(OBJ_TYPE_MISC, 12);
@@ -1104,6 +1113,7 @@ static int mapLoad(File* stream)
             }
             _scr_spatials_enable();
         } else {
+            debugFilePrint("MAP: load stage map enter script sid=%d", gMapSid);
             scriptExecProc(gMapSid, SCRIPT_PROC_MAP_ENTER);
             _scr_spatials_enable();
             debugFilePrint("MAP: load map script enter done sid=%d", gMapSid);
@@ -1114,6 +1124,13 @@ static int mapLoad(File* stream)
                 goto err;
             }
         }
+    }
+    } catch (const std::exception& e) {
+        debugFilePrint("MAP: load threw std::exception '%s' after dude placed sid=%d scriptIndex=%d mapLocalVars=%d hdrLocalVars=%d mapGlobalVars=%d",
+            e.what(), gMapSid, gMapHeader.scriptIndex, gMapLocalVarsLength,
+            gMapHeader.localVariablesCount, gMapGlobalVarsLength);
+        error = "Map state load threw an exception";
+        goto err;
     }
 
     error = nullptr;

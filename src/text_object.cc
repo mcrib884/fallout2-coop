@@ -330,6 +330,13 @@ static int textObjectAddInternal(Object* object, char* string, int font, int col
     gTextObjects[gTextObjectsCount] = textObject;
     gTextObjectsCount++;
 
+    static int sAddDiag = 0;
+    if (sAddDiag < 20) {
+        sAddDiag++;
+        debugFilePrint("MPTOBJ: add owner=%p replace=%d lines=%d total=%d",
+            (void*)object, replacePrevious ? 1 : 0, textObject->linesCount, gTextObjectsCount);
+    }
+
     fontSetCurrent(oldFont);
 
     return 0;
@@ -385,6 +392,16 @@ static void textObjectsTicker()
 
         unsigned int delay = gTextObjectsLineDelay * textObject->linesCount + gTextObjectsBaseDelay;
         if ((textObject->flags & TEXT_OBJECT_MARKED_FOR_REMOVAL) != 0 || (getTicksBetween(_get_bk_time(), textObject->time) > delay)) {
+            static int sTickerDiag = 0;
+            if (sTickerDiag < 20) {
+                sTickerDiag++;
+                debugFilePrint("MPTOBJ: ticker removed owner=%p age=%u lines=%d delay=%u marked=%d total=%d",
+                    (void*)textObject->owner,
+                    getTicksBetween(_get_bk_time(), textObject->time),
+                    textObject->linesCount, delay,
+                    (textObject->flags & TEXT_OBJECT_MARKED_FOR_REMOVAL) != 0 ? 1 : 0,
+                    gTextObjectsCount);
+            }
             tileToScreenXY(textObject->tile, &(textObject->x), &(textObject->y));
             textObject->x += textObject->sx;
             textObject->y += textObject->sy;
@@ -508,10 +525,18 @@ static void textObjectFindPlacement(TextObject* textObject)
 // 0x4B0C00 text_object_remove
 void textObjectsRemoveByOwner(Object* object)
 {
+    int removedCount = 0;
     for (int index = 0; index < gTextObjectsCount; index++) {
         if (gTextObjects[index]->owner == object) {
             gTextObjects[index]->flags |= TEXT_OBJECT_MARKED_FOR_REMOVAL;
+            removedCount++;
         }
+    }
+    static int sRemoveDiag = 0;
+    if (sRemoveDiag < 20) {
+        sRemoveDiag++;
+        debugFilePrint("MPTOBJ: removeByOwner owner=%p removed=%d total=%d",
+            (void*)object, removedCount, gTextObjectsCount);
     }
 }
 
@@ -550,6 +575,11 @@ void textObjectsShiftVertically(Object* object, int dy)
 
         rectUnion(&rect, &movedRect, &rect);
         tileWindowRefreshRect(&rect, gElevation);
+    }
+    static int sShiftDiag = 0;
+    if (sShiftDiag < 20) {
+        sShiftDiag++;
+        debugFilePrint("MPTOBJ: shift owner=%p dy=%d total=%d", (void*)object, dy, gTextObjectsCount);
     }
 }
 

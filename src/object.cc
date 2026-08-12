@@ -22,6 +22,7 @@
 #include "memory.h"
 #include "multiplayer.h"
 #include "input.h"
+#include "multiplayer_debug.h"
 #include "multiplayer_vote.h"
 #include "party_member.h"
 #include "proto.h"
@@ -4978,12 +4979,17 @@ static void objectDrawOutline(Object* object, Rect* rect)
         int v43;
         int v44;
 
-        // Co-op: constant dim light-green ring around every player's sprite,
-        // drawn in the post-roof pass so it stays visible even behind walls.
-        // Much dimmer than the bright combat outline (palette 229); when a
-        // combat outline is set it takes over normally.
+        // Co-op: constant dim ring around every player's sprite, drawn in
+        // the post-roof pass so it stays visible even behind walls. The ring
+        // uses the player's chosen color (same resolution as the nametags);
+        // a hardcoded green was the original default. Much dimmer than the
+        // bright combat outline (palette 229); when a combat outline is set
+        // it takes over normally.
         if (outlineType == 0 && gMpActive && MpIsPlayerObject(object)) {
-            color = COLOR_LIGHT_GREEN_2;
+            color = MpPlayerColorFor(object);
+            if (color < 0 || color >= 256) {
+                color = COLOR_LIGHT_GREEN_2;
+            }
             v53 = 0;
             v43 = 0;
             v44 = 0;

@@ -132,7 +132,7 @@ struct MpPlayerRuntime {
 // volatile runtime fields (transform, hp/ap, combat state, object flags) are
 // deliberately NOT part of any section — the per-tick state channel owns them.
 enum ProfileSectionId {
-    PROFILE_SECTION_IDENTITY = 1,   // name, proto identity, bodyType, experience, modelName
+    PROFILE_SECTION_IDENTITY = 1,   // name, proto identity, bodyType, experience, modelName, playerColor
     PROFILE_SECTION_BASE_STATS = 2,
     PROFILE_SECTION_BONUS_STATS = 3,
     PROFILE_SECTION_SKILLS = 4,

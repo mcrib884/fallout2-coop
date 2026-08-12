@@ -40,6 +40,7 @@
 #include "movie.h"
 #include "movie_effect.h"
 #include "multiplayer.h"
+#include "multiplayer_chat.h"
 #include "multiplayer_combat.h"
 #include "multiplayer_debug.h"
 #include "object.h"
@@ -679,6 +680,19 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
         if (gMpIsClient && gMpActive && MpCombatIsActive() && !gMpCombat.turnActive) {
             MpCombatSendEndRequest();
             break;
+        }
+        break;
+    case KEY_UPPERCASE_T:
+    case KEY_LOWERCASE_T:
+        // Co-op chat: the combat log extended into a full chat. T opens it
+        // in and out of combat; the modal blocks and pumps the network, and
+        // Enter sends the typed line. Vanilla never binds T in world mode,
+        // and the modal contexts that do bind T (dialogue, barter,
+        // character creation) never route keys through this dispatcher. The
+        // modal resets the engine's key-repeat table on close so a T
+        // keyup swallowed by the modal can never feed a phantom reopen.
+        if (gDude != nullptr && interfaceBarEnabled()) {
+            MpChatShow();
         }
         break;
     case KEY_UPPERCASE_N:

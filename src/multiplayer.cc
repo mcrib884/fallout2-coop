@@ -30,6 +30,7 @@
 #include "map.h"
 #include "multiplayer_vote.h"
 #include "multiplayer_combat.h"
+#include "multiplayer_chat.h"
 #include "multiplayer_debug.h"
 #include "multiplayer_dialog.h"
 #include "multiplayer_loot.h"
@@ -2937,7 +2938,36 @@ void MpTick()
 void MpRenderPlayerLabels()
 {
     if (!gMpActive || gSdlSurface == nullptr || gSdlTextureSurface == nullptr) {
+        static bool sMpTagEarlyLogged = false;
+        if (!sMpTagEarlyLogged) {
+            sMpTagEarlyLogged = true;
+            debugFilePrint("MPTAG: pass early return mpActive=%d surf=%p tex=%p",
+                gMpActive ? 1 : 0, (void*)gSdlSurface, (void*)gSdlTextureSurface);
+        }
         return;
+    }
+    // Diagnostic: why labels do not draw. Time-windowed sampling — at most
+    // one line per 1.5s per site — so the skip reason during NORMAL PLAY is
+    // captured (the earlier one-shot budget was consumed by the load screen).
+    static uint32_t sMpTagLogTick = 0;
+    auto mpTagCanLog = []() -> bool {
+        uint32_t nowTicks = getTicks();
+        if (nowTicks - sMpTagLogTick >= 1500) {
+            sMpTagLogTick = nowTicks;
+            return true;
+        }
+        return false;
+    };
+    if (mpTagCanLog()) {
+        int connectedCount = 0;
+        for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+            if (gMpSession.players[index].isConnected) {
+                connectedCount++;
+            }
+        }
+        debugFilePrint("MPTAG: pass state mpActive=%d connected=%d localNetId=%u surf=%dx%d",
+            gMpActive ? 1 : 0, connectedCount, gMpSession.localNetId,
+            gSdlSurface->w, gSdlSurface->h);
     }
     // Dirty-rect engine: restore each previous label's clean original pixels into
     // both gSdlSurface and gSdlTextureSurface so moving or disappearing tags don't
@@ -2983,6 +3013,12 @@ void MpRenderPlayerLabels()
         if (!p->isConnected || critter == nullptr
             || (critter->flags & OBJECT_HIDDEN) != 0
             || !tileIsValid(critter->tile)) {
+            if (mpTagCanLog()) {
+                debugFilePrint("MPTAG: skip player netId=%u connected=%d local=%d obj=%p hidden=%d tileValid=%d",
+                    p->netId, p->isConnected ? 1 : 0, p->isLocal ? 1 : 0, (void*)critter,
+                    critter != nullptr ? ((critter->flags & OBJECT_HIDDEN) != 0) : -1,
+                    critter != nullptr ? tileIsValid(critter->tile) : -1);
+            }
             continue;
         }
         int sx;
@@ -3036,7 +3072,12 @@ void MpRenderPlayerLabels()
         labelRect.h = std::min(fontH + 2, gSdlSurface->h - labelRect.y);
 
         if (labelRect.w <= 0 || labelRect.h <= 0
-            || windowIntersectsUiOrModal(labelRect.x, labelRect.y, labelRect.w, labelRect.h)) {
+            || windowIntersectsUiOrModal(labelRect.x, labelRect.y, labelRect.w, labelRect.h, gIsoWindow)) {
+            if (mpTagCanLog()) {
+                debugFilePrint("MPTAG: skip label netId=%u name='%s' rect=%d,%d %dx%d uiIntersect=%d",
+                    p->netId, name, labelRect.x, labelRect.y, labelRect.w, labelRect.h,
+                    windowIntersectsUiOrModal(labelRect.x, labelRect.y, labelRect.w, labelRect.h, gIsoWindow) ? 1 : 0);
+            }
             continue;
         }
 
@@ -3060,9 +3101,11 @@ void MpRenderPlayerLabels()
 
         int blitRc = SDL_BlitSurface(gSdlSurface, &labelRect, gSdlTextureSurface, &labelRect);
 
-        static bool sMpTagDiagLogged = false;
-        if (!sMpTagDiagLogged) {
-            sMpTagDiagLogged = true;
+        // Periodic draw proof: once every 5s, scan the label region and log
+        // how many pixels of the label color actually landed.
+        static uint32_t sMpTagDrawLogTick = 0;
+        if (getTicks() - sMpTagDrawLogTick >= 5000) {
+            sMpTagDrawLogTick = getTicks();
             int srcColorPx = 0;
             int src0 = 0;
             for (int scanY = labelRect.y; scanY < labelRect.y + labelRect.h; scanY++) {
@@ -3620,6 +3663,25 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                     p->netId, result.targetNetId, result.hitMode,
                     result.probs[0], result.probs[1], result.probs[2], result.probs[3],
                     result.probs[4], result.probs[5], result.probs[6], result.probs[7]);
+                break;
+            }
+            case NET_PKT_CHAT_MESSAGE: {
+                if (payloadLen != sizeof(NetChatMessagePayload)) {
+                    debugFilePrint("MPCHAT: host reject bad length=%zu", payloadLen);
+                    return;
+                }
+                MultiplayerPlayer* p = mpPlayerFindByPeer(peer);
+                if (p == nullptr || !p->isHandshaken) {
+                    debugFilePrint("MPCHAT: host reject unknown peer");
+                    return;
+                }
+                const NetChatMessagePayload* in = (const NetChatMessagePayload*)payload;
+                if (in->senderNetId != p->netId) {
+                    debugFilePrint("MPCHAT: host reject spoofed sender packetNetId=%u peerNetId=%u",
+                        in->senderNetId, p->netId);
+                    return;
+                }
+                MpChatHostOnMessage(in->senderNetId, in->text);
                 break;
             }
             case NET_PKT_PLAYER_CMD: {
@@ -4210,6 +4272,19 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                 return;
             }
             MpCombatOnMonitorMessage((const char*)payload, payloadLen);
+            break;
+        }
+        case NET_PKT_CHAT_MESSAGE: {
+            if (payloadLen != sizeof(NetChatMessagePayload)) {
+                debugFilePrint("MPCHAT: client reject bad length=%zu", payloadLen);
+                return;
+            }
+            const NetChatMessagePayload* in = (const NetChatMessagePayload*)payload;
+            if (in->senderNetId == 0 || in->senderNetId > NET_MAX_PLAYERS) {
+                debugFilePrint("MPCHAT: client reject bad sender netId=%u", in->senderNetId);
+                return;
+            }
+            MpChatClientOnIncoming(in->senderNetId, in->text);
             break;
         }
         default:

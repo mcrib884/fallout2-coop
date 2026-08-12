@@ -89,6 +89,7 @@ enum NetPacketType {
     NET_PKT_TO_HIT_QUERY = 59,    // client -> host: called-shot probabilities for a target (host-owned rolls)
     NET_PKT_TO_HIT_RESULT = 60,   // host -> client: the 8 called-shot probabilities computed host-side
     NET_PKT_CHEAT_POLICY = 61,    // host -> clients: session cheat policy (client cheats enabled?)
+    NET_PKT_CHAT_MESSAGE = 62,    // client -> host -> other clients: user chat relay
 };
 
 enum NetUnreliablePacketType {
@@ -704,6 +705,19 @@ typedef struct NetFloatMessagePayload {
     int32_t outline;      // explicit style when type == NET_FLOAT_AI/DIALOG_STYLE
     char text[160];       // the message text
 } NetFloatMessagePayload;
+
+// Chat relay: the client sends its message to the host, the host validates
+// the sender (netId must match the peer) and forwards it to every other
+// connected player. The sender shows its own line locally and never gets an
+// echo. The text is NUL-terminated, at most MP_CHAT_MESSAGE_MAX_LENGTH
+// characters. The receiver floats it above the sender's critter (chat
+// messages are the "floating text" the spec asks for) and appends it to the
+// chat window, which mirrors the combat log 1:1.
+#define MP_CHAT_MESSAGE_MAX_LENGTH (120)
+typedef struct NetChatMessagePayload {
+    uint8_t senderNetId;   // validated against the peer on the host
+    char text[MP_CHAT_MESSAGE_MAX_LENGTH + 1];
+} NetChatMessagePayload;
 
 // Quest state relay: the gvar table is the single quest persistence in FO2
 // (script local vars of the dude do not survive vanilla saves at all), so the

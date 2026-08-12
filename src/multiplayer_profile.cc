@@ -18,6 +18,7 @@
 #include "item.h"
 #include "memory.h"
 #include "multiplayer.h"
+#include "multiplayer_debug.h"
 #include "object.h"
 #include "perk.h"
 #include "tile.h"
@@ -632,7 +633,8 @@ static bool readProfileSectionIdentity(Reader* r, MpPlayerProfile* p)
         || !r->i32(&p->experience)
         || !r->i32(&p->killType)
         || !r->i32(&p->damageType)
-        || !r->bytes(p->modelName, sizeof(p->modelName))) {
+        || !r->bytes(p->modelName, sizeof(p->modelName))
+        || !r->i32(&p->playerColor)) {
         return false;
     }
     p->name[MP_PROFILE_NAME_LENGTH - 1] = '\0';
@@ -658,6 +660,11 @@ static void writeProfileSectionIdentity(Writer* w, const MpPlayerProfile& p)
     w->i32(p.killType);
     w->i32(p.damageType);
     w->bytes(p.modelName, sizeof(p.modelName));
+    // The player's chosen highlight color. The color rides the IDENTITY
+    // section (same as the name): MpDebugSetLocalPlayerColor only sets the
+    // local override, so the capture must stamp it here or it never reaches
+    // the wire and remote players always fall back to the preset colors.
+    w->i32(p.playerColor);
 }
 
 static bool readProfileSectionBaseStats(Reader* r, MpPlayerProfile* p)
@@ -1171,6 +1178,12 @@ bool MpProfileCaptureLocalNoModel(MpPlayerProfile* profile)
         return false;
     }
     if (!MpProfileCaptureObjectNoModel(gDude, profile)) return false;
+    // The local color override rides the IDENTITY section (same as the
+    // name): the picker sets gMpLocalPlayerColor, and the capture stamps it
+    // here so the per-tick change detection sees it and the wire carries it.
+    // The host's remote-player sync deliberately overrides this field with
+    // the runtime value (the sender's own color) at multiplayer.cc.
+    profile->playerColor = MpDebugLocalPlayerColor();
     for (int index = 0; index < PC_STAT_COUNT; index++) {
         profile->pcStats[index] = pcGetStat((PcStat)index);
     }

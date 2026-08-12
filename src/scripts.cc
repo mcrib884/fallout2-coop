@@ -1,6 +1,7 @@
 #include "scripts.h"
 
 #include <assert.h>
+#include <exception>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1605,10 +1606,20 @@ int scriptExecProc(int sid, int proc)
         return -1;
     }
 
+    // Diagnostic + graceful degradation: a corrupt map/save state can drive
+    // the interpreter's program stack out of range (ProgramStack::at throws
+    // "invalid vector subscript" — seen loading a co-op-written save whose
+    // map-state had an empty local-var table). Never crash the process over
+    // a script; log the exact script state and fail the proc.
+    int captureScriptIndex = -1;
+    int captureLocalVarsCount = 0;
+    try {
     Script* script;
     if (scriptGetScript(sid, &script) == -1) {
         return -1;
     }
+    captureScriptIndex = script->index & 0xFFFFFF;
+    captureLocalVarsCount = script->localVarsCount;
 
     script->scriptOverrides = 0;
 
@@ -1712,6 +1723,12 @@ int scriptExecProc(int sid, int proc)
     }
 
     return 0;
+    } catch (const std::exception& e) {
+        debugFilePrint("MPSCR: scriptExecProc threw '%s' sid=%d proc=%d scriptIndex=%d localVars=%d mapLocalVars=%d mapLocalVarsLen=%d",
+            e.what(), sid, proc, captureScriptIndex, captureLocalVarsCount,
+            gMapLocalVarsLength, gMapHeader.localVariablesCount);
+        return -1;
+    }
 }
 
 // Locate built-in procs for given script.

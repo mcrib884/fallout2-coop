@@ -1308,11 +1308,13 @@ static void dbgColorPickerShow()
     int bVal = 0;
 
     int pal = MpPlayerColorFor(gDude);
-    if (pal >= 0) {
-        int rgb = Color2RGB((Color)pal);
-        rVal = (rgb >> 16) & 0xFF;
-        gVal = (rgb >> 8) & 0xFF;
-        bVal = rgb & 0xFF;
+    if (pal >= 0 && pal < 256 && _cmap != nullptr) {
+        // The palette stores 6-bit channels; scale to the slider's 0-255.
+        // (Color2RGB returns 15-bit fields, not 24-bit RGB — the old
+        // initialization produced garbage slider values from a chosen color.)
+        rVal = (_cmap[3 * pal + 0] * 255) / 63;
+        gVal = (_cmap[3 * pal + 1] * 255) / 63;
+        bVal = (_cmap[3 * pal + 2] * 255) / 63;
     }
 
     const int trackX = 75;
@@ -1432,6 +1434,15 @@ static void dbgColorPickerShow()
             MpDebugSetLocalPlayerColor(finalPal);
             debugFilePrint("MPDBG: RGB player color applied pal=%d (R=%d G=%d B=%d)",
                 finalPal, rVal, gVal, bVal);
+            if (_cmap != nullptr) {
+                // What the chosen palette entry actually renders as — proves
+                // whether the nearest-match mapping is faithful.
+                debugFilePrint("MPDBG: pal %d renders RGB=(%d,%d,%d)",
+                    finalPal,
+                    (_cmap[3 * finalPal] * 255) / 63,
+                    (_cmap[3 * finalPal + 1] * 255) / 63,
+                    (_cmap[3 * finalPal + 2] * 255) / 63);
+            }
             keepGoing = false;
         } else if (keyCode == KEY_ESCAPE || keyCode == 500
             || keyCode == DBG_BTN_COLOR_BASE + 9 || keyCode == DBG_BTN_CLOSE_X) {
@@ -1952,10 +1963,22 @@ void MpDebugMenuShow()
             break;
         case DBG_BTN_COLOR:
             dbgColorPickerShow();
+            // Diagnostic: the menu window handle must still be valid after
+            // the picker's create/destroy (seen: windowRefresh AV in the
+            // post-picker redraw on the host).
+            debugFilePrint("MPDBG: color picker returned win=%d valid=%d buf=%p",
+                win, windowGetWindow(win) != nullptr ? 1 : 0,
+                windowGetWindow(win) != nullptr ? (void*)windowGetWindow(win)->buffer : nullptr);
             curColor = MpDebugLocalPlayerColor();
             snprintf(colorStatus, sizeof(colorStatus), "Color: %s",
                 curColor >= 0 && curColor < 8 ? kPlayerPaletteNames[curColor] : "default");
-            windowFill(win, 330, 288, 130, 20, COLOR_BLACK);
+            // NOTE: the window is kDbgWindowHeight=305 tall, so a 20px fill
+            // from y=288 writes rows 288..307 — 3 rows (1,380 bytes) past
+            // the buffer. That overrun corrupted the heap on every color
+            // apply and crashed the host in a later windowFill (AV in
+            // memset). Height 16 covers the status text at y=290 and stays
+            // inside the buffer.
+            windowFill(win, 330, 288, 130, 16, COLOR_BLACK);
             windowDrawText(win, colorStatus, 0, 330, 290, COLOR_WHITE);
             windowRefresh(win);
             break;

@@ -16,6 +16,7 @@
 #include "interface.h"
 #include "memory.h"
 #include "multiplayer.h"
+#include "multiplayer_chat.h"
 #include "multiplayer_combat.h"
 #include "settings.h"
 #include "svga.h"
@@ -216,6 +217,9 @@ int displayMonitorReset()
     // SFALL
     consoleFileReset();
 
+    // Co-op chat: the chat history lives and dies with the combat log.
+    MpChatReset();
+
     return 0;
 }
 
@@ -265,6 +269,12 @@ void displayMonitorAddMessage(const char* str)
 
     // SFALL
     consoleFileAddMessage(str);
+
+    // Co-op chat: mirror every line the combat log actually shows, verbatim.
+    // The chat window is the combat log extended, so the funnel is the same
+    // (1:1) — local lines, lines routed to this player only, and the
+    // authoritative echoes of suppressed predictions all land here.
+    MpChatAppendCombatLine(str);
 
     int oldFont = fontGetCurrent();
     fontSetCurrent(DISPLAY_MONITOR_FONT);

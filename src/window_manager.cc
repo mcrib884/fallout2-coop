@@ -1236,7 +1236,7 @@ int windowGetRect(int win, Rect* rect)
     return 0;
 }
 
-bool windowIntersectsUiOrModal(int x, int y, int w, int h)
+bool windowIntersectsUiOrModal(int x, int y, int w, int h, int excludeWindow)
 {
     if (!gWindowSystemInitialized || w <= 0 || h <= 0) {
         return false;
@@ -1244,13 +1244,50 @@ bool windowIntersectsUiOrModal(int x, int y, int w, int h)
     int right = x + w - 1;
     int bottom = y + h - 1;
 
+    // Diagnostic (one-shot): the full window table, so a swallowed nametag
+    // label identifies its gate in the same log pass that shows the skip.
+    static bool sWindowTableDumped = false;
+    if (!sWindowTableDumped) {
+        sWindowTableDumped = true;
+        for (int index = 0; index < gWindowsLength; index++) {
+            Window* window = gWindows[index];
+            if (window == nullptr) {
+                debugFilePrint("WINDOW: table index=%d (null)", index);
+                continue;
+            }
+            debugFilePrint("WINDOW: table index=%d id=%d rect=%d,%d-%d,%d flags=0x%X hidden=%d buf=%p",
+                index, window->id, window->rect.left, window->rect.top,
+                window->rect.right, window->rect.bottom, window->flags,
+                (window->flags & WINDOW_HIDDEN) != 0 ? 1 : 0, (void*)window->buffer);
+        }
+    }
+
     for (int index = 1; index < gWindowsLength; index++) {
         Window* window = gWindows[index];
         if (window == nullptr || (window->flags & WINDOW_HIDDEN) != 0) {
             continue;
         }
+        // The iso window is the world viewport, not UI: the nametag pass
+        // draws over it by design (it renders after every window blit), and
+        // the world re-blits every frame so no snapshot restore can corrupt
+        // it. Counting it here made every label intersect "UI" and the
+        // nametags never drew since the pass was introduced.
+        if (excludeWindow >= 0 && window->id == excludeWindow) {
+            continue;
+        }
         if (x <= window->rect.right && right >= window->rect.left
             && y <= window->rect.bottom && bottom >= window->rect.top) {
+            // Diagnostic (throttled): name the window that swallows the
+            // nametag labels so a missing label can be traced to its gate.
+            static uint32_t sLastIntersectLogTick = 0;
+            uint32_t nowTicks = getTicks();
+            if (nowTicks - sLastIntersectLogTick > 2000) {
+                sLastIntersectLogTick = nowTicks;
+                debugFilePrint("WINDOW: intersect query=%d,%d %dx%d hit index=%d id=%d rect=%d,%d-%d,%d flags=0x%X hidden=%d",
+                    x, y, w, h, index, window->id, window->rect.left, window->rect.top,
+                    window->rect.right, window->rect.bottom, window->flags,
+                    (window->flags & WINDOW_HIDDEN) != 0 ? 1 : 0);
+            }
             return true;
         }
     }

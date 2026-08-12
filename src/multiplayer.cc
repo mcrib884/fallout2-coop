@@ -36,6 +36,7 @@
 #include "multiplayer_log.h"
 #include "multiplayer_loot.h"
 #include "multiplayer_perf.h"
+#include "multiplayer_worldmap.h"
 #include "multiplayer_profile.h"
 #include "queue.h"
 #include "random.h"
@@ -752,6 +753,13 @@ static void mpHostAcceptProfile(MultiplayerPlayer* player, ENetPeer* peer,
 
     MpBroadcastMapFullSync(peer);
 
+    // A client that joins while the host is traveling never saw the
+    // WORLDMAP_ENTER broadcast (it predates the connection). Ship the current
+    // worldmap mode + state so its mirror opens on arrival.
+    if (gMpWorldmapActive) {
+        MpWorldmapSendStateToPeer(peer);
+    }
+
     // Quest state: seed the joiner with the host's full gvar table. Every
     // write after this point rides NET_PKT_GVAR_CHANGE (gameSetGlobalVar
     // hook), so the client's quest mirror stays live for its own saves.
@@ -1398,7 +1406,7 @@ int MpTruncateDestinationAtOccupant(Object* mover, int tile, int elevation)
     return lastFree;
 }
 
-static int mpHostRegisterPlayerMovement(Object* obj, bool isRun, int tile, int elevation)
+static int mpHostRegisterPlayerMovement(Object* obj, bool isRun, int tile, int elevation, int* outFinalTile = nullptr)
 {
     if (obj == nullptr) {
         MpLogAlways(MP_LOG_SYNC, "movement rejected null obj tile=%d elev=%d", tile, elevation);
@@ -1434,6 +1442,9 @@ static int mpHostRegisterPlayerMovement(Object* obj, bool isRun, int tile, int e
         MpLog(MP_LOG_SYNC, "move truncated obj=%p tile=%d->%d (occupied)",
             (void*)obj, tile, targetTile);
         tile = targetTile;
+    }
+    if (outFinalTile != nullptr) {
+        *outFinalTile = tile;
     }
 
     // A networked click has the same interrupt semantics as a local click.
@@ -1734,6 +1745,7 @@ void MpReset()
     MpVoteReset();
     MpCombatReset();
     MpDialogReset();
+    MpWorldmapReset();
     MpClearNetIdMappings();
     MpProfileDestroyAllRuntimes();
     gMpProfileReceives.clear();
@@ -2874,6 +2886,35 @@ void MpTick()
         // Vote housekeeping: check timeout and resolve the vote if its
         // window has elapsed.
         MpVoteCheckTimeout();
+        // Walk-end scan (host): when a registered walk ends and the avatar is
+        // NOT on its registered target tile, the walk was interrupted — a
+        // pressure plate or script stopped the avatar mid-path. The owning
+        // client's optimistic walk would otherwise continue to the clicked
+        // tile and then teleport back; tell it to stop and snap now. Only
+        // meaningful while no combat is running (combat movement goes through
+        // the AP-gated intent path, which never sets walkInFlight).
+        if (!MpCombatIsActive()) {
+            for (int index = 1; index < NET_MAX_PLAYERS; index++) {
+                MultiplayerPlayer* walker = &gMpSession.players[index];
+                if (!walker->isConnected || !walker->walkInFlight || walker->obj == nullptr) {
+                    continue;
+                }
+                if (animationIsBusy(walker->obj) == 0) {
+                    walker->walkInFlight = false;
+                    if (walker->obj->tile != walker->walkTargetTile) {
+                        NetWalkInterruptedPayload stopPayload;
+                        stopPayload.tile = walker->obj->tile;
+                        stopPayload.elevation = walker->obj->elevation;
+                        NetSendPacket(walker->peer, NET_CHANNEL_RELIABLE,
+                            NET_PKT_WALK_INTERRUPTED, &stopPayload, sizeof(stopPayload));
+                        MpLogAlways(MP_LOG_SYNC,
+                            "walk interrupted netId=%u target=%d tile=%d elev=%d",
+                            walker->netId, walker->walkTargetTile,
+                            walker->obj->tile, walker->obj->elevation);
+                    }
+                }
+            }
+        }
     } else {
         // Sync watchdog: a stuck sync (host crash mid-change, lost host) must
         // not leave the client frozen in CLIENT_SYNCING forever. Bail to the
@@ -2917,6 +2958,10 @@ void MpTick()
     // Open the synchronized dialogue modal when the host sent us a session and
     // we are a participant. Blocks while the modal is up (it pumps MpTick).
     MpDialogClientMaybeShowUI();
+    // Open the worldmap mirror when the host is traveling. Blocks while the
+    // mirror is up (it pumps MpTick); runs at top level for the same reason
+    // as the vote modal.
+    MpWorldmapMaybeShowUI();
 
     // Remote critters can arrive on tiles whose dirty rects nobody marked;
     // nothing redraws them until the mouse happens to refresh the view. Do a
@@ -3308,9 +3353,21 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                         return;
                     }
 
-                    mpHostRegisterPlayerMovement(p->obj,
+                    int finalTile = -1;
+                    int moveRc = mpHostRegisterPlayerMovement(p->obj,
                         action->action == NET_PLAYER_ACTION_RUN,
-                        action->tile, action->elevation);
+                        action->tile, action->elevation, &finalTile);
+                    if (moveRc == 0) {
+                        // Track the registered walk target: if the walk ends
+                        // anywhere else (trap plate stops the avatar mid-path,
+                        // script interrupt), the client's optimistic walk must
+                        // be stopped too — see MpTick's walk scan. The target
+                        // is the TRUNCATED tile: a walk shortened by an
+                        // occupant is a legitimate destination, not an
+                        // interruption.
+                        p->walkInFlight = true;
+                        p->walkTargetTile = finalTile;
+                    }
                     break;
                 }
 
@@ -4291,6 +4348,34 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             MpChatClientOnIncoming(in->senderNetId, in->text);
             break;
         }
+        case NET_PKT_WALK_INTERRUPTED: {
+            if (payloadLen != sizeof(NetWalkInterruptedPayload)) {
+                MpLogAlways(MP_LOG_SYNC, "client reject walk interrupt bad length=%zu", payloadLen);
+                return;
+            }
+            MpOnWalkInterrupted((const NetWalkInterruptedPayload*)payload);
+            break;
+        }
+        case NET_PKT_WORLDMAP_ENTER: {
+            if (payloadLen != sizeof(NetWorldmapEnterPayload)) {
+                MpLogAlways(MP_LOG_WORLDMAP, "client reject enter bad length=%zu", payloadLen);
+                return;
+            }
+            MpWorldmapOnEnter((const NetWorldmapEnterPayload*)payload);
+            break;
+        }
+        case NET_PKT_WORLDMAP_STATE: {
+            if (payloadLen != sizeof(NetWorldmapStatePayload)) {
+                MpLogAlways(MP_LOG_WORLDMAP, "client reject state bad length=%zu", payloadLen);
+                return;
+            }
+            MpWorldmapOnState((const NetWorldmapStatePayload*)payload);
+            break;
+        }
+        case NET_PKT_WORLDMAP_EXIT: {
+            MpWorldmapOnExit();
+            break;
+        }
         default:
             break;
         }
@@ -4864,6 +4949,15 @@ void MpBroadcastPlayerStates()
             continue;
         }
         int channel = p->hasLastState ? NET_CHANNEL_UNRELIABLE : NET_CHANNEL_RELIABLE;
+        // Ground-height diagnostic (throttled): what the host broadcasts for
+        // the avatar — the client's idle snap copies x/y/fid verbatim.
+        static uint32_t gMpHostBcastLogTick = 0;
+        uint32_t nowTicks2 = getTicks();
+        if (nowTicks2 - gMpHostBcastLogTick > 500) {
+            gMpHostBcastLogTick = nowTicks2;
+            MpLog(MP_LOG_SYNC, "host bcast netId=%u tile=%d x=%d y=%d fid=0x%X frame=%d elev=%d force=%d",
+                p->netId, s.tile, s.x, s.y, s.fid, s.frame, s.elevation, force ? 1 : 0);
+        }
         NetBroadcastPacket(gMpSession.enetHost, channel,
             NET_PKT_PLAYER_STATE_UPDATE, &s, sizeof(s));
         MpPerfAddCounter(MP_PERF_CNT_PLAYER_PKTS, 1);
@@ -5913,6 +6007,20 @@ void MpApplyPlayerState(const NetPlayerStateUpdatePayload* s)
         // walk silently. The snap reads smooth at the broadcast cadence and
         // can never freeze or stutter — the combat-speed boost for remote
         // avatars is a host-side walk concern only.
+        // Ground-height diagnostic (throttled): local-player transform snap.
+        // Proves whether the idle dude is being pulled by stale host offsets.
+        if (isLocalPlayer && (obj->tile != s->tile || obj->x != s->x || obj->y != s->y
+            || obj->fid != s->fid || obj->frame != s->frame || obj->elevation != s->elevation)) {
+            static uint32_t gMpLocalSnapLogTick = 0;
+            uint32_t nowTicks2 = getTicks();
+            if (nowTicks2 - gMpLocalSnapLogTick > 500) {
+                gMpLocalSnapLogTick = nowTicks2;
+                MpLog(MP_LOG_SYNC, "local snap obj: tile=%d x=%d y=%d fid=0x%X frame=%d elev=%d busy=%d -> s: tile=%d x=%d y=%d fid=0x%X frame=%d elev=%d",
+                    obj->tile, obj->x, obj->y, obj->fid, obj->frame, obj->elevation,
+                    localMovementIsActive ? 1 : 0,
+                    s->tile, s->x, s->y, s->fid, s->frame, s->elevation);
+            }
+        }
         mpApplyObjectTransform(obj, s->tile, s->x, s->y, s->rotation, s->fid, s->frame, s->elevation, 0, false);
         p->hasLastState = true;
         // The avatar reached the clicked destination: the intent's outcome is
@@ -6046,8 +6154,43 @@ void MpApplyLocalDudeSnap(int tile, int elevation)
     if (animationIsBusy(dude) != 0) {
         reg_anim_clear(dude);
     }
-    mpApplyObjectTransform(dude, tile, dude->x, dude->y, dude->rotation,
+    // reg_anim_clear leaves the walk's accumulated pixel offsets in
+    // obj->x/obj->y (only a later objectSetLocation zeroes them). Re-applying
+    // those stale offsets would freeze the dude displaced from his tile -
+    // sprite sunk into the ground or floating - until the next walk resets
+    // them. An authoritative snap means exactly on the tile: zero the offsets.
+    mpApplyObjectTransform(dude, tile, 0, 0, dude->rotation,
         dude->fid, 0, elevation, 0, false);
+}
+
+// Co-op: the host stopped the avatar's walk before it reached the clicked
+// tile (pressure plate, script interrupt, knockback). The local walk is
+// optimistic prediction — it must stop too, or the client keeps walking to
+// the destination and then teleports back when the authoritative state
+// catches up. Snap to the host's position immediately; the next periodic
+// state simply confirms it.
+void MpOnWalkInterrupted(const NetWalkInterruptedPayload* payload)
+{
+    if (payload == nullptr) {
+        return;
+    }
+    Object* dude = gDude;
+    if (dude == nullptr || !hexGridTileIsValid(payload->tile) || !elevationIsValid(payload->elevation)) {
+        MpLogAlways(MP_LOG_SYNC, "walk interrupt rejected invalid tile=%d elev=%d",
+            payload->tile, payload->elevation);
+        return;
+    }
+    MpLogAlways(MP_LOG_SYNC, "walk interrupt snap tile=%d elev=%d busy=%d",
+        payload->tile, payload->elevation, animationIsBusy(dude) != 0 ? 1 : 0);
+    if (animationIsBusy(dude) != 0) {
+        reg_anim_clear(dude);
+    }
+    // Same stale-offset trap as MpApplyLocalDudeSnap: the cleared walk's
+    // accumulated obj->x/obj->y would otherwise be re-applied here and leave
+    // the dude frozen displaced from the authoritative tile (underground /
+    // floating) until his next walk. Snap to the exact tile.
+    mpApplyObjectTransform(dude, payload->tile, 0, 0, dude->rotation,
+        dude->fid, 0, payload->elevation, 0, false);
 }
 
 // Co-op: keep a critter's FID weapon slot in sync with the weapon actually in
@@ -6087,8 +6230,22 @@ void MpSyncCritterWeaponFid(Object* critter)
         return;
     }
 
+    // A model whose art set lacks the weapon's animation class (partial
+    // custom art, e.g. a primitive model holding a Bozar) must not carry the
+    // weapon code in its fid: the sprite would fail to load and every
+    // movement registration built from this fid would be rejected, freezing
+    // the player. Clamp to the unarmed code, which every critter art has.
+    int currentAnim = animationTypeFromFid(critter->fid);
+    if (weaponAnimationCode != WEAPON_ANIMATION_NONE
+        && !artExists(buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF,
+            currentAnim, weaponAnimationCode, critter->rotation + 1))) {
+        MpLog(MP_LOG_SYNC, "weapon fid clamped pid=0x%X anim=%d weapon=%d (art missing)",
+            critter->pid, (int)currentAnim, (int)weaponAnimationCode);
+        weaponAnimationCode = WEAPON_ANIMATION_NONE;
+    }
+
     int fid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF,
-        animationTypeFromFid(critter->fid), weaponAnimationCode,
+        currentAnim, weaponAnimationCode,
         critter->rotation + 1);
     if (fid != critter->fid) {
         Rect rect;
@@ -6942,10 +7099,27 @@ int MpOnMapTransitionRequested(MapTransition* transition)
         return 0;
     }
     if (transition->map <= 0) {
-        // Worldmap travel is deliberately outside v1. Keeping the session on
-        // one loaded map is safer than allowing the host and clients to enter
-        // different worldmap/game modes.
-        win_timed_msg("Worldmap travel is unavailable in co-op", COLOR_RED);
+        // Worldmap travel: the host drives it, clients mirror it read-only.
+        // Combat is the only real blocker (decision); vote in flight also
+        // blocks until it resolves.
+        if (gMpSession.applyingNetworkState) {
+            // A host-authoritative position update may place gDude on an
+            // exit-grid tile. This is state application, not a travel request.
+            return 1;
+        }
+        if (MpCombatIsActive()) {
+            win_timed_msg("Cannot travel during combat", COLOR_RED);
+            return 1;
+        }
+        if (gVoteSession.state == VOTE_STATE_ACTIVE) {
+            return 1;
+        }
+        if (gMpIsHost) {
+            // Pass through: mapHandleTransition brackets the worldmap modal
+            // with the co-op enter/leave broadcast.
+            return 0;
+        }
+        win_timed_msg("Only the host can travel the worldmap", COLOR_RED);
         return 1;
     }
     if (gMpSession.applyingNetworkState) {
@@ -7002,7 +7176,9 @@ int MpOnNetworkedPlayerTransitionRequested(Object* obj, MapTransition* transitio
         return 0;
     }
     if (transition->map <= 0) {
-        win_timed_msg("Worldmap travel is unavailable in co-op", COLOR_RED);
+        // Remote players cannot travel: the host drives the worldmap. They
+        // can still walk around the current map, but never leave it.
+        win_timed_msg("Only the host can travel the worldmap", COLOR_RED);
         return 1;
     }
 
@@ -7011,6 +7187,15 @@ int MpOnNetworkedPlayerTransitionRequested(Object* obj, MapTransition* transitio
         MpLogAlways(MP_LOG_VOTE, "networked transition rejected (no player) netObj=%u map=%d",
             MpGetObjNetId(obj), transition->map);
         return 0;
+    }
+    // While the host drives the worldmap, nobody else changes maps: a remote
+    // player's transition could only be processed after the worldmap modal
+    // closes (the vote resolve queues into mapHandleTransition, which the
+    // modal blocks), and the host's own travel destination owns the load.
+    if (gMpWorldmapActive) {
+        MpLogAlways(MP_LOG_VOTE, "networked transition blocked (host traveling) netId=%u map=%d",
+            player->netId, transition->map);
+        return 1;
     }
     if (gVoteSession.state == VOTE_STATE_ACTIVE) {
         MpLogAlways(MP_LOG_VOTE, "networked transition blocked (vote active) netId=%u map=%d",

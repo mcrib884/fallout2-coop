@@ -770,6 +770,16 @@ int animationRegisterMoveToTile(Object* owner, int tile, int elevation, int acti
     animationDescription->delay = delay;
 
     int fid = buildFid(objectTypeFromFid(owner->fid), owner->fid & 0xFFF, animationDescription->anim, weaponAnimationFromFid(owner->fid), owner->rotation + 1);
+    // Co-op: a model's art set may lack the walk/run frames for the equipped
+    // weapon's animation class (partial custom art, e.g. a primitive model
+    // holding a Bozar). Vanilla run registration already falls back when the
+    // run art is missing; extend the same rule to the weapon code — move with
+    // the unarmed art instead of rejecting the registration (a rejected walk
+    // leaves the player frozen in place, and the rejected fid keeps the
+    // sprite in a broken pose).
+    if (!artExists(fid)) {
+        fid = buildFid(objectTypeFromFid(owner->fid), owner->fid & 0xFFF, animationDescription->anim, WEAPON_ANIMATION_NONE, owner->rotation + 1);
+    }
 
     // NOTE: Uninline.
     if (_anim_preload(owner, fid, &(animationDescription->artCacheKey)) == -1) {
@@ -820,6 +830,12 @@ int animationRegisterRunToTile(Object* owner, int tile, int elevation, int actio
     animationDescription->delay = delay;
 
     int fid = buildFid(objectTypeFromFid(owner->fid), owner->fid & 0xFFF, animationDescription->anim, weaponAnimationFromFid(owner->fid), owner->rotation + 1);
+    // Same weapon-art fallback as animationRegisterMoveToTile: the model may
+    // lack frames for the equipped weapon's class (partial custom art), in
+    // which case the run moves with the unarmed art instead of failing.
+    if (!artExists(fid)) {
+        fid = buildFid(objectTypeFromFid(owner->fid), owner->fid & 0xFFF, animationDescription->anim, WEAPON_ANIMATION_NONE, owner->rotation + 1);
+    }
 
     // NOTE: Uninline.
     if (_anim_preload(owner, fid, &(animationDescription->artCacheKey)) == -1) {

@@ -37,6 +37,8 @@
 #include "message.h"
 #include "mouse.h"
 #include "multiplayer.h"
+#include "multiplayer_debug.h"
+#include "multiplayer_profile.h"
 #include "object.h"
 #include "palette.h"
 #include "party_member.h"
@@ -71,7 +73,7 @@ namespace fallout {
 
 #define LOAD_SAVE_SIGNATURE "FALLOUT SAVE FILE"
 #define LOAD_SAVE_DESCRIPTION_LENGTH 30
-#define LOAD_SAVE_HANDLER_COUNT 27
+#define LOAD_SAVE_HANDLER_COUNT 28
 
 #define LSGAME_MSG_NAME "LSGAME.MSG"
 
@@ -227,6 +229,11 @@ static bool _automap_db_flag = false;
 // 0x5193CC patches
 static const char* _patches = nullptr;
 
+// Co-op player identity sidecar (color + name override), persisted with the
+// save via the handler list below.
+static int CoopSaveGame(File* stream);
+static int CoopLoadGame(File* stream);
+
 // 0x5193EC master_save_list
 static SaveGameHandler* _master_save_list[LOAD_SAVE_HANDLER_COUNT] = {
     _DummyFunc,
@@ -255,6 +262,7 @@ static SaveGameHandler* _master_save_list[LOAD_SAVE_HANDLER_COUNT] = {
     partyMembersSave,
     queueSave,
     interfaceSave,
+    CoopSaveGame,
     _DummyFunc,
 };
 
@@ -286,6 +294,7 @@ static LoadGameHandler* _master_load_list[LOAD_SAVE_HANDLER_COUNT] = {
     partyMembersLoad,
     queueLoad,
     interfaceLoad,
+    CoopLoadGame,
     _EndLoad,
 };
 
@@ -436,15 +445,12 @@ int lsgSaveGame(int mode)
     debugFilePrint("LOADSAVE: save game begin mode=%d co-op=%d", mode, gMpActive ? 1 : 0);
     ScopedGameMode gm(GameMode::kSaveGame);
 
-    // Co-op: the HOST's save is the session's save — silently written to the
-    // slot the session was built from, never a slot picker. A CLIENT keeps the
-    // vanilla slot picker below so the player chooses where their save lands,
-    // and the save carries a full singleplayer-style snapshot (character +
-    // current map layer written by _map_save_in_game).
-    if (gMpActive && !gMpIsClient && gMpSessionSlot >= 0) {
-        debugFilePrint("LOADSAVE: co-op host save redirected to session slot=%d", gMpSessionSlot);
-        return lsgQuickSaveGameInternal(gMpSessionSlot);
-    }
+    // Co-op: the HOST flows through the vanilla slot picker exactly like the
+    // client — the player always chooses the slot for menu saves, and the
+    // first quicksave prompts the picker once (then quicksaves reuse the
+    // chosen slot via _quick_done/_slot_cursor). The session's own scaffolding
+    // save lives in the hidden coop slot (MpHostCurrentGame / the in-game
+    // join backup call lsgQuickSaveGameInternal directly, not this path).
 
     MessageListItem messageListItem;
 
@@ -3457,6 +3463,72 @@ static int _LoadObjDudeCid(File* stream)
 static int _SaveObjDudeCid(File* stream)
 {
     return fileWriteInt32(stream, gDude->cid);
+}
+
+// Co-op: persist the local player's chosen name and highlight color in the
+// save (the F11 CO-OP SETTINGS editors). Written as 1x int32 color + the
+// 32-byte name buffer as 8 int32s (the file API has no raw-byte writers).
+// The COOP save section: a magic marker first, then the local player's
+// color + name sidecar. The magic lets old saves (written before this
+// section existed) load cleanly — CoopLoadGame detects the absence and
+// leaves the stream untouched.
+#define COOP_SAVE_SECTION_MAGIC 0x434F4F50 // 'COOP'
+
+static int CoopSaveGame(File* stream)
+{
+    if (fileWriteInt32(stream, COOP_SAVE_SECTION_MAGIC) == -1) {
+        return -1;
+    }
+    if (fileWriteInt32(stream, MpDebugLocalPlayerColor()) == -1) {
+        return -1;
+    }
+    char name[MP_PROFILE_NAME_LENGTH] = { 0 };
+    const char* overrideName = MpDebugLocalPlayerNameOverride();
+    if (overrideName != nullptr) {
+        strncpy(name, overrideName, MP_PROFILE_NAME_LENGTH - 1);
+    }
+    for (int index = 0; index < 8; index++) {
+        int32_t chunk = 0;
+        memcpy(&chunk, name + index * 4, 4);
+        if (fileWriteInt32(stream, chunk) == -1) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int CoopLoadGame(File* stream)
+{
+    int magic = 0;
+    if (fileReadInt32(stream, &magic) == -1) {
+        // EOF here means the save predates the COOP section (the old
+        // handler list ended one entry earlier — _EndLoad reads nothing,
+        // so old saves end exactly at our position). Treat it as an
+        // absent section: stay at EOF and let the load finish.
+        return 0;
+    }
+    if (magic != COOP_SAVE_SECTION_MAGIC) {
+        // Save predates the COOP section: rewind the marker so the next
+        // handler reads its data intact (old saves have no sidecar).
+        fileSeek(stream, -4, SEEK_CUR);
+        return 0;
+    }
+    int color = -1;
+    if (fileReadInt32(stream, &color) == -1) {
+        return -1;
+    }
+    char name[MP_PROFILE_NAME_LENGTH] = { 0 };
+    for (int index = 0; index < 8; index++) {
+        int32_t chunk = 0;
+        if (fileReadInt32(stream, &chunk) == -1) {
+            return -1;
+        }
+        memcpy(name + index * 4, &chunk, 4);
+    }
+    name[MP_PROFILE_NAME_LENGTH - 1] = '\0';
+    MpDebugSetLocalPlayerColor(color);
+    MpDebugSetLocalPlayerName(name);
+    return 0;
 }
 
 // 0x480754

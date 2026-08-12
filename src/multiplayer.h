@@ -160,6 +160,7 @@ void MpSetRemoteActionNetId(uint32_t netId);
 // Per-frame edge indicators pointing at off-screen remote players. Called
 // from the main loop after MpTick, before renderPresent.
 void MpDrawPlayerIndicators();
+void MpRenderPlayerLabels();
 
 // Collects the objects (local dude + every connected remote avatar) at whose
 // positions the roof/wall transparency circle must be punched. Single-player

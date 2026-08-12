@@ -360,7 +360,7 @@ int windowCreate(int x, int y, int width, int height, int color, int flags)
         if (_GNW_texture == nullptr) {
             color = _colorTable[_GNW_wcolor[0]];
         }
-    } else if ((color & 0xFF00) != 0) {
+    } else if ((color & 0xFF00) != 0 && (color & 0xFF) >= 1 && (color & 0xFF) <= 6) {
         int colorIndex = (color & 0xFF) - 1;
         color = (color & ~0xFFFF) | _colorTable[_GNW_wcolor[colorIndex]];
     }
@@ -543,7 +543,7 @@ void windowDrawText(int win, const char* str, int maxWidth, int x, int y, int fl
         }
     }
 
-    if ((flags & 0xFF00) != 0) {
+    if ((flags & 0xFF00) != 0 && (flags & 0xFF) >= 1 && (flags & 0xFF) <= 6) {
         int colorIndex = (flags & 0xFF) - 1;
         textColor = (flags & ~0xFFFF) | _colorTable[_GNW_wcolor[colorIndex]];
     } else {
@@ -576,7 +576,7 @@ void windowDrawLine(int win, int left, int top, int right, int bottom, int color
         return;
     }
 
-    if ((color & 0xFF00) != 0) {
+    if ((color & 0xFF00) != 0 && (color & 0xFF) >= 1 && (color & 0xFF) <= 6) {
         int colorIndex = (color & 0xFF) - 1;
         color = (color & ~0xFFFF) | _colorTable[_GNW_wcolor[colorIndex]];
     }
@@ -597,7 +597,7 @@ void windowDrawRect(int win, int left, int top, int right, int bottom, int color
         return;
     }
 
-    if ((color & 0xFF00) != 0) {
+    if ((color & 0xFF00) != 0 && (color & 0xFF) >= 1 && (color & 0xFF) <= 6) {
         int colorIndex = (color & 0xFF) - 1;
         color = (color & ~0xFFFF) | _colorTable[_GNW_wcolor[colorIndex]];
     }
@@ -636,7 +636,7 @@ void windowFill(int win, int x, int y, int width, int height, int color)
         } else {
             color = _colorTable[_GNW_wcolor[0]] & 0xFF;
         }
-    } else if ((color & 0xFF00) != 0) {
+    } else if ((color & 0xFF00) != 0 && (color & 0xFF) >= 1 && (color & 0xFF) <= 6) {
         int colorIndex = (color & 0xFF) - 1;
         color = (color & ~0xFFFF) | _colorTable[_GNW_wcolor[colorIndex]];
     }
@@ -1234,6 +1234,27 @@ int windowGetRect(int win, Rect* rect)
     rectCopy(rect, &(window->rect));
 
     return 0;
+}
+
+bool windowIntersectsUiOrModal(int x, int y, int w, int h)
+{
+    if (!gWindowSystemInitialized || w <= 0 || h <= 0) {
+        return false;
+    }
+    int right = x + w - 1;
+    int bottom = y + h - 1;
+
+    for (int index = 1; index < gWindowsLength; index++) {
+        Window* window = gWindows[index];
+        if (window == nullptr || (window->flags & WINDOW_HIDDEN) != 0) {
+            continue;
+        }
+        if (x <= window->rect.right && right >= window->rect.left
+            && y <= window->rect.bottom && bottom >= window->rect.top) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // 0x4D797C

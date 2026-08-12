@@ -245,15 +245,18 @@ static void mpCombatUpdateCards()
         // Per-player border color, stable per netId. The active player's card
         // switches to a thicker white border so the current turn reads at a
         // glance alongside the ">>" name marker.
-        static const int kCardBorderColors[5] = {
-            COLOR_LIGHT_GOLD,
-            COLOR_CYAN,
-            COLOR_LIGHT_GREEN_3,
-            COLOR_LIGHT_PINK,
-            COLOR_LIGHT_ORANGE,
-        };
         bool isActiveTurn = gMpCombat.whoseTurn == player->netId;
-        int borderColor = kCardBorderColors[(player->netId - 1) % 5];
+        int borderColor = MpPlayerColorFor(player->obj);
+        if (borderColor < 0) {
+            switch ((player->netId - 1) % 5) {
+            case 0: borderColor = COLOR_LIGHT_GOLD; break;
+            case 1: borderColor = COLOR_CYAN; break;
+            case 2: borderColor = COLOR_LIGHT_GREEN_3; break;
+            case 3: borderColor = COLOR_LIGHT_PINK; break;
+            case 4: borderColor = COLOR_LIGHT_ORANGE; break;
+            default: borderColor = COLOR_LIGHT_GOLD; break;
+            }
+        }
         if (isActiveTurn) {
             borderColor = COLOR_WHITE;
         }

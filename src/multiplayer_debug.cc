@@ -22,6 +22,7 @@
 #include "mouse.h"
 #include "multiplayer.h"
 #include "multiplayer_perf.h"
+#include "multiplayer_profile.h"
 #include "net.h"
 #include "object.h"
 #include "perk.h"
@@ -92,6 +93,9 @@ constexpr int DBG_BTN_SKIN_CAT_NEXT = 744;
 constexpr int DBG_BTN_SKIN_MODEL_PREV = 745;
 constexpr int DBG_BTN_SKIN_MODEL_NEXT = 746;
 constexpr int DBG_BTN_SKIN = 747;
+constexpr int DBG_BTN_NAME = 748;
+constexpr int DBG_BTN_COLOR = 749;
+constexpr int DBG_BTN_COLOR_BASE = 830;
 constexpr int DBG_BTN_SKIN_CAT_BASE = 750;
 constexpr int DBG_BTN_SKIN_MODEL_BASE = 770;
 constexpr int DBG_BTN_PERK_ROW_BASE = 780; // + 0..41 = rows of the current perk page
@@ -933,6 +937,12 @@ static void dbgTraitListShow()
     };
 
     auto rebuild = [&]() {
+        // Re-registering buttons in place never clears the surface: the old
+        // ' [1]'/' [2]' glyphs beyond a shorter label's width stayed in the
+        // window buffer (the unselect ghost). Clear the whole surface and
+        // redraw the border before re-registering.
+        windowFill(win, 0, 0, kTraitWidth, kTraitHeight, COLOR_BLACK);
+        windowDrawBorder(win);
         for (int index = 0; index < TRAIT_COUNT; index++) {
             Trait trait = static_cast<Trait>(index);
             const char* name = traitGetName(trait);
@@ -1171,6 +1181,265 @@ static void dbgItemBrowserShow()
         sharedFpsLimiter.throttle();
     }
 
+    windowDestroy(win);
+}
+
+static const char* kPlayerPaletteNames[8] = {
+    "Cyan", "Red", "Green", "Blue", "Yellow", "Pink", "Orange", "Gold",
+};
+
+// Rename the local player from the F11 CO-OP SETTINGS menu. The name rides
+// the profile's IDENTITY wire to every machine and persists via the COOP
+// save handler. Printable KEY_* constants ARE the ASCII characters (kb.h), so
+// the keycode->char mapping is the printable range; BACKSPACE deletes,
+// RETURN commits (empty = revert to the default name), ESC cancels.
+static void dbgNameEditorShow()
+{
+    int winX;
+    int winY;
+    dbgCenteredPos(320, 120, &winX, &winY);
+    int win = windowCreate(winX, winY, 320, 120, COLOR_BLACK,
+        WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
+    if (win == -1) {
+        return;
+    }
+    windowDrawBorder(win);
+    const char* title = "PLAYER NAME";
+    windowDrawText(win, title, 0, (320 - fontGetStringWidth(title)) / 2, 6, COLOR_WHITE);
+
+    char nameBuf[MP_PROFILE_NAME_LENGTH];
+    const char* current = MpDebugLocalPlayerNameOverride();
+    strncpy(nameBuf, current != nullptr ? current : "", MP_PROFILE_NAME_LENGTH - 1);
+    nameBuf[MP_PROFILE_NAME_LENGTH - 1] = '\0';
+    windowRefresh(win);
+
+    bool keepGoing = true;
+    while (keepGoing) {
+        sharedFpsLimiter.mark();
+        MpTick();
+        mouseShowCursor();
+        windowFill(win, 8, 40, 304, 20, COLOR_BLACK);
+        windowDrawText(win, nameBuf, 0, 16, 42, COLOR_WHITE);
+        windowRefresh(win);
+        renderPresent();
+        int keyCode = inputGetInput();
+        if (keyCode >= 32 && keyCode <= 126) {
+            size_t len = strlen(nameBuf);
+            if (len < MP_PROFILE_NAME_LENGTH - 1) {
+                nameBuf[len] = (char)keyCode;
+                nameBuf[len + 1] = '\0';
+            }
+        } else if (keyCode == KEY_BACKSPACE) {
+            size_t len = strlen(nameBuf);
+            if (len > 0) {
+                nameBuf[len - 1] = '\0';
+            }
+        } else if (keyCode == KEY_RETURN) {
+            if (nameBuf[0] != '\0') {
+                MpDebugSetLocalPlayerName(nameBuf);
+                debugFilePrint("MPDBG: player name set to '%s'", nameBuf);
+            } else {
+                MpDebugSetLocalPlayerName(nullptr);
+                debugFilePrint("MPDBG: player name override cleared");
+            }
+            keepGoing = false;
+        } else if (keyCode == KEY_ESCAPE) {
+            debugFilePrint("MPDBG: modal close via ESC menu='name-editor'");
+            keepGoing = false;
+        }
+        sharedFpsLimiter.throttle();
+    }
+    windowDestroy(win);
+}
+
+// Pick the local player's highlight/label/card color. The color rides the
+// profile's IDENTITY wire (playerColor) and persists via the COOP save
+// handler; the ring, floating name label, and combat card borders all use it.
+static void dbgColorPickerShow()
+{
+    constexpr int kWindowWidth = 340;
+    constexpr int kWindowHeight = 250;
+    constexpr int DBG_BTN_R_DEC = DBG_BTN_COLOR_BASE + 10;
+    constexpr int DBG_BTN_R_INC = DBG_BTN_COLOR_BASE + 11;
+    constexpr int DBG_BTN_G_DEC = DBG_BTN_COLOR_BASE + 12;
+    constexpr int DBG_BTN_G_INC = DBG_BTN_COLOR_BASE + 13;
+    constexpr int DBG_BTN_B_DEC = DBG_BTN_COLOR_BASE + 14;
+    constexpr int DBG_BTN_B_INC = DBG_BTN_COLOR_BASE + 15;
+    constexpr int DBG_BTN_CLOSE_X = DBG_BTN_COLOR_BASE + 16;
+
+    int winX;
+    int winY;
+    dbgCenteredPos(kWindowWidth, kWindowHeight, &winX, &winY);
+    int win = windowCreate(winX, winY, kWindowWidth, kWindowHeight, COLOR_BLACK,
+        WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
+    if (win == -1) {
+        return;
+    }
+    windowDrawBorder(win);
+    const char* title = "PLAYER COLOR";
+    windowDrawText(win, title, 0, (kWindowWidth - fontGetStringWidth(title)) / 2, 6, COLOR_WHITE);
+
+    // Top-right close [X] button
+    _win_register_text_button(win, kWindowWidth - 26, 4, -1, -1, -1, DBG_BTN_CLOSE_X, "X", 0);
+
+    // Static slider labels
+    windowDrawText(win, "R:", 0, 20, 92, COLOR_LIGHT_RED);
+    windowDrawText(win, "G:", 0, 20, 132, COLOR_LIGHT_GREEN_3);
+    windowDrawText(win, "B:", 0, 20, 172, COLOR_PALE_BLUE);
+
+    // Red Slider buttons
+    _win_register_text_button(win, 282, 90, -1, -1, -1, DBG_BTN_R_DEC, "<", 0);
+    _win_register_text_button(win, 305, 90, -1, -1, -1, DBG_BTN_R_INC, ">", 0);
+
+    // Green Slider buttons
+    _win_register_text_button(win, 282, 130, -1, -1, -1, DBG_BTN_G_DEC, "<", 0);
+    _win_register_text_button(win, 305, 130, -1, -1, -1, DBG_BTN_G_INC, ">", 0);
+
+    // Blue Slider buttons
+    _win_register_text_button(win, 282, 170, -1, -1, -1, DBG_BTN_B_DEC, "<", 0);
+    _win_register_text_button(win, 305, 170, -1, -1, -1, DBG_BTN_B_INC, ">", 0);
+
+    // Action buttons at bottom
+    _win_register_text_button(win, 50, 210, -1, -1, -1, DBG_BTN_COLOR_BASE + 8, "Apply", 0);
+    _win_register_text_button(win, 200, 210, -1, -1, -1, DBG_BTN_COLOR_BASE + 9, "Cancel", 0);
+
+    int rVal = 0;
+    int gVal = 255;
+    int bVal = 0;
+
+    int pal = MpPlayerColorFor(gDude);
+    if (pal >= 0) {
+        int rgb = Color2RGB((Color)pal);
+        rVal = (rgb >> 16) & 0xFF;
+        gVal = (rgb >> 8) & 0xFF;
+        bVal = rgb & 0xFF;
+    }
+
+    const int trackX = 75;
+    const int trackW = 200;
+    const int trackH = 14;
+
+    windowRefresh(win);
+
+    bool keepGoing = true;
+    while (keepGoing) {
+        sharedFpsLimiter.mark();
+        MpTick();
+        mouseShowCursor();
+
+        // 1. Calculate live palette color from R, G, B
+        int rgb24 = ((rVal & 0xFF) << 16) | ((gVal & 0xFF) << 8) | (bVal & 0xFF);
+        int previewColor = _colorTable[rgb555(rgb24)];
+
+        // 2. Redraw Live Preview Box (y = 28..76)
+        windowFill(win, 20, 28, 300, 48, COLOR_BLACK);
+        windowDrawRect(win, 20, 28, 20 + 300 - 1, 28 + 48 - 1, previewColor);
+
+        const char* nameStr = MpDebugLocalPlayerNameOverride();
+        if (nameStr == nullptr || nameStr[0] == '\0') {
+            nameStr = critterGetName(gDude);
+        }
+        if (nameStr == nullptr || nameStr[0] == '\0') {
+            nameStr = "PLAYER";
+        }
+
+        char labelBuf[64];
+        snprintf(labelBuf, sizeof(labelBuf), "PREVIEW: %s", nameStr);
+        int textW = fontGetStringWidth(labelBuf);
+        int textX = (kWindowWidth - textW) / 2;
+
+        windowDrawText(win, labelBuf, 0, textX, 34, previewColor);
+
+        char rgbBuf[64];
+        snprintf(rgbBuf, sizeof(rgbBuf), "R: %3d  G: %3d  B: %3d  (#%02X%02X%02X)",
+            rVal, gVal, bVal, rVal, gVal, bVal);
+        int rgbW = fontGetStringWidth(rgbBuf);
+        windowDrawText(win, rgbBuf, 0, (kWindowWidth - rgbW) / 2, 56, COLOR_LIGHT_GREY);
+
+        // 3. Update R Value & Slider Track (y = 92)
+        windowFill(win, 42, 92, 28, 14, COLOR_BLACK);
+        char rTxt[8];
+        snprintf(rTxt, sizeof(rTxt), "%3d", rVal);
+        windowDrawText(win, rTxt, 0, 42, 92, COLOR_WHITE);
+
+        windowFill(win, trackX, 92, trackW, trackH, COLOR_BLACK);
+        windowDrawRect(win, trackX, 92, trackX + trackW - 1, 92 + trackH - 1, COLOR_DARK_GREY);
+        int rThumbX = trackX + (rVal * (trackW - 16) / 255);
+        windowFill(win, rThumbX, 93, 16, 12, COLOR_LIGHT_RED);
+        windowDrawRect(win, rThumbX, 93, rThumbX + 15, 93 + 11, COLOR_WHITE);
+
+        // 4. Update G Value & Slider Track (y = 132)
+        windowFill(win, 42, 132, 28, 14, COLOR_BLACK);
+        char gTxt[8];
+        snprintf(gTxt, sizeof(gTxt), "%3d", gVal);
+        windowDrawText(win, gTxt, 0, 42, 132, COLOR_WHITE);
+
+        windowFill(win, trackX, 132, trackW, trackH, COLOR_BLACK);
+        windowDrawRect(win, trackX, 132, trackX + trackW - 1, 132 + trackH - 1, COLOR_DARK_GREY);
+        int gThumbX = trackX + (gVal * (trackW - 16) / 255);
+        windowFill(win, gThumbX, 133, 16, 12, COLOR_LIGHT_GREEN_3);
+        windowDrawRect(win, gThumbX, 133, gThumbX + 15, 133 + 11, COLOR_WHITE);
+
+        // 5. Update B Value & Slider Track (y = 172)
+        windowFill(win, 42, 172, 28, 14, COLOR_BLACK);
+        char bTxt[8];
+        snprintf(bTxt, sizeof(bTxt), "%3d", bVal);
+        windowDrawText(win, bTxt, 0, 42, 172, COLOR_WHITE);
+
+        windowFill(win, trackX, 172, trackW, trackH, COLOR_BLACK);
+        windowDrawRect(win, trackX, 172, trackX + trackW - 1, 172 + trackH - 1, COLOR_DARK_GREY);
+        int bThumbX = trackX + (bVal * (trackW - 16) / 255);
+        windowFill(win, bThumbX, 173, 16, 12, COLOR_PALE_BLUE);
+        windowDrawRect(win, bThumbX, 173, bThumbX + 15, 173 + 11, COLOR_WHITE);
+
+        windowRefresh(win);
+        renderPresent();
+
+        // 6. Direct Mouse Dragging / Clicking on RGB Tracks
+        int mouseX, mouseY;
+        mouseGetPosition(&mouseX, &mouseY);
+        if ((mouse_get_last_buttons() & 1) != 0) {
+            int localX = mouseX - (winX + trackX);
+            int localY = mouseY - winY;
+            if (localX >= 0 && localX <= trackW) {
+                int newVal = std::clamp(localX * 255 / trackW, 0, 255);
+                if (localY >= 86 && localY <= 110) {
+                    rVal = newVal;
+                } else if (localY >= 126 && localY <= 150) {
+                    gVal = newVal;
+                } else if (localY >= 166 && localY <= 190) {
+                    bVal = newVal;
+                }
+            }
+        }
+
+        int keyCode = inputGetInput();
+        if (keyCode == DBG_BTN_R_DEC) {
+            rVal = std::clamp(rVal - 15, 0, 255);
+        } else if (keyCode == DBG_BTN_R_INC) {
+            rVal = std::clamp(rVal + 15, 0, 255);
+        } else if (keyCode == DBG_BTN_G_DEC) {
+            gVal = std::clamp(gVal - 15, 0, 255);
+        } else if (keyCode == DBG_BTN_G_INC) {
+            gVal = std::clamp(gVal + 15, 0, 255);
+        } else if (keyCode == DBG_BTN_B_DEC) {
+            bVal = std::clamp(bVal - 15, 0, 255);
+        } else if (keyCode == DBG_BTN_B_INC) {
+            bVal = std::clamp(bVal + 15, 0, 255);
+        } else if (keyCode == DBG_BTN_COLOR_BASE + 8 || keyCode == KEY_RETURN) {
+            int finalRgb = ((rVal & 0xFF) << 16) | ((gVal & 0xFF) << 8) | (bVal & 0xFF);
+            int finalPal = _colorTable[rgb555(finalRgb)];
+            MpDebugSetLocalPlayerColor(finalPal);
+            debugFilePrint("MPDBG: RGB player color applied pal=%d (R=%d G=%d B=%d)",
+                finalPal, rVal, gVal, bVal);
+            keepGoing = false;
+        } else if (keyCode == KEY_ESCAPE || keyCode == 500
+            || keyCode == DBG_BTN_COLOR_BASE + 9 || keyCode == DBG_BTN_CLOSE_X) {
+            debugFilePrint("MPDBG: modal close via ESC/Close menu='color-picker'");
+            keepGoing = false;
+        }
+        sharedFpsLimiter.throttle();
+    }
     windowDestroy(win);
 }
 
@@ -1586,6 +1855,19 @@ void MpDebugMenuShow()
     dbgSkinStatusText(skinStatus, sizeof(skinStatus));
     _win_register_text_button(win, 330, 146, -1, -1, -1, DBG_BTN_SKIN, "Skin...", 0);
     windowDrawText(win, skinStatus, 0, 330, 174, COLOR_WHITE);
+    // Player identity: rename and recolor. Both ride the profile (IDENTITY
+    // wire) to every machine and persist via the COOP save handler.
+    char nameStatus[64];
+    snprintf(nameStatus, sizeof(nameStatus), "Name: %.20s",
+        MpDebugLocalPlayerNameOverride() != nullptr ? MpDebugLocalPlayerNameOverride() : "");
+    _win_register_text_button(win, 330, 204, -1, -1, -1, DBG_BTN_NAME, "Name...", 0);
+    windowDrawText(win, nameStatus, 0, 330, 232, COLOR_WHITE);
+    char colorStatus[64];
+    int curColor = MpDebugLocalPlayerColor();
+    snprintf(colorStatus, sizeof(colorStatus), "Color: %s",
+        curColor >= 0 && curColor < 8 ? kPlayerPaletteNames[curColor] : "default");
+    _win_register_text_button(win, 330, 262, -1, -1, -1, DBG_BTN_COLOR, "Color...", 0);
+    windowDrawText(win, colorStatus, 0, 330, 290, COLOR_WHITE);
     windowRefresh(win);
 
     bool keepGoing = true;
@@ -1608,6 +1890,8 @@ void MpDebugMenuShow()
                 break;
             case DBG_BTN_CHEATS:
             case DBG_BTN_SKIN:
+            case DBG_BTN_NAME:
+            case DBG_BTN_COLOR:
             case DBG_BTN_CLOSE:
                 rc = keyCode;
                 break;
@@ -1656,6 +1940,23 @@ void MpDebugMenuShow()
             dbgSkinStatusText(skinStatus, sizeof(skinStatus));
             windowFill(win, 330, 172, 130, 20, COLOR_BLACK);
             windowDrawText(win, skinStatus, 0, 330, 174, COLOR_WHITE);
+            windowRefresh(win);
+            break;
+        case DBG_BTN_NAME:
+            dbgNameEditorShow();
+            snprintf(nameStatus, sizeof(nameStatus), "Name: %.20s",
+                MpDebugLocalPlayerNameOverride() != nullptr ? MpDebugLocalPlayerNameOverride() : "");
+            windowFill(win, 330, 230, 130, 20, COLOR_BLACK);
+            windowDrawText(win, nameStatus, 0, 330, 232, COLOR_WHITE);
+            windowRefresh(win);
+            break;
+        case DBG_BTN_COLOR:
+            dbgColorPickerShow();
+            curColor = MpDebugLocalPlayerColor();
+            snprintf(colorStatus, sizeof(colorStatus), "Color: %s",
+                curColor >= 0 && curColor < 8 ? kPlayerPaletteNames[curColor] : "default");
+            windowFill(win, 330, 288, 130, 20, COLOR_BLACK);
+            windowDrawText(win, colorStatus, 0, 330, 290, COLOR_WHITE);
             windowRefresh(win);
             break;
         }
@@ -1783,6 +2084,128 @@ void MpDebugRestoreSkin()
     objectSetFid(gDude, fid, &rect);
     tileWindowRefreshRect(&rect, gDude->elevation);
     debugFilePrint("MPDBG: skin restored model=%d override cleared", model);
+}
+
+
+// ---------------------------------------------------------------------------
+// Player identity overrides: the local name + highlight color. Both ride the
+// profile IDENTITY section to the other machines and persist through the COOP
+// save-section handler (loadsave.cc); the color drives the per-player ring,
+// the floating name label and the combat card borders.
+// ---------------------------------------------------------------------------
+static char gMpLocalPlayerName[MP_PROFILE_NAME_LENGTH] = {};
+static int gMpLocalPlayerColor = -1;
+
+const char* MpDebugLocalPlayerNameOverride()
+{
+    return gMpLocalPlayerName[0] != '\0' ? gMpLocalPlayerName : nullptr;
+}
+
+int MpDebugLocalPlayerColor()
+{
+    return gMpLocalPlayerColor;
+}
+
+void MpDebugSetLocalPlayerName(const char* name)
+{
+    if (name == nullptr || name[0] == '\0') {
+        gMpLocalPlayerName[0] = '\0';
+        debugFilePrint("MPDBG: local player name cleared");
+        return;
+    }
+    strncpy(gMpLocalPlayerName, name, MP_PROFILE_NAME_LENGTH - 1);
+    gMpLocalPlayerName[MP_PROFILE_NAME_LENGTH - 1] = '\0';
+    // The player slot name drives the floating tag and the combat cards —
+    // refresh it immediately so the local game shows the new name without
+    // waiting for a profile round trip.
+    if (gMpActive && gMpSession.localNetId > 0
+        && gMpSession.localNetId <= NET_MAX_PLAYERS) {
+        MultiplayerPlayer* local = &gMpSession.players[gMpSession.localNetId - 1];
+        if (local->isConnected) {
+            strncpy(local->name, gMpLocalPlayerName, NET_PEER_NAME_LENGTH - 1);
+            local->name[NET_PEER_NAME_LENGTH - 1] = '\0';
+        }
+        // The character screen (F2) reads critterGetName(gDude), which
+        // resolves through the local runtime profile FIRST. The host never
+        // echoes a rename back to its owner (skipOwner), so without this the
+        // client's own runtime profile would keep the old name forever and
+        // the F2 screen would never update.
+        MpPlayerRuntime* localRuntime = MpProfileGetRuntime(gMpSession.localNetId);
+        if (localRuntime != nullptr) {
+            strncpy(localRuntime->profile.name, gMpLocalPlayerName,
+                MP_PROFILE_NAME_LENGTH - 1);
+            localRuntime->profile.name[MP_PROFILE_NAME_LENGTH - 1] = '\0';
+        }
+    }
+    debugFilePrint("MPDBG: local player name set '%s'", gMpLocalPlayerName);
+}
+
+void MpDebugSetLocalPlayerColor(int colorIndex)
+{
+    gMpLocalPlayerColor = colorIndex;
+    debugFilePrint("MPDBG: local player color set %d", colorIndex);
+}
+
+int MpPlayerColorFor(const Object* obj)
+{
+    if (!gMpActive || obj == nullptr) {
+        return -1;
+    }
+    int colorIndex = -1;
+    int playerNetId = 0;
+    if (obj == gDude) {
+        colorIndex = gMpLocalPlayerColor;
+        playerNetId = gMpSession.localNetId;
+    }
+    uint32_t objNetId = MpGetObjNetId(const_cast<Object*>(obj));
+    if (colorIndex < 0) {
+        for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+            const MultiplayerPlayer* p = &gMpSession.players[index];
+            if (p->isConnected) {
+                if (p->obj == obj || (objNetId != 0 && p->objNetId == objNetId)) {
+                    playerNetId = p->netId;
+                    MpPlayerRuntime* runtime = MpProfileGetRuntime(p->netId);
+                    if (runtime != nullptr) {
+                        colorIndex = runtime->profile.playerColor;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    if (colorIndex < 0) {
+        for (int netId = 1; netId <= NET_MAX_PLAYERS; netId++) {
+            MpPlayerRuntime* runtime = MpProfileGetRuntime(netId);
+            if (runtime != nullptr && runtime->object == obj) {
+                playerNetId = netId;
+                colorIndex = runtime->profile.playerColor;
+                break;
+            }
+        }
+    }
+    // Default fallback when playerColor is unset (-1): assign distinct per-player preset
+    if (colorIndex < 0 && playerNetId >= 1 && playerNetId <= NET_MAX_PLAYERS) {
+        colorIndex = (playerNetId - 1) % 8;
+    }
+    // Evaluate legacy preset indices (0..7) to macro palette colors.
+    if (colorIndex >= 0 && colorIndex < 8) {
+        switch (colorIndex) {
+        case 0: return COLOR_CYAN;
+        case 1: return COLOR_RED;
+        case 2: return COLOR_LIGHT_GREEN_3;
+        case 3: return COLOR_BLUE;
+        case 4: return COLOR_LIGHT_YELLOW;
+        case 5: return COLOR_LIGHT_PINK;
+        case 6: return COLOR_LIGHT_ORANGE;
+        case 7: return COLOR_LIGHT_GOLD;
+        default: break;
+        }
+    }
+    // Direct palette color index (0..255) from the RGB slider.
+    if (colorIndex >= 0 && colorIndex < 256) {
+        return colorIndex;
+    }
+    return -1;
 }
 
 void MpDebugModelPickerShow()

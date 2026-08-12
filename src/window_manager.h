@@ -213,6 +213,7 @@ int windowGetAtPoint(int x, int y);
 int windowGetWidth(int win);
 int windowGetHeight(int win);
 int windowGetRect(int win, Rect* rect);
+bool windowIntersectsUiOrModal(int x, int y, int w, int h);
 int _win_check_all_buttons();
 int _GNW_check_menu_bars(int input);
 void programWindowSetTitle(const char* title);

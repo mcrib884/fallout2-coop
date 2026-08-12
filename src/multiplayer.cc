@@ -42,6 +42,8 @@
 #include "perk.h"
 #include "sfall_script_hooks.h"
 #include "svga.h"
+#include "draw.h"
+#include "text_font.h"
 #include "window_manager.h"
 #include "skill.h"
 #include "party_member.h"
@@ -2198,6 +2200,13 @@ static void mpHostSyncProfiles()
             captured.editorLastLevel = runtime->profile.editorLastLevel;
             captured.editorHasFreePerk = runtime->profile.editorHasFreePerk;
             captured.remainingCharacterPoints = runtime->profile.remainingCharacterPoints;
+            captured.playerColor = runtime->profile.playerColor;
+            // Same leak as playerColor above: the object capture applies the
+            // LOCAL name override to whatever object it captures, so without
+            // this the host's rename would overwrite the client's name in the
+            // sync-detect and broadcast the host's name onto the client
+            // (client renames then get clobbered by the host's stale name).
+            memcpy(captured.name, runtime->profile.name, sizeof(captured.name));
         }
 
         MpPlayerProfile stored = runtime->profile;
@@ -2611,7 +2620,11 @@ void MpDrawPlayerIndicators()
         // an explicit selection windowDrawText can silently skip the draw
         // (line-height/width checks against the window size).
         fontSetCurrent(MP_INDICATOR_FONT);
-        windowDrawText(win, text, 0, 6, 3, COLOR_LIGHT_YELLOW);
+        int indColor = MpPlayerColorFor(obj);
+        if (indColor < 0) {
+            indColor = COLOR_LIGHT_YELLOW;
+        }
+        windowDrawText(win, text, 0, 6, 3, indColor);
         windowRefresh(win);
 
         gMpIndicatorWindows[index] = win;
@@ -2910,6 +2923,162 @@ void MpTick()
         tileWindowRefreshFull();
     }
     mpDbgFidWatch();
+}
+
+// Co-op: draw every player's name above their avatar, directly into the
+// engine's 8-bit screen surface each frame. The main loop calls this AFTER
+// everything else has drawn (scene, UI, indicators, camera drag) and
+// immediately before renderPresent — any earlier hook gets its blit
+// overwritten by a later _GNW95_ShowRect, which is why the first attempts
+// never showed up. The label sits above the model's head — the taller the
+// art, the higher the label — so tall custom models lift it automatically
+// and never clip. Drawn in the player's chosen color, green until one is
+// picked (Task C default).
+void MpRenderPlayerLabels()
+{
+    if (!gMpActive || gSdlSurface == nullptr || gSdlTextureSurface == nullptr) {
+        return;
+    }
+    // Dirty-rect engine: restore each previous label's clean original pixels into
+    // both gSdlSurface and gSdlTextureSurface so moving or disappearing tags don't
+    // smear, tear, or overwrite HUD/UI windows with raw ground tiles.
+    struct SavedLabelRegion {
+        SDL_Rect rect;
+        bool valid = false;
+        std::vector<uint8_t> pixels;
+    };
+    static SavedLabelRegion sSavedRegions[NET_MAX_PLAYERS];
+
+    for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+        SavedLabelRegion& reg = sSavedRegions[index];
+        if (!reg.valid) {
+            continue;
+        }
+        reg.valid = false;
+        if (reg.rect.w <= 0 || reg.rect.h <= 0 || reg.pixels.empty()) {
+            continue;
+        }
+        for (int row = 0; row < reg.rect.h; row++) {
+            int dstY = reg.rect.y + row;
+            if (dstY < 0 || dstY >= gSdlSurface->h) continue;
+            uint8_t* dstRow = (uint8_t*)gSdlSurface->pixels + (size_t)dstY * gSdlSurface->pitch + reg.rect.x;
+            const uint8_t* srcRow = reg.pixels.data() + (size_t)row * reg.rect.w;
+            memcpy(dstRow, srcRow, reg.rect.w);
+        }
+        SDL_BlitSurface(gSdlSurface, &reg.rect, gSdlTextureSurface, &reg.rect);
+    }
+
+    Buffer2D backBuffer((unsigned char*)gSdlSurface->pixels,
+        gSdlSurface->w, gSdlSurface->h);
+    if (!backBuffer) {
+        return;
+    }
+    ScopedFont scopedFont(101);
+    for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+        const MultiplayerPlayer* p = &gMpSession.players[index];
+        Object* critter = p->obj;
+        if (critter == nullptr && (p->isLocal || (gMpActive && p->netId == gMpSession.localNetId))) {
+            critter = gDude;
+        }
+        if (!p->isConnected || critter == nullptr
+            || (critter->flags & OBJECT_HIDDEN) != 0
+            || !tileIsValid(critter->tile)) {
+            continue;
+        }
+        int sx;
+        int sy;
+        if (tileToScreenXY(critter->tile, &sx, &sy) == -1) {
+            continue;
+        }
+        sx += critter->x;
+        sy += critter->y;
+
+        int artW = 0;
+        int artH = 0;
+        CacheEntry* handle = nullptr;
+        Art* art = artLock(critter->fid, &handle);
+        if (art != nullptr) {
+            artGetSize(art, critter->frame, critter->rotation, &artW, &artH);
+            artUnlock(handle);
+        }
+
+        const char* name = p->name;
+        if ((name == nullptr || name[0] == '\0') && critter == gDude) {
+            name = critterGetName(gDude);
+        }
+        if (name == nullptr || name[0] == '\0') {
+            continue;
+        }
+        int nameW = fontGetStringWidth(name);
+        int fontH = fontGetLineHeight();
+
+        int x = sx + artW / 2 - nameW / 2;
+        int y = sy - artH - fontH - 2;
+
+        // Ensure the 1px outline draws (x-1, x+1, y-1, y+1) and glyphs fit inside
+        // gSdlSurface bounds so fontDrawText2D asserts do not trigger.
+        if (x + nameW < 1 || x > gSdlSurface->w - 2
+            || y + fontH < 1 || y > gSdlSurface->h - 2) {
+            continue;
+        }
+        int clampedX = std::clamp(x, 1, gSdlSurface->w - nameW - 1);
+        int clampedY = std::clamp(y, 1, gSdlSurface->h - fontH - 1);
+
+        int labelColor = MpPlayerColorFor(critter);
+        if (labelColor < 0) {
+            labelColor = COLOR_LIGHT_GREEN_3;
+        }
+
+        SDL_Rect labelRect;
+        labelRect.x = std::max(0, clampedX - 1);
+        labelRect.y = std::max(0, clampedY - 1);
+        labelRect.w = std::min(nameW + 2, gSdlSurface->w - labelRect.x);
+        labelRect.h = std::min(fontH + 2, gSdlSurface->h - labelRect.y);
+
+        if (labelRect.w <= 0 || labelRect.h <= 0
+            || windowIntersectsUiOrModal(labelRect.x, labelRect.y, labelRect.w, labelRect.h)) {
+            continue;
+        }
+
+        // Snapshot original screen pixels before drawing text onto gSdlSurface
+        SavedLabelRegion& reg = sSavedRegions[index];
+        reg.rect = labelRect;
+        reg.pixels.resize((size_t)labelRect.w * labelRect.h);
+        for (int row = 0; row < labelRect.h; row++) {
+            int srcY = labelRect.y + row;
+            const uint8_t* srcRow = (const uint8_t*)gSdlSurface->pixels + (size_t)srcY * gSdlSurface->pitch + labelRect.x;
+            uint8_t* dstRow = reg.pixels.data() + (size_t)row * labelRect.w;
+            memcpy(dstRow, srcRow, labelRect.w);
+        }
+        reg.valid = true;
+
+        fontDrawText2D(backBuffer, clampedX - 1, clampedY, name, nameW, COLOR_BLACK);
+        fontDrawText2D(backBuffer, clampedX + 1, clampedY, name, nameW, COLOR_BLACK);
+        fontDrawText2D(backBuffer, clampedX, clampedY - 1, name, nameW, COLOR_BLACK);
+        fontDrawText2D(backBuffer, clampedX, clampedY + 1, name, nameW, COLOR_BLACK);
+        fontDrawText2D(backBuffer, clampedX, clampedY, name, nameW, labelColor);
+
+        int blitRc = SDL_BlitSurface(gSdlSurface, &labelRect, gSdlTextureSurface, &labelRect);
+
+        static bool sMpTagDiagLogged = false;
+        if (!sMpTagDiagLogged) {
+            sMpTagDiagLogged = true;
+            int srcColorPx = 0;
+            int src0 = 0;
+            for (int scanY = labelRect.y; scanY < labelRect.y + labelRect.h; scanY++) {
+                const unsigned char* row = (const unsigned char*)gSdlSurface->pixels
+                    + (size_t)scanY * gSdlSurface->pitch;
+                for (int scanX = labelRect.x; scanX < labelRect.x + labelRect.w; scanX++) {
+                    unsigned char b = row[scanX];
+                    if (b == (unsigned char)labelColor) srcColorPx++;
+                    else if (b == 0) src0++;
+                }
+            }
+            debugFilePrint("MP: name tag draw surface=%p %dx%d name='%s' x=%d y=%d color=%d blit=%d srcColorPx=%d src0=%d",
+                (void*)gSdlSurface, gSdlSurface->w, gSdlSurface->h,
+                name, clampedX, clampedY, labelColor, blitRc, srcColorPx, src0);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5125,13 +5294,15 @@ void MpFinishHostMapChange()
     // all (no XP; the targets died with the map).
     MpLootHostCloseAllSessions();
 
-    MultiplayerPlayer* hostPlayer = &gMpSession.players[0];
-    hostPlayer->obj = gDude;
-    hostPlayer->lastSafeTile = gDude->tile;
-    hostPlayer->lastSafeElevation = gDude->elevation;
-    hostPlayer->lastSafeRotation = gDude->rotation;
-    hostPlayer->hasSafePosition = true;
-    MpRegisterObjNetId(gDude, hostPlayer->objNetId);
+    MultiplayerPlayer* localPlayer = (gMpSession.localNetId > 0 && gMpSession.localNetId <= NET_MAX_PLAYERS)
+        ? &gMpSession.players[gMpSession.localNetId - 1]
+        : &gMpSession.players[0];
+    localPlayer->obj = gDude;
+    localPlayer->lastSafeTile = gDude->tile;
+    localPlayer->lastSafeElevation = gDude->elevation;
+    localPlayer->lastSafeRotation = gDude->rotation;
+    localPlayer->hasSafePosition = true;
+    MpRegisterObjNetId(gDude, localPlayer->objNetId);
     objectReorder(gDude);
     mpSnapshotMapStaticObjects();
 

@@ -13,6 +13,7 @@
 #include "memory.h"
 #include "mouse.h"
 #include "movie.h"
+#include "multiplayer.h"
 #include "scan_unimplemented.h"
 #include "settings.h"
 #include "tile.h"
@@ -408,6 +409,7 @@ void handleWindowSizeChanged()
 
 void renderPresent()
 {
+    MpRenderPlayerLabels();
     SDL_UpdateTexture(gSdlTexture, nullptr, gSdlTextureSurface->pixels, gSdlTextureSurface->pitch);
     SDL_RenderClear(gSdlRenderer);
     SDL_RenderCopy(gSdlRenderer, gSdlTexture, nullptr, nullptr);

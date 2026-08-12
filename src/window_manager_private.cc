@@ -510,7 +510,7 @@ int _win_list_select_at(const char* title, const char* const* items, int itemsLe
                     _colorTable[_GNW_wcolor[0]]);
 
                 int textColor;
-                if ((color & 0xFF00) != 0) {
+                if ((color & 0xFF00) != 0 && (color & 0xFF) >= 1 && (color & 0xFF) <= 6) {
                     int colorIndex = (color & 0xFF) - 1;
                     textColor = (color & ~0xFFFF) | _colorTable[_GNW_wcolor[colorIndex]];
                 } else {
@@ -647,7 +647,7 @@ int win_yes_no(const char* question, int x, int y, int color)
     unsigned char* windowBuffer = windowGetWindow(win)->buffer;
 
     int textColor;
-    if ((color & 0xFF00) != 0) {
+    if ((color & 0xFF00) != 0 && (color & 0xFF) >= 1 && (color & 0xFF) <= 6) {
         int colorIndex = (color & 0xFF) - 1;
         textColor = (color & ~0xFFFF) | _colorTable[_GNW_wcolor[colorIndex]];
     } else {
@@ -735,7 +735,7 @@ int _win_msg(const char* string, int x, int y, int color)
     unsigned char* windowBuffer = window->buffer;
 
     int textColor;
-    if ((color & 0xFF00) != 0) {
+    if ((color & 0xFF00) != 0 && (color & 0xFF) >= 1 && (color & 0xFF) <= 6) {
         int colorIndex = (color & 0xFF) - 1;
         textColor = (color & ~0xFFFF) | _colorTable[_GNW_wcolor[colorIndex]];
     } else {
@@ -1335,13 +1335,13 @@ int process_pull_down(int win, Rect* rect, char** items, int itemsLength, int fo
         int height = pulldown->rect.bottom - y + 1;
 
         int color1 = menuBar->foregroundColor;
-        if ((color1 & 0xFF00) != 0) {
+        if ((color1 & 0xFF00) != 0 && (color1 & 0xFF) >= 1 && (color1 & 0xFF) <= 6) {
             int colorIndex = (color1 & 0xFF) - 1;
             color1 = (color1 & ~0xFFFF) | _colorTable[_GNW_wcolor[colorIndex]];
         }
 
         int color2 = menuBar->backgroundColor;
-        if ((color2 & 0xFF00) != 0) {
+        if ((color2 & 0xFF00) != 0 && (color2 & 0xFF) >= 1 && (color2 & 0xFF) <= 6) {
             int colorIndex = (color2 & 0xFF) - 1;
             color2 = (color2 & ~0xFFFF) | _colorTable[_GNW_wcolor[colorIndex]];
         }
@@ -1517,13 +1517,13 @@ int process_pull_down(int win, Rect* rect, char** items, int itemsLength, int fo
         int height = pulldown->rect.bottom - y + 1;
 
         int color1 = menuBar->foregroundColor;
-        if ((color1 & 0xFF00) != 0) {
+        if ((color1 & 0xFF00) != 0 && (color1 & 0xFF) >= 1 && (color1 & 0xFF) <= 6) {
             int colorIndex = (color1 & 0xFF) - 1;
             color1 = (color1 & ~0xFFFF) | _colorTable[_GNW_wcolor[colorIndex]];
         }
 
         int color2 = menuBar->backgroundColor;
-        if ((color2 & 0xFF00) != 0) {
+        if ((color2 & 0xFF00) != 0 && (color2 & 0xFF) >= 1 && (color2 & 0xFF) <= 6) {
             int colorIndex = (color2 & 0xFF) - 1;
             color2 = (color2 & ~0xFFFF) | _colorTable[_GNW_wcolor[colorIndex]];
         }

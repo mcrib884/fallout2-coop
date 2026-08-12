@@ -59,6 +59,7 @@ struct MpPlayerProfile {
     uint32_t generation = 1;
     uint32_t modelHash = 0;
     int32_t localModelIndex = -1;
+    int32_t playerColor = -1;
     char name[MP_PROFILE_NAME_LENGTH] = {};
 
     int32_t prototypeMessageId = -1;

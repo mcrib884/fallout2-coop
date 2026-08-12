@@ -447,7 +447,7 @@ static int mpRunVoteModal()
                 } else {
                     MpVoteSendCast(1);
                 }
-            } else if (keyCode == MP_VOTE_BTN_NO || keyCode == KEY_ESCAPE) {
+            } else if (keyCode == MP_VOTE_BTN_NO || keyCode == KEY_ESCAPE || keyCode == 500) {
                 if (gVoteSession.isInitiator) {
                     rc = 0; // cancel the proposal (host cancels, client vetoes)
                 } else if (gMpIsHost) {

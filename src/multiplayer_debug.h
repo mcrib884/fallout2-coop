@@ -90,6 +90,12 @@ void MpDebugRestoreSkin();
 // select-on-click and a restore-vanilla button.
 void MpDebugModelPickerShow();
 
+const char* MpDebugLocalPlayerNameOverride();
+void MpDebugSetLocalPlayerName(const char* name);
+int MpDebugLocalPlayerColor();
+void MpDebugSetLocalPlayerColor(int colorIndex);
+int MpPlayerColorFor(const Object* obj);
+
 } // namespace fallout
 
 #endif

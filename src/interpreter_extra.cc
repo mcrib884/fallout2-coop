@@ -3812,6 +3812,7 @@ static void opPlayGameMovie(Program* program)
 
     int movie = programStackPopInteger(program);
     int movieFlags = GAME_MOVIE_FADE_IN | GAME_MOVIE_FADE_OUT | GAME_MOVIE_PAUSE_MUSIC;
+    MpLog(MP_LOG_MOVIE, "play_gmovie called movie=%d client=%d", movie, gMpIsClient ? 1 : 0);
     if (movie >= 0 && movie < MOVIE_COUNT) {
         movieFlags = flags[movie];
     }

@@ -2799,13 +2799,14 @@ void programInterpret(Program* program, int numInstructions)
         // nested vanilla call (dialog/movie/animation) that never returns.
         if (gMpIsClient && gMpAllowClientScriptExec) {
             static int sMpClientExecCount = 0;
-            // (Commented: per-opcode cutscene spam on the client — the
-            // deferred map-enter script logs every opcode it runs.)
-            // if (sMpClientExecCount < 300 || (sMpClientExecCount % 1000) == 0) {
-            //     debugFilePrint("MPSCR: client exec #%d opcode=0x%X ip=%d",
-            //         sMpClientExecCount, opcode, program->instructionPointer);
-            // }
             sMpClientExecCount++;
+            // Throttled cutscene trace: first 20 opcodes then every 500th
+            // (and every play_gmovie 0x8115) — enough to see where the
+            // client's deferred map-enter script branches without flooding
+            // the log.
+            if (sMpClientExecCount <= 20 || (sMpClientExecCount % 500) == 0 || opcode == 0x8115) {
+                MpLog(MP_LOG_SYNC, "client exec #%d opcode=0x%X ip=%d", sMpClientExecCount, opcode, program->instructionPointer);
+            }
         }
 
         // TODO: Replace with field_82 and field_80?

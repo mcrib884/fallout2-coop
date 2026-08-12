@@ -137,6 +137,25 @@ int gameMoviesLoad(File* stream)
     return 0;
 }
 
+void gameMovieGetSeenFlags(unsigned char* flags, int count)
+{
+    if (flags == nullptr) {
+        return;
+    }
+    int n = count < MOVIE_COUNT ? count : MOVIE_COUNT;
+    memcpy(flags, gGameMoviesSeen, n);
+}
+
+void gameMovieSetSeenFlags(const unsigned char* flags, int count)
+{
+    if (flags == nullptr) {
+        return;
+    }
+    int n = count < MOVIE_COUNT ? count : MOVIE_COUNT;
+    memcpy(gGameMoviesSeen, flags, n);
+    MpLog(MP_LOG_MOVIE, "seen flags synced (%d bytes)", n);
+}
+
 // 0x44E664 gmovie_save
 int gameMoviesSave(File* stream)
 {
@@ -153,6 +172,7 @@ int gameMoviePlay(int movie, int flags)
 {
     if (movie < 0 || movie >= GAME_MOVIE_MAX_COUNT || movieFileNames[movie].empty()) {
         debugPrint("\ngmovie_play() - Error: Invalid movie %d\n", movie);
+        MpLog(MP_LOG_MOVIE, "play failed invalid movie=%d max=%d", movie, GAME_MOVIE_MAX_COUNT);
         return -1;
     }
 
@@ -168,6 +188,7 @@ int gameMoviePlay(int movie, int flags)
 
     if (!movieFound) {
         debugPrint("\ngmovie_play() - Error: Unable to open %s\n", movieFileName);
+        MpLog(MP_LOG_MOVIE, "play failed unable to open file=%s", movieFileName);
         gGameMovieIsPlaying = false;
         return -1;
     }

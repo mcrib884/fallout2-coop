@@ -49,6 +49,7 @@
 #include "window_manager_private.h"
 #include "worldmap.h"
 #include "multiplayer_log.h"
+#include "multiplayer_worldmap.h"
 
 namespace fallout {
 
@@ -1330,12 +1331,26 @@ int scriptsHandleRequests()
 
     if ((gScriptsRequests & SCRIPT_REQUEST_TOWN_MAP) != 0) {
         gScriptsRequests &= ~SCRIPT_REQUEST_TOWN_MAP;
-        wmTownMap();
+        // Co-op: the host drives the worldmap; clients mirror it. Clients
+        // never reach this (their script requests are cleared above).
+        if (gMpIsHost && gMpActive) {
+            MpWorldmapHostEntered(1); // town map mode
+            wmTownMap();
+            MpWorldmapHostLeft();
+        } else {
+            wmTownMap();
+        }
     }
 
     if ((gScriptsRequests & SCRIPT_REQUEST_WORLD_MAP) != 0) {
         gScriptsRequests &= ~SCRIPT_REQUEST_WORLD_MAP;
-        wmWorldMap();
+        if (gMpIsHost && gMpActive) {
+            MpWorldmapHostEntered(0); // world map mode
+            wmWorldMap();
+            MpWorldmapHostLeft();
+        } else {
+            wmWorldMap();
+        }
     }
 
     if ((gScriptsRequests & SCRIPT_REQUEST_ELEVATOR) != 0) {
@@ -1600,10 +1615,17 @@ int scriptExecProc(int sid, int proc)
     assert(proc >= 0 && proc < SCRIPT_PROC_COUNT);
 
     if (gMpIsClient && !gMpAllowClientScriptExec) {
+        // Only the map script matters here (the deferred cutscene); the
+        // regular client-side spatial/timer execs are gated hundreds of
+        // times and would flood the log.
+        if (sid == gMapSid) {
+            MpLog(MP_LOG_SYNC, "exec_script_proc: client gate sid=%d proc=%d", sid, proc);
+        }
         return 0;
     }
 
     if (!gScriptsEnabled) {
+        MpLog(MP_LOG_SYNC, "exec_script_proc: scripts disabled sid=%d proc=%d", sid, proc);
         return -1;
     }
 
@@ -1617,6 +1639,7 @@ int scriptExecProc(int sid, int proc)
     try {
     Script* script;
     if (scriptGetScript(sid, &script) == -1) {
+        MpLog(MP_LOG_SYNC, "exec_script_proc: script not found sid=%d proc=%d", sid, proc);
         return -1;
     }
     captureScriptIndex = script->index & 0xFFFFFF;
@@ -1630,6 +1653,7 @@ int scriptExecProc(int sid, int proc)
 
         char name[16];
         if (scriptsGetFileName(script->index & 0xFFFFFF, name, sizeof(name)) == -1) {
+            MpLog(MP_LOG_SYNC, "exec_script_proc: no file name sid=%d idx=%d proc=%d", sid, captureScriptIndex, proc);
             return -1;
         }
 
@@ -1641,6 +1665,7 @@ int scriptExecProc(int sid, int proc)
         script->program = scriptsCreateProgramByName(name);
         if (script->program == nullptr) {
             debugPrint("\nError: exec_script_proc: script load failed!");
+            MpLog(MP_LOG_SYNC, "exec_script_proc: program load failed sid=%d idx=%d name=%s proc=%d", sid, captureScriptIndex, name, proc);
             return -1;
         }
 
@@ -1650,10 +1675,12 @@ int scriptExecProc(int sid, int proc)
 
     Program* program = script->program;
     if (program == nullptr) {
+        MpLog(MP_LOG_SYNC, "exec_script_proc: null program sid=%d idx=%d proc=%d", sid, captureScriptIndex, proc);
         return -1;
     }
 
     if ((program->flags & (PROGRAM_FLAG_FATAL_ERROR | PROGRAM_FLAG_CHILD_CALL | PROGRAM_FLAG_CHILD_SPAWN)) != 0) {
+        MpLog(MP_LOG_SYNC, "exec_script_proc: program flags 0x%X sid=%d idx=%d proc=%d", program->flags, sid, captureScriptIndex, proc);
         return 0;
     }
 
@@ -1683,6 +1710,7 @@ int scriptExecProc(int sid, int proc)
     }
 
     if (procedureIndex == -1) {
+        MpLog(MP_LOG_SYNC, "exec_script_proc: proc not found sid=%d idx=%d proc=%d", sid, captureScriptIndex, proc);
         return -1;
     }
 

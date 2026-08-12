@@ -5,6 +5,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "game_movie.h"
+
 // Forward-declare ENet opaque types at global scope so we don't have to
 // include <enet/enet.h> from this public header. ENet itself declares
 // these structs at global scope, so this is consistent.
@@ -205,6 +207,10 @@ typedef struct NetWelcomePayload {
     uint8_t assignedNetId;
     uint32_t objNetId;
     NetMapSyncPayload map;
+    // Movie-seen array (gameMovieGetSeenFlags layout): scripts decide cutscenes
+    // from it, so the client must start with the host's state or map-enter
+    // scripts skip their movies.
+    uint8_t moviesSeen[MOVIE_COUNT];
 } NetWelcomePayload;
 
 typedef struct NetPlayerInputPayload {
@@ -287,6 +293,9 @@ typedef struct NetVoteResultPayload {
 
 typedef struct NetMapChangedPayload {
     NetMapSyncPayload map;
+    // Movie-seen array (see NetWelcomePayload.moviesSeen): re-synced on every
+    // transition so host/client cutscene decisions stay identical.
+    uint8_t moviesSeen[MOVIE_COUNT];
 } NetMapChangedPayload;
 
 typedef struct NetPlayerJoinedPayload {

@@ -19,6 +19,11 @@ bool _gdialogActive();
 void gameDialogEnter(Object* speaker, int mode);
 void _gdialogSystemEnter();
 void gameDialogStartLips(const char* audioFileName);
+// Co-op: true while lip-sync speech is active; the host reads the current
+// audio base name (lipsLoad stores it in gLipsData.file_name) to ship it to
+// clients so they can play voice + phonemes on their head portrait.
+bool gameDialogIsLipSyncActive();
+const char* gameDialogGetLipFileName();
 int gameDialogEnable();
 int gameDialogDisable();
 int _gdialogInitFromScript(int headFid, int reaction);

@@ -236,6 +236,7 @@ struct MpDialogClientState {
     int32_t headFid;
     int8_t reaction;
     bool nodeApplied;  // at least one node rendered into the vanilla windows
+    char audioName[64]; // lip-sync speech base name for this node (v3 bodies)
     // vanilla trade screen (barter)
     bool tradeOpen;
     bool barterDirty;  // trade screen needs a re-render from fresh state
@@ -930,9 +931,10 @@ static void mpDialogHostSendStateToPeer(uint8_t netId)
         return;
     }
 
-    // Serialize the node body (version 2 adds the head portrait data).
+    // Serialize the node body (version 3 adds the lip-sync audio name so the
+    // client can play the voice and phonemes; version 2 carried head data).
     std::string body;
-    body.push_back((char)2); // version
+    body.push_back((char)3); // version
     int32_t headFid = gGameDialogHeadFid;
     int8_t reaction = (int8_t)gGameDialogReactionOrFidget;
     body.append(reinterpret_cast<const char*>(&headFid), sizeof(headFid));
@@ -951,6 +953,20 @@ static void mpDialogHostSendStateToPeer(uint8_t netId)
         body.push_back((char)reaction);
         body.append(reinterpret_cast<const char*>(&textLen), sizeof(textLen));
         body.append(gMpDialog.options[i].text, textLen);
+    }
+
+    // Lip-sync audio base name (empty when the host isn't speaking). Read on
+    // the host while the lips system is live; gLipsData.file_name holds the
+    // base name lipsLoad normalized from the vanilla audio id.
+    const char* audioName = gameDialogGetLipFileName();
+    uint8_t audioLen = 0;
+    if (audioName != nullptr && audioName[0] != '\0') {
+        size_t n = strlen(audioName);
+        audioLen = (uint8_t)(n < 63 ? n : 63);
+    }
+    body.push_back((char)audioLen);
+    if (audioLen > 0) {
+        body.append(audioName, audioLen);
     }
 
     uint16_t chunkCount = (uint16_t)((body.size() + NET_DIALOG_STATE_CHUNK_MAX - 1) / NET_DIALOG_STATE_CHUNK_MAX);
@@ -2609,6 +2625,13 @@ static void mpDialogClientApplyNodeToVanilla()
     }
     // The client never runs reply procs — pass nullptr.
     gameDialogCoopApplyNode(gMpDialogClient.replyText, reactions, texts, gMpDialogClient.optionCount, nullptr);
+    // Play the node's voice + lip phonemes (once per node; the name is
+    // consumed here so re-applies after barter don't restart the speech).
+    if (gMpDialogClient.audioName[0] != '\0') {
+        MpLog(MP_LOG_DIALOG, "client lips start file=%s", gMpDialogClient.audioName);
+        gameDialogStartLips(gMpDialogClient.audioName);
+        gMpDialogClient.audioName[0] = '\0';
+    }
 }
 
 static void mpDialogClientApplyNodeBody(const std::string& body)
@@ -2653,8 +2676,8 @@ static void mpDialogClientApplyNodeBody(const std::string& body)
     };
 
     int version;
-    if (!read8(&version) || version != 2) {
-        MpLogAlways(MP_LOG_DIALOG, "client state rejected (bad version)");
+    if (!read8(&version) || (version != 2 && version != 3)) {
+        MpLogAlways(MP_LOG_DIALOG, "client state rejected (bad version %d)", version);
         return;
     }
     int headFid;
@@ -2687,6 +2710,18 @@ static void mpDialogClientApplyNodeBody(const std::string& body)
         gMpDialogClient.options[i].msgListId = (int16_t)msgListId;
         gMpDialogClient.options[i].msgId = (int16_t)msgId;
         gMpDialogClient.options[i].reaction = (int8_t)reaction;
+    }
+    // v3 bodies append the lip-sync audio base name (empty = host silent).
+    gMpDialogClient.audioName[0] = '\0';
+    if (version >= 3) {
+        int audioLen;
+        if (!read8(&audioLen) || audioLen < 0 || audioLen >= (int)sizeof(gMpDialogClient.audioName)) {
+            MpLog(MP_LOG_DIALOG, "client node bad audio len=%d", audioLen);
+            return;
+        }
+        if (audioLen > 0 && !readStr(gMpDialogClient.audioName, sizeof(gMpDialogClient.audioName), audioLen)) {
+            return;
+        }
     }
     gMpDialogClient.resolvedOption = -1;
     gMpDialogClient.timerActive = false;

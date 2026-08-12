@@ -32,6 +32,7 @@
 #include "memory.h"
 #include "multiplayer.h"
 #include "multiplayer_vote.h"
+#include "multiplayer_worldmap.h"
 #include "object.h"
 #include "party_member.h"
 #include "proto.h"
@@ -247,7 +248,15 @@ int isoInit()
     if (!settings.ui.ignore_map_edges) {
         tileScrollBlockingEnable();
     }
-    tileScrollLimitingEnable();
+    // Free camera: let the view scroll to the map ends instead of being
+    // pinned within a radius of the player (vanilla scroll limiting).
+    // Explicit both ways: the limiter's static default is ON, so skipping
+    // the enable would silently leave it active.
+    if (settings.ui.free_camera_scroll) {
+        tileScrollLimitingDisable();
+    } else {
+        tileScrollLimitingEnable();
+    }
 
     if (interfaceInit() != 0) {
         debugPrint("intface_init failed in iso_init\n");
@@ -1438,7 +1447,15 @@ int mapHandleTransition()
             animationStop();
             // SFALL: Remove text floaters when moving to the world map
             textObjectsReset();
+            // Co-op: the host drives the worldmap; clients mirror it. The
+            // enter/leave broadcast brackets the modal.
+            if (gMpIsHost) {
+                MpWorldmapHostEntered(1); // town map mode
+            }
             wmTownMap(); // nb this is a world map transition
+            if (gMpIsHost) {
+                MpWorldmapHostLeft();
+            }
             memset(&gMapTransition, 0, sizeof(gMapTransition));
         }
     } else if (gMapTransition.map == -2) {
@@ -1446,7 +1463,13 @@ int mapHandleTransition()
             animationStop();
             // SFALL: Remove text floaters when moving to the world map
             textObjectsReset();
+            if (gMpIsHost) {
+                MpWorldmapHostEntered(0); // world map mode
+            }
             wmWorldMap();
+            if (gMpIsHost) {
+                MpWorldmapHostLeft();
+            }
             memset(&gMapTransition, 0, sizeof(gMapTransition));
         }
     } else {
@@ -1517,6 +1540,12 @@ int mapHandleTransition()
                     _scr_spatials_disable();
                     scriptExecProc(gMapSid, SCRIPT_PROC_MAP_ENTER);
                     _scr_spatials_enable();
+                    // Co-op: the map-enter cutscene (the vault-suit movie)
+                    // just marked MOVIE_VSUIT seen. Refresh the dude's native
+                    // look immediately so the suit shows now instead of on the
+                    // next map load; the new fid reaches clients through the
+                    // regular player-state broadcast.
+                    _proto_dude_update_gender();
                     MpLog(MP_LOG_SYNC, "deferred map script enter done sid=%d", gMapSid);
                     MpLog(MP_LOG_SYNC, "ambient after deferred map script enter=%d",
                         lightGetAmbientIntensity());

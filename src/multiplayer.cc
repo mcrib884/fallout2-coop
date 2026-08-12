@@ -19,6 +19,7 @@
 #include "display_monitor.h"
 #include "font_manager.h"
 #include "game.h"
+#include "game_movie.h"
 #include "geometry.h"
 #include "input.h"
 #include "interface.h"
@@ -695,6 +696,9 @@ static void mpHostAcceptProfile(MultiplayerPlayer* player, ENetPeer* peer,
     welcome.assignedNetId = player->netId;
     welcome.objNetId = player->objNetId;
     mpBuildMapSyncPayload(&welcome.map);
+    // Ship the movie-seen array so the client's first map-enter script runs
+    // its cutscenes exactly like the host's.
+    gameMovieGetSeenFlags(welcome.moviesSeen, MOVIE_COUNT);
     NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_WELCOME, &welcome, sizeof(welcome));
 
     // The joining client must learn every canonical profile before it receives
@@ -1256,6 +1260,11 @@ static void mpClientTryFinishMapSync()
     while (probe != nullptr) {
         Object* next = objectFindNext();
         if (probe != gDude && probe != gEgg
+            // Same protection as the clear pass: the map-script owner is a
+            // hidden no-save misc at tile 1 with no netId — without this
+            // exclusion the prune frees gMapSid and the deferred client
+            // map-enter script never runs.
+            && probe->sid != gMapSid
             && objectTypeFromFid(probe->fid) != OBJ_TYPE_INTERFACE
             && hexGridTileIsValid(probe->tile) && elevationIsValid(probe->elevation)
             && !mpObjectIsInCritterInventory(probe, gDude)
@@ -2796,10 +2805,14 @@ void MpTick()
         // Co-op: this is the only place a client may execute a script - the
         // map-enter cutscene. The flag is cleared immediately after.
         gMpAllowClientScriptExec = true;
-        scriptExecProc(gMapSid, SCRIPT_PROC_MAP_ENTER);
+        int execRc = scriptExecProc(gMapSid, SCRIPT_PROC_MAP_ENTER);
         gMpAllowClientScriptExec = false;
         _scr_spatials_enable();
-        MpLog(MP_LOG_MISC, "client deferred map script enter done sid=%d", gMapSid);
+        // Co-op: mirror the host's post-cutscene native-look refresh (see the
+        // host deferred runner in map.cc) — the movie just marked MOVIE_VSUIT
+        // seen, so the client's own dude switches to the jumpsuit now.
+        _proto_dude_update_gender();
+        MpLog(MP_LOG_SYNC, "client deferred map script enter done sid=%d rc=%d", gMapSid, execRc);
         // debugFilePrint("MAPDBG ambient after client deferred map script enter=%d",
         //     lightGetAmbientIntensity());
         if (wmSetupRandomEncounter() == -1) {
@@ -4004,6 +4017,9 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             }
             MpLog(MP_LOG_HANDSHAKE, "welcome received netId=%u objNet=%u map=%d",
                 w->assignedNetId, w->objNetId, w->map.mapId);
+            // The client's save may have a different movie-seen state; adopt
+            // the host's so cutscene-conditional scripts match.
+            gameMovieSetSeenFlags(w->moviesSeen, MOVIE_COUNT);
             gMpSession.localNetId = w->assignedNetId;
             gMpSession.currentMapId = w->map.mapId;
             // Set up the player-slot for self.
@@ -4204,6 +4220,9 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             // sessions are closed on the transition, the mirror dies with
             // the old objects.
             MpLootOnClientReset();
+            // Adopt the host's movie-seen state BEFORE the deferred map-enter
+            // script runs, so cutscene conditions evaluate identically.
+            gameMovieSetSeenFlags(m->moviesSeen, MOVIE_COUNT);
             MpApplyMapChanged(&m->map);
             break;
         }
@@ -5367,6 +5386,10 @@ static void mpBuildMapChangedPayload(NetMapChangedPayload* p, int32_t mapId)
     memset(p, 0, sizeof(*p));
     mpBuildMapSyncPayload(&p->map);
     p->map.mapId = mapId;
+    // Ship the movie-seen array so the client's map-enter scripts evaluate
+    // cutscene conditions against the host's save state (the array is not
+    // part of the synced globals).
+    gameMovieGetSeenFlags(p->moviesSeen, MOVIE_COUNT);
     // Anchor client-side avatar rebuilds at the host's ACTUAL post-transition
     // position instead of the map file's default entering tile. MpFinishHostMapChange
     // respawns every player around gDude's tile; the client mirrors that logic in
@@ -5673,6 +5696,11 @@ static void mpClearClientMapObjectsForFullSync()
             continue;
         }
         if (obj != gDude && obj != gEgg
+            // The map-script owner (hidden misc carrying gMapSid) must
+            // survive: the deferred client map-enter script runs from it
+            // after the sync. Destroying it frees the sid and the cutscene
+            // silently never executes ('script not found').
+            && obj->sid != gMapSid
             && !mpObjectIsInCritterInventory(obj, gDude)
             && (obj->flags & OBJECT_NO_REMOVE) == 0) {
             if (gMpMapStaticObjIds.count(obj->id) != 0) {

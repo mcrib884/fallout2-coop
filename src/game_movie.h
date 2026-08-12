@@ -46,6 +46,11 @@ void gameMovieMarkSeen(int movie);
 void gameMovieFadeOut();
 bool gameMovieIsSeen(int movie);
 bool gameMovieIsPlaying();
+// Co-op: raw movie-seen array access (the per-save seen list is not part of
+// the synced globals, so the host ships it on map change / welcome to keep
+// cutscene-conditional scripts identical on every machine).
+void gameMovieGetSeenFlags(unsigned char* flags, int count);
+void gameMovieSetSeenFlags(const unsigned char* flags, int count);
 
 } // namespace fallout
 

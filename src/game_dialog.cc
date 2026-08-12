@@ -966,6 +966,19 @@ void gameDialogEndLips()
     }
 }
 
+bool gameDialogIsLipSyncActive()
+{
+    return gGameDialogLipSyncStarted;
+}
+
+const char* gameDialogGetLipFileName()
+{
+    if (!gGameDialogLipSyncStarted) {
+        return nullptr;
+    }
+    return gLipsData.file_name;
+}
+
 // 0x4450EC
 int gameDialogEnable()
 {
@@ -5307,10 +5320,16 @@ int gameDialogCoopOpen(int headFid, int reaction, Object* speaker)
         return -1;
     }
 
-    // Draw the head portrait (static — no fidget ticker on the client) and
-    // push it to the screen (the background window was refreshed at
-    // creation, before the head was drawn).
+    // Draw the head portrait immediately (frame 0) and register the dialogue
+    // ticker so the fidget animates and lip phonemes render on the client.
+    // Vanilla registers gameDialogTicker when the dialogue opens; the co-op
+    // open path never did, so the head stayed black. (The ticker runs inside
+    // _process_bk, which the client's dialog modal loop pumps every frame.)
     _gdSetupFidget(headFid, reaction);
+    if (gGameDialogFidgetFrm != nullptr) {
+        gameDialogRenderTalkingHead(gGameDialogFidgetFrm, 0);
+    }
+    tickersAdd(gameDialogTicker);
     if (gGameDialogBackgroundWindow != -1) {
         windowRefresh(gGameDialogBackgroundWindow);
     }
@@ -5413,6 +5432,12 @@ void gameDialogCoopClose()
         && gGameDialogReplyWindow == -1 && gGameDialogOptionsWindow == -1) {
         return;
     }
+
+    // Stop client-side speech/phonemes and detach the dialogue ticker (the
+    // co-op open path registered it; vanilla's _gdialogExitFromScript removes
+    // its own).
+    gameDialogEndLips();
+    tickersRemove(gameDialogTicker);
 
     if (gGameDialogReplyWindow != -1 || gGameDialogOptionsWindow != -1) {
         _gdProcessExit();

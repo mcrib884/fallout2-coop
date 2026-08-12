@@ -6,6 +6,13 @@ Fallout 2 Co-op Edition is a multiplayer-focused fork of [Fallout 2: Community E
 
 You need an original Fallout 2 installation. Download [`fallout2coop_launcher.exe`](https://github.com/mcrib884/fallout2-coop/releases/latest) and run it. Choose your Fallout 2 folder when asked; the launcher downloads the co-op engine for you.
 
+## Gameplay
+
+Currently it only works over LAN connection.Tools like Radmin VPN are recommended over distances.
+Host and connect through the multiplayer menu from the main menu or the esc menu.
+Use F11 to open the COOP menu
+
+
 ## Building
 
 You need CMake and the usual compiler or platform SDK for your system.

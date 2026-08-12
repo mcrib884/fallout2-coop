@@ -7,6 +7,7 @@
 #include "debug.h"
 #include "platform/git_version.h"
 #include "version.h"
+#include "multiplayer_log.h"
 
 namespace fallout {
 
@@ -50,7 +51,7 @@ ENetHost* NetHostCreate(uint16_t port, int maxPeers)
     addr.port = port;
     ENetHost* host = enet_host_create(&addr, maxPeers, NET_NUM_CHANNELS, 0, 0);
     netGrowSocketBuffers(host);
-    debugFilePrint("NET: host create port=%u peers=%d result=%p", port, maxPeers, (void*)host);
+    MpLog(MP_LOG_NET, "host create port=%u peers=%d result=%p", port, maxPeers, (void*)host);
     return host;
 }
 
@@ -58,24 +59,24 @@ ENetHost* NetClientCreate()
 {
     ENetHost* host = enet_host_create(nullptr, 1, NET_NUM_CHANNELS, 0, 0);
     netGrowSocketBuffers(host);
-    debugFilePrint("NET: client create result=%p", (void*)host);
+    MpLog(MP_LOG_NET, "client create result=%p", (void*)host);
     return host;
 }
 
 ENetPeer* NetClientConnect(ENetHost* client, const char* address, uint16_t port)
 {
     if (client == nullptr || address == nullptr) {
-        debugFilePrint("NET: client connect failed null client/address");
+        MpLogAlways(MP_LOG_NET, "client connect failed null client/address");
         return nullptr;
     }
     ENetAddress addr;
     if (enet_address_set_host(&addr, address) != 0) {
-        debugFilePrint("NET: client connect address resolve failed '%s'", address);
+        MpLogAlways(MP_LOG_NET, "client connect address resolve failed '%s'", address);
         return nullptr;
     }
     addr.port = port;
     ENetPeer* peer = enet_host_connect(client, &addr, NET_NUM_CHANNELS, 0);
-    debugFilePrint("NET: client connect '%s:%u' result=%p", address, port, (void*)peer);
+    MpLog(MP_LOG_NET, "client connect '%s:%u' result=%p", address, port, (void*)peer);
     return peer;
 }
 
@@ -185,7 +186,7 @@ uint32_t NetGetVersionHash()
         hash ^= (uint32_t)(unsigned char)(*p);
         hash *= 0x01000193u;
     }
-    debugFilePrint("NET: version hash=%08X src='%s'", hash, buf);
+    MpLog(MP_LOG_NET, "version hash=%08X src='%s'", hash, buf);
     return hash;
 }
 

@@ -49,6 +49,7 @@
 #include "window_manager.h"
 #include "window_manager_private.h"
 #include "worldmap.h"
+#include "multiplayer_log.h"
 
 namespace fallout {
 
@@ -903,7 +904,7 @@ static int mapLoad(File* stream)
     int mapLoadSoundId = 0;
     if (!settings.system.executableIsMapper()) {
         _map_save_in_game(true);
-        debugFilePrint("MAP: load after in-game save");
+        MpLog(MP_LOG_SYNC, "load after in-game save");
         if (backgoundSoundIsPlaying()) {
             // Use the sfall sound path so the map-loading ambience does not depend
             // on the native background music loader.
@@ -955,7 +956,7 @@ static int mapLoad(File* stream)
     if (gMapHeader.version != 19 && gMapHeader.version != 20) {
         goto err;
     }
-    debugFilePrint("MAP: load header ok name='%s' idx=%d", gMapHeader.name, gMapHeader.index);
+    MpLog(MP_LOG_SYNC, "load header ok name='%s' idx=%d", gMapHeader.name, gMapHeader.index);
 
     if (gEnteringElevation == -1) {
         // NOTE: Uninline.
@@ -963,7 +964,7 @@ static int mapLoad(File* stream)
     }
 
     _obj_remove_all();
-    debugFilePrint("MAP: load objects removed");
+    MpLog(MP_LOG_SYNC, "load objects removed");
 
     if (gMapHeader.globalVariablesCount < 0) {
         gMapHeader.globalVariablesCount = 0;
@@ -984,7 +985,7 @@ static int mapLoad(File* stream)
     if (mapGlobalVariablesLoad(stream) != 0) {
         goto err;
     }
-    debugFilePrint("MAP: load global vars ok count=%d", gMapHeader.globalVariablesCount);
+    MpLog(MP_LOG_SYNC, "load global vars ok count=%d", gMapHeader.globalVariablesCount);
 
     error = "Error allocating local vars";
     // NOTE: Uninline.
@@ -997,24 +998,24 @@ static int mapLoad(File* stream)
     if (mapLocalVariablesLoad(stream) != 0) {
         goto err;
     }
-    debugFilePrint("MAP: load local vars ok count=%d", gMapHeader.localVariablesCount);
+    MpLog(MP_LOG_SYNC, "load local vars ok count=%d", gMapHeader.localVariablesCount);
 
     if (_square_load(stream, gMapHeader.flags) != 0) {
         goto err;
     }
-    debugFilePrint("MAP: load squares ok");
+    MpLog(MP_LOG_SYNC, "load squares ok");
 
     error = "Error reading scripts";
     if (scriptLoadAll(stream) != 0) {
         goto err;
     }
-    debugFilePrint("MAP: load scripts ok");
+    MpLog(MP_LOG_SYNC, "load scripts ok");
 
     error = "Error reading objects";
     if (objectLoadAll(stream) != 0) {
         goto err;
     }
-    debugFilePrint("MAP: load objects ok");
+    MpLog(MP_LOG_SYNC, "load objects ok");
 
     if (!_isLoadingGame()) {
         // Fix whoHitMe union.  When loading a saved game, combatLoad is responsible for this fix
@@ -1039,13 +1040,13 @@ static int mapLoad(File* stream)
     objectSetLocation(gDude, gEnteringTile, gElevation, nullptr);
     objectSetRotation(gDude, gEnteringRotation, nullptr);
     gMapHeader.index = wmMapMatchNameToIdx(gMapHeader.name);
-    debugFilePrint("MAP: load dude placed tile=%d elev=%d idx=%d", gDude->tile, gElevation, gMapHeader.index);
+    MpLog(MP_LOG_SYNC, "load dude placed tile=%d elev=%d idx=%d", gDude->tile, gElevation, gMapHeader.index);
 
     // Diagnosis: the co-op-written map-state file crashes the client here
     // with an unhandled C++ exception. Log every stage and catch the
     // exception message so the failing piece is identifiable.
     try {
-    debugFilePrint("MAP: load stage gvar block flags=0x%X name='%s'", gMapHeader.flags, gMapHeader.name);
+    MpLog(MP_LOG_SYNC, "load stage gvar block flags=0x%X name='%s'", gMapHeader.flags, gMapHeader.name);
 
     if ((gMapHeader.flags & 1) == 0) {
         char path[COMPAT_MAX_PATH];
@@ -1070,10 +1071,10 @@ static int mapLoad(File* stream)
     }
 
         scriptsEnable();
-        debugFilePrint("MAP: load stage scripts enabled");
+        MpLog(MP_LOG_SYNC, "load stage scripts enabled");
 
         if (gMapHeader.scriptIndex > 0) {
-            debugFilePrint("MAP: load stage map script setup sid=%d", gMapSid);
+            MpLog(MP_LOG_SYNC, "load stage map script setup sid=%d", gMapSid);
             error = "Error creating new map script";
             if (scriptAdd(&gMapSid, SCRIPT_TYPE_SYSTEM) == -1) {
                 goto err;
@@ -1106,18 +1107,18 @@ static int mapLoad(File* stream)
             // subsequent ticks.
             if (gMpClientDeferMapEnterScript) {
                 gMpClientDeferredMapEnterPending = true;
-                debugFilePrint("MAP: load map script enter deferred (client) sid=%d", gMapSid);
+                MpLog(MP_LOG_SYNC, "load map script enter deferred (client) sid=%d", gMapSid);
             } else {
                 gMpDeferredMapEnterPending = true;
-                debugFilePrint("MAP: load map script enter deferred sid=%d", gMapSid);
+                MpLog(MP_LOG_SYNC, "load map script enter deferred sid=%d", gMapSid);
             }
             _scr_spatials_enable();
         } else {
-            debugFilePrint("MAP: load stage map enter script sid=%d", gMapSid);
+            MpLog(MP_LOG_SYNC, "load stage map enter script sid=%d", gMapSid);
             scriptExecProc(gMapSid, SCRIPT_PROC_MAP_ENTER);
             _scr_spatials_enable();
-            debugFilePrint("MAP: load map script enter done sid=%d", gMapSid);
-            debugFilePrint("MAPDBG ambient after map script enter=%d", lightGetAmbientIntensity());
+            MpLog(MP_LOG_SYNC, "load map script enter done sid=%d", gMapSid);
+            MpLog(MP_LOG_SYNC, "ambient after map script enter=%d", lightGetAmbientIntensity());
 
             error = "Error Setting up random encounter";
             if (wmSetupRandomEncounter() == -1) {
@@ -1126,7 +1127,7 @@ static int mapLoad(File* stream)
         }
     }
     } catch (const std::exception& e) {
-        debugFilePrint("MAP: load threw std::exception '%s' after dude placed sid=%d scriptIndex=%d mapLocalVars=%d hdrLocalVars=%d mapGlobalVars=%d",
+        MpLog(MP_LOG_SYNC, "load threw std::exception '%s' after dude placed sid=%d scriptIndex=%d mapLocalVars=%d hdrLocalVars=%d mapGlobalVars=%d",
             e.what(), gMapSid, gMapHeader.scriptIndex, gMapLocalVarsLength,
             gMapHeader.localVariablesCount, gMapGlobalVarsLength);
         error = "Map state load threw an exception";
@@ -1141,13 +1142,13 @@ err:
         char message[100]; // TODO: Size is probably wrong.
         snprintf(message, sizeof(message), "%s while loading map.", error);
         debugPrint(message);
-        debugFilePrint("MAP: load FAILED at '%s'", error);
+        MpLogAlways(MP_LOG_SYNC, "load FAILED at '%s'", error);
         mapNewMap();
         rc = -1;
     } else {
         _obj_preload_art_cache(gMapHeader.flags);
     }
-    debugFilePrint("MAP: load done rc=%d", rc);
+    MpLog(MP_LOG_SYNC, "load done rc=%d", rc);
 
     sfallOnBeforeMapLoad();
 
@@ -1167,8 +1168,8 @@ err:
     scriptsExecMapEnterProc();
     scriptsExecMapUpdateProc();
     tileEnable();
-    debugFilePrint("MAP: load map enter/update procs done");
-    debugFilePrint("MAPDBG ambient after enter/update procs=%d", lightGetAmbientIntensity());
+    MpLog(MP_LOG_SYNC, "load map enter/update procs done");
+    MpLog(MP_LOG_SYNC, "ambient after enter/update procs=%d", lightGetAmbientIntensity());
 
     if (gMapTransition.map > 0) {
         if (gMapTransition.rotation >= 0) {
@@ -1516,8 +1517,8 @@ int mapHandleTransition()
                     _scr_spatials_disable();
                     scriptExecProc(gMapSid, SCRIPT_PROC_MAP_ENTER);
                     _scr_spatials_enable();
-                    debugFilePrint("MAP: deferred map script enter done sid=%d", gMapSid);
-                    debugFilePrint("MAPDBG ambient after deferred map script enter=%d",
+                    MpLog(MP_LOG_SYNC, "deferred map script enter done sid=%d", gMapSid);
+                    MpLog(MP_LOG_SYNC, "ambient after deferred map script enter=%d",
                         lightGetAmbientIntensity());
                     if (wmSetupRandomEncounter() == -1) {
                         debugPrint("\nError: couldn't set up random encounter after deferred map enter!");
@@ -1688,7 +1689,7 @@ int _map_save_in_game(bool isLeavingMap)
         return 0;
     }
 
-    debugFilePrint("MAP: save in game begin coOp=%d leaving=%d name='%s'",
+    MpLog(MP_LOG_SYNC, "save in game begin coOp=%d leaving=%d name='%s'",
         coOpActive ? 1 : 0, isLeavingMap ? 1 : 0, gMapHeader.name);
 
     animationStop();

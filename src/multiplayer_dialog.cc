@@ -36,6 +36,7 @@
 #include "multiplayer_combat.h"
 #include "multiplayer_profile.h"
 #include "multiplayer_vote.h"
+#include "multiplayer_log.h"
 #include "object.h"
 #include "perk.h"
 #include "proto.h"
@@ -187,7 +188,7 @@ static void mpDialogFloat(Object* obj, const char* text, int font, int color, in
             strncpy(payload.text, capped, sizeof(payload.text) - 1);
             NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE, NET_PKT_FLOAT_MESSAGE,
                 &payload, sizeof(payload));
-            debugFilePrint("MPDIALOG float relayed netId=%u font=%d color=%d outline=%d text='%.48s'",
+            MpLog(MP_LOG_DIALOG, "float relayed netId=%u font=%d color=%d outline=%d text='%.48s'",
                 netId, font, color, outline, capped);
         }
     }
@@ -351,7 +352,7 @@ static void mpDialogEmitTranscript(uint8_t speakerNetId, const char* text)
 
     NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE, NET_PKT_DIALOG_TRANSCRIPT, &p, sizeof(p));
     displayMonitorAddMessage(line);
-    debugFilePrint("MPDIALOG transcript session=%u seq=%u speaker=%u text=%s", gMpDialog.sessionId, seq, speakerNetId, line);
+    MpLog(MP_LOG_DIALOG, "transcript session=%u seq=%u speaker=%u text=%s", gMpDialog.sessionId, seq, speakerNetId, line);
 }
 
 // Strips the vanilla "1. " / bullet prefix from an option entry.
@@ -505,7 +506,7 @@ static void mpDialogResolve(int optionIndex)
     }
     gMpDialog.resolvedOption = (int8_t)optionIndex;
 
-    debugFilePrint("MPDIALOG resolve session=%u node=%u option=%d", gMpDialog.sessionId, gMpDialog.nodeSeq, optionIndex);
+    MpLog(MP_LOG_DIALOG, "resolve session=%u node=%u option=%d", gMpDialog.sessionId, gMpDialog.nodeSeq, optionIndex);
     mpDialogBroadcastVote();
 }
 
@@ -539,7 +540,7 @@ static void mpDialogRecalcVote()
         if (gMpDialog.timerActive) {
             gMpDialog.timerActive = false;
             gMpDialog.majorityOption = -1;
-            debugFilePrint("MPDIALOG vote timer cancelled (no active voters) session=%u", gMpDialog.sessionId);
+            MpLog(MP_LOG_DIALOG, "vote timer cancelled (no active voters) session=%u", gMpDialog.sessionId);
         }
         mpDialogBroadcastVote();
         return;
@@ -578,14 +579,14 @@ static void mpDialogRecalcVote()
             gMpDialog.majorityOption = (int8_t)majorityOption;
             gMpDialog.timerStart = getTicks();
             gMpDialog.timerMs = NET_DIALOG_VOTE_TIMER_MS;
-            debugFilePrint("MPDIALOG majority session=%u node=%u option=%d timer=%dms",
+            MpLog(MP_LOG_DIALOG, "majority session=%u node=%u option=%d timer=%dms",
                 gMpDialog.sessionId, gMpDialog.nodeSeq, majorityOption, NET_DIALOG_VOTE_TIMER_MS);
         }
     } else {
         if (gMpDialog.timerActive) {
             gMpDialog.timerActive = false;
             gMpDialog.majorityOption = -1;
-            debugFilePrint("MPDIALOG vote timer cancelled (majority lost) session=%u", gMpDialog.sessionId);
+            MpLog(MP_LOG_DIALOG, "vote timer cancelled (majority lost) session=%u", gMpDialog.sessionId);
         }
     }
 
@@ -602,7 +603,7 @@ static void mpDialogHostTeardownBarter(uint8_t netId)
     if (!b->active) {
         return;
     }
-    debugFilePrint("MPBARTER teardown session=%u netId=%u", gMpDialog.sessionId, netId);
+    MpLog(MP_LOG_DIALOG, "MPBARTER teardown session=%u netId=%u", gMpDialog.sessionId, netId);
     if (b->offerTable != nullptr) {
         itemMoveAll(b->offerTable, mpDialogPlayerAvatar(netId));
         objectDestroy(b->offerTable, nullptr);
@@ -650,7 +651,7 @@ static void mpDialogHostClearSession()
         // the join-modal exit, _gdialog_state INACTIVE). Run the full vanilla
         // teardown now. It is guarded internally and its MpDialogHostEnd hook
         // is a no-op once the session is already cleared here.
-        debugFilePrint("MPDIALOG director finish (parked vanilla state teardown)");
+        MpLog(MP_LOG_DIALOG, "director finish (parked vanilla state teardown)");
         MpDialogDirectorFinishDialogue();
     }
 }
@@ -661,7 +662,7 @@ static void mpDialogHostAbort(uint8_t reason)
         return;
     }
 
-    debugFilePrint("MPDIALOG abort session=%u reason=%u", gMpDialog.sessionId, reason);
+    MpLogAlways(MP_LOG_DIALOG, "abort session=%u reason=%u", gMpDialog.sessionId, reason);
 
     NetDialogEndPayload p;
     p.sessionId = gMpDialog.sessionId;
@@ -682,7 +683,7 @@ void MpDialogHostEnd()
         return;
     }
 
-    debugFilePrint("MPDIALOG end session=%u normal", gMpDialog.sessionId);
+    MpLog(MP_LOG_DIALOG, "end session=%u normal", gMpDialog.sessionId);
     NetDialogEndPayload p;
     p.sessionId = gMpDialog.sessionId;
     p.reason = NET_DIALOG_END_NORMAL;
@@ -706,7 +707,7 @@ void MpDialogHostAbortCombat()
 void MpDialogSetPendingInitiator(uint8_t netId)
 {
     gMpDialog.pendingInitiator = netId;
-    debugFilePrint("MPDIALOG pending initiator=%u", netId);
+    MpLog(MP_LOG_DIALOG, "pending initiator=%u", netId);
 }
 
 void MpDialogClearPendingInitiator()
@@ -777,7 +778,7 @@ uint32_t MpDialogHostSessionId()
 // session ends; the director flow resumes either way.
 static void mpDialogHostEnterModal()
 {
-    debugFilePrint("MPDIALOG host join enters modal session=%u node=%u", gMpDialog.sessionId, gMpDialog.nodeSeq);
+    MpLog(MP_LOG_DIALOG, "host join enters modal session=%u node=%u", gMpDialog.sessionId, gMpDialog.nodeSeq);
 
     // The talk script stays parked at dialog_go while this modal runs; the
     // session teardown must reset the parked program when it ends.
@@ -785,7 +786,7 @@ static void mpDialogHostEnterModal()
 
     if (gameDialogGetWindow() == -1) {
         if (_gdCreateHeadWindow() == -1) {
-            debugFilePrint("MPDIALOG host join modal setup failed (head window)");
+            MpLogAlways(MP_LOG_DIALOG, "host join modal setup failed (head window)");
             return;
         }
     }
@@ -811,7 +812,7 @@ static void mpDialogHostEnterModal()
     if (gameDialogGetWindow() != -1) {
         _gdDestroyHeadWindow();
     }
-    debugFilePrint("MPDIALOG host join modal closed session=%u active=%d", gMpDialog.sessionId, gMpDialog.active ? 1 : 0);
+    MpLog(MP_LOG_DIALOG, "host join modal closed session=%u active=%d", gMpDialog.sessionId, gMpDialog.active ? 1 : 0);
 }
 
 void MpDialogHostDirectorTick()
@@ -863,7 +864,7 @@ void MpDialogHostDirectorTick()
     // Majority timer expiry.
     if (gMpDialog.timerActive && gMpDialog.majorityOption >= 0) {
         if (getTicksSince(gMpDialog.timerStart) >= gMpDialog.timerMs) {
-            debugFilePrint("MPDIALOG timer expired session=%u node=%u option=%d",
+            MpLogAlways(MP_LOG_DIALOG, "timer expired session=%u node=%u option=%d",
                 gMpDialog.sessionId, gMpDialog.nodeSeq, gMpDialog.majorityOption);
             mpDialogResolve(gMpDialog.majorityOption);
         }
@@ -920,7 +921,7 @@ static void mpDialogHostSetParticipantUi()
         }
     }
     gMpDialog.hostUiHidden = wantHidden;
-    debugFilePrint("MPDIALOG host participant UI hidden=%d", wantHidden ? 1 : 0);
+    MpLog(MP_LOG_DIALOG, "host participant UI hidden=%d", wantHidden ? 1 : 0);
 }
 
 static void mpDialogHostSendStateToPeer(uint8_t netId)
@@ -982,7 +983,7 @@ void MpDialogHostNodeReady(const MpDialogNodeData* node)
     // Copy the node content (file-statics in game_dialog.cc are captured here).
     uint32_t hash = mpDialogNodeHash(node);
     if (gMpDialog.active && hash == gMpDialog.lastNodeHash) {
-        debugFilePrint("MPDIALOG node dedup (same hash) session=%u node=%u",
+        MpLog(MP_LOG_DIALOG, "node dedup (same hash) session=%u node=%u",
             gMpDialog.sessionId, gMpDialog.nodeSeq); // same node (re-entrant _gdProcessUpdate); nothing new
         return;
     }
@@ -1025,7 +1026,7 @@ void MpDialogHostNodeReady(const MpDialogNodeData* node)
         gMpDialog.hostParticipant = mpDialogIsParticipant(gMpSession.localNetId);
         gMpDialog.hostUiHidden = false;
 
-        debugFilePrint("MPDIALOG begin session=%u speaker=%u initiator=%u participants=%d",
+        MpLog(MP_LOG_DIALOG, "begin session=%u speaker=%u initiator=%u participants=%d",
             gMpDialog.sessionId, gMpDialog.speakerNetId, gMpDialog.initiatorNetId, gMpDialog.participantCount);
 
         // Broadcast BEGIN to every client (non-participants ignore it).
@@ -1082,7 +1083,7 @@ void MpDialogHostNodeReady(const MpDialogNodeData* node)
     mpDialogBroadcastVote();
     mpDialogHostSetParticipantUi();
 
-    debugFilePrint("MPDIALOG node session=%u node=%u options=%d",
+    MpLog(MP_LOG_DIALOG, "node session=%u node=%u options=%d",
         gMpDialog.sessionId, gMpDialog.nodeSeq, gMpDialog.optionCount);
 }
 
@@ -1095,7 +1096,7 @@ bool MpDialogHostTryJoin(Object* speaker, uint8_t netId)
     if (speaker == gMpDialog.speaker) {
         if (mpDialogIsParticipant(netId)) {
             // Already in this dialogue; clicking again does nothing.
-            debugFilePrint("MPDIALOG join ignored session=%u netId=%u (already participant)", gMpDialog.sessionId, netId);
+            MpLogAlways(MP_LOG_DIALOG, "join ignored session=%u netId=%u (already participant)", gMpDialog.sessionId, netId);
             return true;
         }
         if (!mpDialogPlayerConnected(netId)) {
@@ -1104,7 +1105,7 @@ bool MpDialogHostTryJoin(Object* speaker, uint8_t netId)
         gMpDialog.participants[gMpDialog.participantCount++] = netId;
         gMpDialog.voters[netId - 1].selected = -1;
 
-        debugFilePrint("MPDIALOG join session=%u netId=%u participants=%d", gMpDialog.sessionId, netId, gMpDialog.participantCount);
+        MpLog(MP_LOG_DIALOG, "join session=%u netId=%u participants=%d", gMpDialog.sessionId, netId, gMpDialog.participantCount);
 
         // Tell the other participants AND the joiner (the joiner's client may
         // never have seen BEGIN — the JOIN itself opens the session there).
@@ -1151,7 +1152,7 @@ bool MpDialogHostTryJoin(Object* speaker, uint8_t netId)
 
     // A different NPC while a session is running.
     if (mpDialogIsParticipant(netId)) {
-        debugFilePrint("MPDIALOG talk blocked session=%u netId=%u (one dialogue per player)", gMpDialog.sessionId, netId);
+        MpLogAlways(MP_LOG_DIALOG, "talk blocked session=%u netId=%u (one dialogue per player)", gMpDialog.sessionId, netId);
         return true;
     }
     return false;
@@ -1163,25 +1164,25 @@ void MpDialogHostHandleChoice(const void* data, size_t dataLength, void* peer)
         return;
     }
     if (dataLength < sizeof(NetDialogChoicePayload)) {
-        debugFilePrint("MPDIALOG choice rejected (short payload) len=%u", (unsigned)dataLength);
+        MpLogAlways(MP_LOG_DIALOG, "choice rejected (short payload) len=%u", (unsigned)dataLength);
         return;
     }
     const NetDialogChoicePayload* p = static_cast<const NetDialogChoicePayload*>(data);
     if (p->sessionId != gMpDialog.sessionId || p->nodeSeq != gMpDialog.nodeSeq) {
-        debugFilePrint("MPDIALOG choice rejected (stale) session=%u/%u node=%u/%u", p->sessionId, gMpDialog.sessionId, p->nodeSeq, gMpDialog.nodeSeq);
+        MpLogAlways(MP_LOG_DIALOG, "choice rejected (stale) session=%u/%u node=%u/%u", p->sessionId, gMpDialog.sessionId, p->nodeSeq, gMpDialog.nodeSeq);
         return;
     }
     if (!mpDialogIsParticipant(p->netId)) {
-        debugFilePrint("MPDIALOG choice rejected (not participant) netId=%u", p->netId);
+        MpLogAlways(MP_LOG_DIALOG, "choice rejected (not participant) netId=%u", p->netId);
         return;
     }
     MultiplayerPlayer* player = &gMpSession.players[p->netId - 1];
     if (player->peer != peer) {
-        debugFilePrint("MPDIALOG choice rejected (peer mismatch) netId=%u", p->netId);
+        MpLogAlways(MP_LOG_DIALOG, "choice rejected (peer mismatch) netId=%u", p->netId);
         return;
     }
     if (gMpDialog.voters[p->netId - 1].suspended) {
-        debugFilePrint("MPDIALOG choice rejected (bartering) netId=%u", p->netId);
+        MpLogAlways(MP_LOG_DIALOG, "choice rejected (bartering) netId=%u", p->netId);
         return;
     }
     if (gMpDialog.resolvedOption != -1) {
@@ -1193,11 +1194,11 @@ void MpDialogHostHandleChoice(const void* data, size_t dataLength, void* peer)
     } else if (p->optionIndex < gMpDialog.optionCount) {
         gMpDialog.voters[p->netId - 1].selected = (int8_t)p->optionIndex;
     } else {
-        debugFilePrint("MPDIALOG choice rejected (out of range) option=%u count=%d", p->optionIndex, gMpDialog.optionCount);
+        MpLogAlways(MP_LOG_DIALOG, "choice rejected (out of range) option=%u count=%d", p->optionIndex, gMpDialog.optionCount);
         return;
     }
 
-    debugFilePrint("MPDIALOG vote session=%u node=%u netId=%u option=%d",
+    MpLog(MP_LOG_DIALOG, "vote session=%u node=%u netId=%u option=%d",
         gMpDialog.sessionId, gMpDialog.nodeSeq, p->netId, p->optionIndex);
     // Float the chosen option over the choosing player's avatar.
     if (p->optionIndex < gMpDialog.optionCount && player->obj != nullptr
@@ -1221,11 +1222,11 @@ void MpDialogHostHandleLeave(const void* data, size_t dataLength, void* peer)
     }
     MultiplayerPlayer* player = &gMpSession.players[p->netId - 1];
     if (player->peer != peer) {
-        debugFilePrint("MPDIALOG leave rejected (peer mismatch) netId=%u", p->netId);
+        MpLogAlways(MP_LOG_DIALOG, "leave rejected (peer mismatch) netId=%u", p->netId);
         return;
     }
 
-    debugFilePrint("MPDIALOG leave session=%u netId=%u", gMpDialog.sessionId, p->netId);
+    MpLog(MP_LOG_DIALOG, "leave session=%u netId=%u", gMpDialog.sessionId, p->netId);
 
     if (gMpDialog.barter[p->netId - 1].active) {
         mpDialogHostTeardownBarter(p->netId);
@@ -1245,7 +1246,7 @@ void MpDialogHostHandleLeave(const void* data, size_t dataLength, void* peer)
     if (gMpDialog.initiatorNetId == p->netId) {
         // Initiator handoff: next in join order.
         gMpDialog.initiatorNetId = gMpDialog.participantCount > 0 ? gMpDialog.participants[0] : 0;
-        debugFilePrint("MPDIALOG initiator handoff session=%u new=%u", gMpDialog.sessionId, gMpDialog.initiatorNetId);
+        MpLog(MP_LOG_DIALOG, "initiator handoff session=%u new=%u", gMpDialog.sessionId, gMpDialog.initiatorNetId);
     }
 
     if (p->netId == gMpSession.localNetId) {
@@ -1254,7 +1255,7 @@ void MpDialogHostHandleLeave(const void* data, size_t dataLength, void* peer)
     }
 
     if (gMpDialog.participantCount == 0) {
-        debugFilePrint("MPDIALOG all left session=%u", gMpDialog.sessionId);
+        MpLog(MP_LOG_DIALOG, "all left session=%u", gMpDialog.sessionId);
         NetDialogEndPayload end;
         end.sessionId = gMpDialog.sessionId;
         end.reason = NET_DIALOG_END_ALL_LEFT;
@@ -1293,11 +1294,11 @@ void MpDialogHostLocalChoice(int optionIndex)
         return;
     }
     if (optionIndex < 0 || optionIndex >= gMpDialog.optionCount) {
-        debugFilePrint("MPDIALOG vote rejected (out of range) option=%d count=%d", optionIndex, gMpDialog.optionCount);
+        MpLogAlways(MP_LOG_DIALOG, "vote rejected (out of range) option=%d count=%d", optionIndex, gMpDialog.optionCount);
         return;
     }
     gMpDialog.voters[netId - 1].selected = (int8_t)optionIndex;
-    debugFilePrint("MPDIALOG vote session=%u node=%u netId=%u option=%d", gMpDialog.sessionId, gMpDialog.nodeSeq, netId, optionIndex);
+    MpLog(MP_LOG_DIALOG, "vote session=%u node=%u netId=%u option=%d", gMpDialog.sessionId, gMpDialog.nodeSeq, netId, optionIndex);
     // Float the chosen option over the host participant's avatar.
     if (gDude != nullptr && gMpDialog.options[optionIndex].text[0] != '\0') {
         mpDialogFloat(gDude, gMpDialog.options[optionIndex].text, 101, COLOR_WHITE, COLOR_BLACK);
@@ -1317,7 +1318,7 @@ void MpDialogHostLocalLeave()
         return;
     }
 
-    debugFilePrint("MPDIALOG leave (local) session=%u netId=%u", gMpDialog.sessionId, netId);
+    MpLog(MP_LOG_DIALOG, "leave (local) session=%u netId=%u", gMpDialog.sessionId, netId);
 
     if (gMpDialog.barter[netId - 1].active) {
         mpDialogHostTeardownBarter(netId);
@@ -1335,14 +1336,14 @@ void MpDialogHostLocalLeave()
 
     if (gMpDialog.initiatorNetId == netId) {
         gMpDialog.initiatorNetId = gMpDialog.participantCount > 0 ? gMpDialog.participants[0] : 0;
-        debugFilePrint("MPDIALOG initiator handoff session=%u new=%u", gMpDialog.sessionId, gMpDialog.initiatorNetId);
+        MpLog(MP_LOG_DIALOG, "initiator handoff session=%u new=%u", gMpDialog.sessionId, gMpDialog.initiatorNetId);
     }
 
     gMpDialog.hostParticipant = false;
     mpDialogHostSetParticipantUi();
 
     if (gMpDialog.participantCount == 0) {
-        debugFilePrint("MPDIALOG all left session=%u", gMpDialog.sessionId);
+        MpLog(MP_LOG_DIALOG, "all left session=%u", gMpDialog.sessionId);
         NetDialogEndPayload end;
         end.sessionId = gMpDialog.sessionId;
         end.reason = NET_DIALOG_END_ALL_LEFT;
@@ -1375,7 +1376,7 @@ void MpDialogHostPlayerDisconnected(uint8_t netId)
         return;
     }
 
-    debugFilePrint("MPDIALOG disconnect session=%u netId=%u", gMpDialog.sessionId, netId);
+    MpLog(MP_LOG_DIALOG, "disconnect session=%u netId=%u", gMpDialog.sessionId, netId);
 
     if (gMpDialog.barter[netId - 1].active) {
         mpDialogHostTeardownBarter(netId);
@@ -1393,7 +1394,7 @@ void MpDialogHostPlayerDisconnected(uint8_t netId)
 
     if (gMpDialog.initiatorNetId == netId) {
         gMpDialog.initiatorNetId = gMpDialog.participantCount > 0 ? gMpDialog.participants[0] : 0;
-        debugFilePrint("MPDIALOG initiator handoff (disconnect) session=%u new=%u", gMpDialog.sessionId, gMpDialog.initiatorNetId);
+        MpLog(MP_LOG_DIALOG, "initiator handoff (disconnect) session=%u new=%u", gMpDialog.sessionId, gMpDialog.initiatorNetId);
     }
 
     if (netId == gMpSession.localNetId) {
@@ -1601,7 +1602,7 @@ static void mpDialogBroadcastBarterStateToBarterers()
             count++;
         }
     }
-    debugFilePrint("MPBARTER broadcast barterers=%d", count);
+    MpLog(MP_LOG_DIALOG, "MPBARTER broadcast barterers=%d", count);
 }
 
 static bool mpDialogBarterStart(uint8_t netId)
@@ -1612,7 +1613,7 @@ static bool mpDialogBarterStart(uint8_t netId)
         return true;
     }
     if (!mpDialogNpcCanBarter()) {
-        debugFilePrint("MPBARTER start rejected session=%u netId=%u (no barter flag)", gMpDialog.sessionId, netId);
+        MpLogAlways(MP_LOG_DIALOG, "MPBARTER start rejected session=%u netId=%u (no barter flag)", gMpDialog.sessionId, netId);
         mpDialogSendBarterState(netId, NET_BARTER_OP_START, 0, 903);
         return false;
     }
@@ -1623,7 +1624,7 @@ static bool mpDialogBarterStart(uint8_t netId)
     b->requestTable = mpDialogContainerCreate();
 
     gMpDialog.voters[netId - 1].suspended = true;
-    debugFilePrint("MPBARTER start session=%u netId=%u", gMpDialog.sessionId, netId);
+    MpLog(MP_LOG_DIALOG, "MPBARTER start session=%u netId=%u", gMpDialog.sessionId, netId);
     mpDialogRecalcVote();
     mpDialogSendBarterState(netId, NET_BARTER_OP_START, 1, 0);
     return true;
@@ -1638,7 +1639,7 @@ static void mpDialogBarterEnd(uint8_t netId)
     }
     mpDialogHostTeardownBarter(netId);
     gMpDialog.voters[netId - 1].suspended = false;
-    debugFilePrint("MPBARTER end session=%u netId=%u", gMpDialog.sessionId, netId);
+    MpLog(MP_LOG_DIALOG, "MPBARTER end session=%u netId=%u", gMpDialog.sessionId, netId);
     mpDialogRecalcVote();
     mpDialogSendBarterState(netId, NET_BARTER_OP_END, 1, 0);
 }
@@ -1657,7 +1658,7 @@ static void mpDialogBarterMove(uint8_t netId, uint8_t target, uint32_t pid, int3
         if (qty > 0) {
             Object* item = mpDialogFindItemByPid(avatar, pid);
             if (item == nullptr || qty > itemGetQuantity(avatar, item)) {
-                debugFilePrint("MPBARTER move rejected session=%u netId=%u pid=0x%X qty=%d (avatar lacks item)", gMpDialog.sessionId, netId, pid, qty);
+                MpLogAlways(MP_LOG_DIALOG, "MPBARTER move rejected session=%u netId=%u pid=0x%X qty=%d (avatar lacks item)", gMpDialog.sessionId, netId, pid, qty);
                 mpDialogSendBarterState(netId, NET_BARTER_OP_MOVE, 0, 0);
                 return;
             }
@@ -1675,7 +1676,7 @@ static void mpDialogBarterMove(uint8_t netId, uint8_t target, uint32_t pid, int3
         if (qty > 0) {
             Object* item = mpDialogFindItemByPid(gMpDialog.speaker, pid);
             if (item == nullptr || mpDialogItemIsEquipped(item) || qty > itemGetQuantity(gMpDialog.speaker, item)) {
-                debugFilePrint("MPBARTER move rejected session=%u netId=%u pid=0x%X qty=%d (npc lacks item)", gMpDialog.sessionId, netId, pid, qty);
+                MpLogAlways(MP_LOG_DIALOG, "MPBARTER move rejected session=%u netId=%u pid=0x%X qty=%d (npc lacks item)", gMpDialog.sessionId, netId, pid, qty);
                 mpDialogSendBarterState(netId, NET_BARTER_OP_MOVE, 0, 0);
                 return;
             }
@@ -1690,7 +1691,7 @@ static void mpDialogBarterMove(uint8_t netId, uint8_t target, uint32_t pid, int3
         }
     }
 
-    debugFilePrint("MPBARTER move session=%u netId=%u target=%u pid=0x%X qty=%d", gMpDialog.sessionId, netId, target, pid, qty);
+    MpLog(MP_LOG_DIALOG, "MPBARTER move session=%u netId=%u target=%u pid=0x%X qty=%d", gMpDialog.sessionId, netId, target, pid, qty);
     mpDialogSendBarterState(netId, NET_BARTER_OP_MOVE, 1, 0);
     if (target == 2) {
         mpDialogBroadcastBarterStateToBarterers();
@@ -1714,7 +1715,7 @@ static void mpDialogBarterCommit(uint8_t netId)
 
     int rc = MpBarterAttemptTransaction(avatar, b->offerTable, gMpDialog.speaker, b->requestTable);
     uint8_t msgId = rc == 0 ? 27 : 28;
-    debugFilePrint("MPBARTER commit session=%u netId=%u rc=%d", gMpDialog.sessionId, netId, rc);
+    MpLog(MP_LOG_DIALOG, "MPBARTER commit session=%u netId=%u rc=%d", gMpDialog.sessionId, netId, rc);
     mpDialogSendBarterState(netId, NET_BARTER_OP_COMMIT, rc == 0 ? 1 : 0, msgId);
     mpDialogBroadcastBarterStateToBarterers();
     gMpDialog.barterDirty = true;
@@ -1779,7 +1780,7 @@ bool MpDialogBarterLoopTick()
         }
         if (gMpDialogClient.barterDirty) {
             gMpDialogClient.barterDirty = false;
-            debugFilePrint("MPBARTER client tick refresh npc=%d offer=%d req=%d",
+            MpLog(MP_LOG_DIALOG, "MPBARTER client tick refresh npc=%d offer=%d req=%d",
                 gMpDialogClient.npcItemCount, gMpDialogClient.offerCount, gMpDialogClient.requestCount);
             mpBarterTradeRefreshWithTables(gMpDialogClient.offerMirror, gMpDialogClient.requestMirror);
         }
@@ -1851,7 +1852,7 @@ void MpDialogHostHandleBarterCmd(const void* data, size_t dataLength, void* peer
         return;
     }
     if (dataLength < sizeof(NetBarterCmdPayload)) {
-        debugFilePrint("MPBARTER cmd rejected (short payload) len=%u", (unsigned)dataLength);
+        MpLogAlways(MP_LOG_DIALOG, "MPBARTER cmd rejected (short payload) len=%u", (unsigned)dataLength);
         return;
     }
     const NetBarterCmdPayload* p = static_cast<const NetBarterCmdPayload*>(data);
@@ -1860,7 +1861,7 @@ void MpDialogHostHandleBarterCmd(const void* data, size_t dataLength, void* peer
     }
     MultiplayerPlayer* player = &gMpSession.players[p->netId - 1];
     if (player->peer != peer) {
-        debugFilePrint("MPBARTER cmd rejected (peer mismatch) netId=%u", p->netId);
+        MpLogAlways(MP_LOG_DIALOG, "MPBARTER cmd rejected (peer mismatch) netId=%u", p->netId);
         return;
     }
 
@@ -1878,7 +1879,7 @@ void MpDialogHostHandleBarterCmd(const void* data, size_t dataLength, void* peer
         mpDialogBarterCommit(p->netId);
         break;
     default:
-        debugFilePrint("MPBARTER cmd rejected (unknown op) op=%u", p->op);
+        MpLogAlways(MP_LOG_DIALOG, "MPBARTER cmd rejected (unknown op) op=%u", p->op);
         break;
     }
 }
@@ -2001,7 +2002,7 @@ static void mpDialogHostRunBarter()
         windowHide(gMpDialog.hostVoteWindow);
     }
 
-    debugFilePrint("MPBARTER trade screen open (host) session=%u", gMpDialog.sessionId);
+    MpLog(MP_LOG_DIALOG, "MPBARTER trade screen open (host) session=%u", gMpDialog.sessionId);
 
     // Base modifier only: the vanilla trade loop adds the speaker's reaction
     // modifier itself (vanilla parity). The full modifier (base + reaction)
@@ -2016,7 +2017,7 @@ static void mpDialogHostRunBarter()
     gameDialogCoopRecreateDialogueWindow();
     gameDialogCoopShowDialogue();
     gMpDialog.hostBarterUiOpen = false;
-    debugFilePrint("MPBARTER trade screen closed (host) session=%u", gMpDialog.sessionId);
+    MpLog(MP_LOG_DIALOG, "MPBARTER trade screen closed (host) session=%u", gMpDialog.sessionId);
 }
 
 // ---------------------------------------------------------------------------
@@ -2062,7 +2063,7 @@ void MpDialogHostPump()
     // Majority timer expiry.
     if (gMpDialog.timerActive && gMpDialog.majorityOption >= 0) {
         if (getTicksSince(gMpDialog.timerStart) >= gMpDialog.timerMs) {
-            debugFilePrint("MPDIALOG timer expired session=%u node=%u option=%d", gMpDialog.sessionId, gMpDialog.nodeSeq, gMpDialog.majorityOption);
+            MpLogAlways(MP_LOG_DIALOG, "timer expired session=%u node=%u option=%d", gMpDialog.sessionId, gMpDialog.nodeSeq, gMpDialog.majorityOption);
             mpDialogResolve(gMpDialog.majorityOption);
         }
     }
@@ -2073,7 +2074,7 @@ void MpDialogHostPump()
         gMpDialog.resolvedOption = -1;
         if (optionIndex >= 0 && optionIndex < gMpDialog.optionCount) {
             int rc = gameDialogChooseOption(optionIndex);
-            debugFilePrint("MPDIALOG pump resolve session=%u option=%d rc=%d", gMpDialog.sessionId, optionIndex, rc);
+            MpLog(MP_LOG_DIALOG, "pump resolve session=%u option=%d rc=%d", gMpDialog.sessionId, optionIndex, rc);
             if (rc == -1) {
                 gMpDialog.exitRequested = true;
             }
@@ -2156,7 +2157,7 @@ int MpDialogRollStat(Object* critter, int stat, int modifier, int* howMuch)
     if (howMuch != nullptr) {
         *howMuch = value - chance;
     }
-    debugFilePrint("MPDIALOG stat check session=%u stat=%d value=%d roll=%d", gMpDialog.sessionId, stat, value, chance);
+    MpLog(MP_LOG_DIALOG, "stat check session=%u stat=%d value=%d roll=%d", gMpDialog.sessionId, stat, value, chance);
     return chance <= value ? ROLL_SUCCESS : ROLL_FAILURE;
 }
 
@@ -2178,7 +2179,7 @@ int MpDialogRollSkill(Object* critter, int skill, int modifier, int* howMuch)
         }
     }
     int rc = randomRoll(value + modifier, critChance, howMuch);
-    debugFilePrint("MPDIALOG skill check session=%u skill=%d value=%d rc=%d", gMpDialog.sessionId, skill, value, rc);
+    MpLog(MP_LOG_DIALOG, "skill check session=%u skill=%d value=%d rc=%d", gMpDialog.sessionId, skill, value, rc);
     return rc;
 }
 
@@ -2272,12 +2273,12 @@ int MpDialogGrantExperience(int xp)
             int maxHpAfter = critterGetStat(avatar, STAT_MAXIMUM_HIT_POINTS);
             critterAdjustHitPoints(avatar, maxHpAfter - maxHpBefore);
             maxHpBefore = maxHpAfter;
-            debugFilePrint("MPDIALOG xp level-up netId=%u level=%d hpBonus=%d", i + 1, level, hpPerLevel);
+            MpLog(MP_LOG_DIALOG, "xp level-up netId=%u level=%d hpBonus=%d", i + 1, level, hpPerLevel);
         }
 
         MpProfileSetPcStat(avatar, PC_STAT_EXPERIENCE, newXp);
         MpProfileSetPcStat(avatar, PC_STAT_LEVEL, level);
-        debugFilePrint("MPDIALOG xp netId=%u xp=%d (+%d) level=%d", i + 1, newXp, xp, level);
+        MpLog(MP_LOG_DIALOG, "xp netId=%u xp=%d (+%d) level=%d", i + 1, newXp, xp, level);
     }
     return 0;
 }
@@ -2296,7 +2297,7 @@ int MpDialogAdjustCaps(Object* target, int amount)
             continue;
         }
         itemCapsAdjust(avatar, amount);
-        debugFilePrint("MPDIALOG caps netId=%u amount=%d", i + 1, amount);
+        MpLog(MP_LOG_DIALOG, "caps netId=%u amount=%d", i + 1, amount);
     }
     return 0;
 }
@@ -2315,7 +2316,7 @@ int MpDialogHeal(Object* critter, int amount)
             continue;
         }
         critterAdjustHitPoints(avatar, amount);
-        debugFilePrint("MPDIALOG heal netId=%u amount=%d", i + 1, amount);
+        MpLog(MP_LOG_DIALOG, "heal netId=%u amount=%d", i + 1, amount);
     }
     return 0;
 }
@@ -2653,7 +2654,7 @@ static void mpDialogClientApplyNodeBody(const std::string& body)
 
     int version;
     if (!read8(&version) || version != 2) {
-        debugFilePrint("MPDIALOG client state rejected (bad version)");
+        MpLogAlways(MP_LOG_DIALOG, "client state rejected (bad version)");
         return;
     }
     int headFid;
@@ -2699,7 +2700,7 @@ static void mpDialogClientApplyNodeBody(const std::string& body)
     if (!gMpDialogClient.barterActive && gameDialogCoopIsOpen()) {
         mpDialogClientApplyNodeToVanilla();
     }
-    debugFilePrint("MPDIALOG client node session=%u node=%u options=%d", gMpDialogClient.sessionId, gMpDialogClient.nodeSeq, gMpDialogClient.optionCount);
+    MpLog(MP_LOG_DIALOG, "client node session=%u node=%u options=%d", gMpDialogClient.sessionId, gMpDialogClient.nodeSeq, gMpDialogClient.optionCount);
 }
 
 static void mpDialogClientApplyVote(const NetDialogVotePayload* p)
@@ -2755,7 +2756,7 @@ void MpDialogOnClientPacket(uint8_t packetType, const void* data, size_t dataLen
         if (mpDialogClientIsParticipant()) {
             gMpDialogClient.uiPending = true;
         }
-        debugFilePrint("MPDIALOG client begin session=%u participants=%d local=%u",
+        MpLog(MP_LOG_DIALOG, "client begin session=%u participants=%d local=%u",
             p->sessionId, p->participantCount, gMpSession.localNetId);
         break;
     }
@@ -2815,7 +2816,7 @@ void MpDialogOnClientPacket(uint8_t packetType, const void* data, size_t dataLen
             gMpDialogClient.selections[e->netId - 1] = (int8_t)e->optionIndex;
             gMpDialogClient.suspended[e->netId - 1] = (e->flags & 1) != 0;
         }
-        debugFilePrint("MPDIALOG client vote session=%u node=%u resolved=%d timer=%d", p->sessionId, p->nodeSeq, p->resolvedOption, p->timerActive);
+        MpLog(MP_LOG_DIALOG, "client vote session=%u node=%u resolved=%d timer=%d", p->sessionId, p->nodeSeq, p->resolvedOption, p->timerActive);
         // The chooser names and the local highlight changed: re-render the
         // option texts (no-op while bartering — the trade screen hides them).
         if (!gMpDialogClient.barterActive && gameDialogCoopIsOpen() && gMpDialogClient.nodeApplied) {
@@ -2851,7 +2852,7 @@ void MpDialogOnClientPacket(uint8_t packetType, const void* data, size_t dataLen
             if (p->netId == gMpSession.localNetId) {
                 gMpDialogClient.uiPending = true;
             }
-            debugFilePrint("MPDIALOG client join opens session=%u netId=%u", p->sessionId, p->netId);
+            MpLog(MP_LOG_DIALOG, "client join opens session=%u netId=%u", p->sessionId, p->netId);
             break;
         }
         if (p->sessionId != gMpDialogClient.sessionId) {
@@ -2868,7 +2869,7 @@ void MpDialogOnClientPacket(uint8_t packetType, const void* data, size_t dataLen
         if (p->netId == gMpSession.localNetId) {
             gMpDialogClient.uiPending = true;
         }
-        debugFilePrint("MPDIALOG client join session=%u netId=%u", p->sessionId, p->netId);
+        MpLog(MP_LOG_DIALOG, "client join session=%u netId=%u", p->sessionId, p->netId);
         break;
     }
     case NET_PKT_DIALOG_LEAVE: {
@@ -2888,7 +2889,7 @@ void MpDialogOnClientPacket(uint8_t packetType, const void* data, size_t dataLen
                 break;
             }
         }
-        debugFilePrint("MPDIALOG client leave session=%u netId=%u", p->sessionId, p->netId);
+        MpLog(MP_LOG_DIALOG, "client leave session=%u netId=%u", p->sessionId, p->netId);
         break;
     }
     case NET_PKT_DIALOG_END: {
@@ -2899,7 +2900,7 @@ void MpDialogOnClientPacket(uint8_t packetType, const void* data, size_t dataLen
         if (!gMpDialogClient.sessionActive || p->sessionId != gMpDialogClient.sessionId) {
             return;
         }
-        debugFilePrint("MPDIALOG client end session=%u reason=%u", p->sessionId, p->reason);
+        MpLog(MP_LOG_DIALOG, "client end session=%u reason=%u", p->sessionId, p->reason);
         mpDialogClientCloseWindow();
         mpDialogClientReset();
         break;
@@ -2950,7 +2951,7 @@ void MpDialogOnClientPacket(uint8_t packetType, const void* data, size_t dataLen
         if (gMpDialogClient.tradeOpen && p->lastOk == 1) {
             if (p->lastOp == NET_BARTER_OP_COMMIT) {
                 mpDialogClientReconcileCommit(oldOffers, oldOfferCount, oldRequests, oldRequestCount);
-                debugFilePrint("MPBARTER client commit reconcile sold=%d bought=%d", oldOfferCount, oldRequestCount);
+                MpLog(MP_LOG_DIALOG, "MPBARTER client commit reconcile sold=%d bought=%d", oldOfferCount, oldRequestCount);
             } else if (p->lastOp == NET_BARTER_OP_MOVE) {
                 mpDialogClientReconcileOfferDelta(oldOffers, oldOfferCount,
                     gMpDialogClient.offers, gMpDialogClient.offerCount);
@@ -2959,10 +2960,10 @@ void MpDialogOnClientPacket(uint8_t packetType, const void* data, size_t dataLen
 
         if (p->lastOp == NET_BARTER_OP_START && p->lastOk == 1) {
             gMpDialogClient.barterActive = true;
-            debugFilePrint("MPDIALOG client barter open session=%u", p->sessionId);
+            MpLog(MP_LOG_DIALOG, "client barter open session=%u", p->sessionId);
         } else if (p->lastOp == NET_BARTER_OP_END) {
             gMpDialogClient.barterActive = false;
-            debugFilePrint("MPDIALOG client barter closed session=%u", p->sessionId);
+            MpLog(MP_LOG_DIALOG, "client barter closed session=%u", p->sessionId);
         }
         if (p->lastMsgId != 0) {
             const char* msg = mpDialogClientBarterMessage(p->lastMsgId);
@@ -2973,13 +2974,13 @@ void MpDialogOnClientPacket(uint8_t packetType, const void* data, size_t dataLen
 
         // Live-rebuild the trade-screen mirrors when the vanilla trade
         // screen is open; the vanilla loop's per-frame tick re-renders.
-        debugFilePrint("MPBARTER client state op=%u ok=%u msg=%u npc=%u offer=%u req=%u tradeOpen=%d",
+        MpLog(MP_LOG_DIALOG, "MPBARTER client state op=%u ok=%u msg=%u npc=%u offer=%u req=%u tradeOpen=%d",
             p->lastOp, p->lastOk, p->lastMsgId, gMpDialogClient.npcItemCount,
             gMpDialogClient.offerCount, gMpDialogClient.requestCount, (int)gMpDialogClient.tradeOpen);
         if (gMpDialogClient.tradeOpen) {
             mpDialogClientBarterRebuildMirrors();
             gMpDialogClient.barterDirty = true;
-            debugFilePrint("MPBARTER client mirrors rebuilt (dirty)");
+            MpLog(MP_LOG_DIALOG, "MPBARTER client mirrors rebuilt (dirty)");
         }
         break;
     }
@@ -3100,7 +3101,7 @@ static void mpDialogClientUpdateBarterUi()
     if (gMpDialogClient.barterActive && !gMpDialogClient.tradeOpen) {
         Object* mirror = gMpDialogClient.speakerObjNetId != 0 ? MpFindObjByNetId(gMpDialogClient.speakerObjNetId) : nullptr;
         if (mirror == nullptr) {
-            debugFilePrint("MPDIALOG client trade open abort: no speaker mirror");
+            MpLogAlways(MP_LOG_DIALOG, "client trade open abort: no speaker mirror");
             mpDialogClientSendBarter(NET_BARTER_OP_END, 0, 0, 0);
             gMpDialogClient.barterActive = false;
             return;
@@ -3133,7 +3134,7 @@ static void mpDialogClientUpdateBarterUi()
             gMpDialogClient.requestMirror = nullptr;
             mpDialogClientSendBarter(NET_BARTER_OP_END, 0, 0, 0);
             gMpDialogClient.barterActive = false;
-            debugFilePrint("MPDIALOG client barter window create failed");
+            MpLogAlways(MP_LOG_DIALOG, "client barter window create failed");
             return;
         }
         // The participant panel must not sit on top of the trade screen.
@@ -3141,7 +3142,7 @@ static void mpDialogClientUpdateBarterUi()
             windowHide(gMpDialogClient.window);
         }
         gMpDialogClient.tradeOpen = true;
-        debugFilePrint("MPDIALOG client trade screen open session=%u", gMpDialogClient.sessionId);
+        MpLog(MP_LOG_DIALOG, "client trade screen open session=%u", gMpDialogClient.sessionId);
 
         // Blocking: the vanilla trade loop (co-op hooks inside). Returns when
         // the session ended (T/ESC, host END, abort).
@@ -3168,7 +3169,7 @@ static void mpDialogClientUpdateBarterUi()
         if (gMpDialogClient.nodeApplied) {
             mpDialogClientApplyNodeToVanilla();
         }
-        debugFilePrint("MPDIALOG client trade screen closed session=%u", gMpDialogClient.sessionId);
+        MpLog(MP_LOG_DIALOG, "client trade screen closed session=%u", gMpDialogClient.sessionId);
     }
 }
 
@@ -3181,7 +3182,7 @@ static void mpDialogClientRunModal()
     // Open the vanilla-style dialogue screen (head + reply + options).
     Object* mirror = gMpDialogClient.speakerObjNetId != 0 ? MpFindObjByNetId(gMpDialogClient.speakerObjNetId) : nullptr;
     if (mirror == nullptr) {
-        debugFilePrint("MPDIALOG client modal abort: no speaker mirror netId=%u", gMpDialogClient.speakerObjNetId);
+        MpLogAlways(MP_LOG_DIALOG, "client modal abort: no speaker mirror netId=%u", gMpDialogClient.speakerObjNetId);
         gMpDialogClient.modalOpen = false;
         gMpModalActive = false;
         return;
@@ -3206,7 +3207,7 @@ static void mpDialogClientRunModal()
     windowDrawBorder(panel);
     gMpDialogClient.window = panel;
 
-    debugFilePrint("MPDIALOG client modal open session=%u", gMpDialogClient.sessionId);
+    MpLog(MP_LOG_DIALOG, "client modal open session=%u", gMpDialogClient.sessionId);
 
     while (gMpDialogClient.modalOpen) {
         sharedFpsLimiter.mark();
@@ -3250,7 +3251,7 @@ static void mpDialogClientRunModal()
 
     mpDialogClientCloseWindow();
     gMpModalActive = false;
-    debugFilePrint("MPDIALOG client modal closed");
+    MpLog(MP_LOG_DIALOG, "client modal closed");
 }
 
 bool MpDialogClientSessionActive()

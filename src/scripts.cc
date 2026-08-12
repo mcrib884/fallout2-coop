@@ -48,6 +48,7 @@
 #include "window_manager.h"
 #include "window_manager_private.h"
 #include "worldmap.h"
+#include "multiplayer_log.h"
 
 namespace fallout {
 
@@ -1293,7 +1294,7 @@ int scriptsHandleRequests()
 {
     if (gMpIsClient) {
         if (gScriptsRequests != 0) {
-            debugFilePrint("MPSCR: client clearing script requests flags=0x%X", gScriptsRequests);
+            MpLog(MP_LOG_SCRIPT, "client clearing script requests flags=0x%X", gScriptsRequests);
         }
         scriptsClearPendingRequests();
         return 0;
@@ -1310,7 +1311,7 @@ int scriptsHandleRequests()
             memcpy(&gScriptsCSD, &gScriptsRequestedCSD, sizeof(gScriptsCSD));
 
             if (gMpActive) {
-                debugFilePrint("MPCOMBAT: host script combat request flag=0x%X attacker=0x%X tile=%d defender=0x%X tile=%d",
+                MpLog(MP_LOG_COMBAT, "host script combat request flag=0x%X attacker=0x%X tile=%d defender=0x%X tile=%d",
                     (gScriptsRequests & SCRIPT_REQUEST_0x40) != 0 ? 1 : 0,
                     gScriptsRequestedCSD.attacker != nullptr ? gScriptsRequestedCSD.attacker->pid : 0,
                     gScriptsRequestedCSD.attacker != nullptr ? gScriptsRequestedCSD.attacker->tile : -1,
@@ -1416,7 +1417,7 @@ int scriptsRequestCombat(CombatStartData* combat)
 
     if (combat) {
         if (gMpActive && gMpIsHost) {
-            debugFilePrint("MPCOMBAT: script combat requested attacker=0x%X tile=%d defender=0x%X tile=%d",
+            MpLog(MP_LOG_COMBAT, "script combat requested attacker=0x%X tile=%d defender=0x%X tile=%d",
                 combat->attacker != nullptr ? combat->attacker->pid : 0,
                 combat->attacker != nullptr ? combat->attacker->tile : -1,
                 combat->defender != nullptr ? combat->defender->pid : 0,
@@ -1479,7 +1480,7 @@ int scriptsRequestElevator(Object* obj, int elevatorType)
     // and feed the notice back through the monitor relay so the acting client
     // sees it.
     if (gMpActive && MpRemoteActionActive()) {
-        debugFilePrint("MP: elevator request blocked (remote action active)");
+        MpLog(MP_LOG_SYNC, "(remote action active)");
         displayMonitorAddMessage("Elevators are not available in co-op.");
         return -1;
     }
@@ -1550,7 +1551,7 @@ int scriptsRequestExplosion(int tile, int elevation, int minDamage, int maxDamag
 void scriptsRequestDialog(Object* obj)
 {
     if (gMpIsClient) {
-        debugFilePrint("MPSCR: client dialog request obj=%p pid=0x%X", (void*)obj,
+        MpLog(MP_LOG_SCRIPT, "client dialog request obj=%p pid=0x%X", (void*)obj,
             obj != nullptr ? obj->pid : 0);
     }
     gScriptsRequestedDialogWith = obj;
@@ -1719,12 +1720,12 @@ int scriptExecProc(int sid, int proc)
     executedScript->action = 0;
 
     if (gMpIsClient) {
-        debugFilePrint("MPSCR: client script exec done sid=%d proc=%d", sid, proc);
+        MpLog(MP_LOG_SCRIPT, "client script exec done sid=%d proc=%d", sid, proc);
     }
 
     return 0;
     } catch (const std::exception& e) {
-        debugFilePrint("MPSCR: scriptExecProc threw '%s' sid=%d proc=%d scriptIndex=%d localVars=%d mapLocalVars=%d mapLocalVarsLen=%d",
+        MpLog(MP_LOG_SCRIPT, "scriptExecProc threw '%s' sid=%d proc=%d scriptIndex=%d localVars=%d mapLocalVars=%d mapLocalVarsLen=%d",
             e.what(), sid, proc, captureScriptIndex, captureLocalVarsCount,
             gMapLocalVarsLength, gMapHeader.localVariablesCount);
         return -1;

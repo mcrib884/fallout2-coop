@@ -14,6 +14,7 @@
 #include "input.h"
 #include "multiplayer.h"
 #include "platform_compat.h"
+#include "multiplayer_log.h"
 
 namespace fallout {
 
@@ -639,7 +640,7 @@ int _MVE_rmStepMovie()
     // Co-op: log entry so a hang inside the decoder is localizable.
     static int sStepEntryCount = 0;
     if (gMpIsClient && (sStepEntryCount++ < 20 || (sStepEntryCount % 1000) == 0)) {
-        debugFilePrint("MPMOVIE: step enter rm_active=%d rm_len=%d", rm_active, rm_len);
+        MpLog(MP_LOG_MOVIE, "step enter rm_active=%d rm_len=%d", rm_active, rm_len);
     }
 
     int v0;
@@ -682,7 +683,7 @@ LABEL_5:
         // the decoder is localizable to the exact record kind.
         static int sRecordLogCount = 0;
         if (gMpIsClient && (sRecordLogCount++ < 30 || (sRecordLogCount % 1000) == 0)) {
-            debugFilePrint("MPMOVIE: record type=%d len=%d active=%d", (v5 >> 16) & 0xFF, v5 & 0xFFFF, rm_active);
+            MpLog(MP_LOG_MOVIE, "record type=%d len=%d active=%d", (v5 >> 16) & 0xFF, v5 & 0xFFFF, rm_active);
         }
 
         switch ((v5 >> 16) & 0xFF) {
@@ -892,7 +893,7 @@ static void MVE_syncSync()
         uint32_t syncSyncStart = getTicks();
         while (sync_time + 1000 * compat_timeGetTime() < 0) {
             if (getTicks() - syncSyncStart > 2000) {
-                debugFilePrint("MPMOVIE: syncSync timed out");
+                MpLogAlways(MP_LOG_MOVIE, "syncSync timed out");
                 return;
             }
         }
@@ -953,7 +954,7 @@ static void _MVE_sndSync()
         }
 
         if (getTicks() >= syncSpinDeadline) {
-            debugFilePrint("MPMOVIE: sndsync spin timed out (audio stalled) status=0x%X play=%u write=%u",
+            MpLogAlways(MP_LOG_MOVIE, "sndsync spin timed out (audio stalled) status=0x%X play=%u write=%u",
                 dwStatus, dwCurrentPlayCursor, dwCurrentWriteCursor);
             return;
         }
@@ -963,7 +964,7 @@ static void _MVE_sndSync()
         // stalled client audio device is visible instead of a silent freeze.
         static int sSndSyncLogCount = 0;
         if (gMpIsClient && (sSndSyncLogCount++ < 20 || (sSndSyncLogCount % 1000) == 0)) {
-            debugFilePrint("MPMOVIE: sndsync spin status=0x%X play=%u write=%u", dwStatus, dwCurrentPlayCursor, dwCurrentWriteCursor);
+            MpLog(MP_LOG_MOVIE, "sndsync spin status=0x%X play=%u write=%u", dwStatus, dwCurrentPlayCursor, dwCurrentWriteCursor);
         }
 
         dwCurrentWriteCursor = dword_6B36A4;
@@ -1104,7 +1105,7 @@ static void _CallsSndBuff_Loc(unsigned char* a1, int a2)
     static int sSndPushLogCount = 0;
     bool logClientPush = gMpIsClient && (sSndPushLogCount++ < 20 || (sSndPushLogCount % 1000) == 0);
     if (logClientPush) {
-        debugFilePrint("MPMOVIE: sndpush enter buf=%d size=%d", gMveSoundBuffer, a2);
+        MpLog(MP_LOG_MOVIE, "sndpush enter buf=%d size=%d", gMveSoundBuffer, a2);
     }
 
     int v2;

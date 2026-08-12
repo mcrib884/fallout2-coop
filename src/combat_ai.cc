@@ -37,6 +37,7 @@
 #include "svga.h"
 #include "text_object.h"
 #include "tile.h"
+#include "multiplayer_log.h"
 
 namespace fallout {
 
@@ -3458,7 +3459,7 @@ static int _ai_print_msg(Object* critter, int type)
                 strncpy(relay.text, string, sizeof(relay.text) - 1);
                 NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE,
                     NET_PKT_FLOAT_MESSAGE, &relay, sizeof(relay));
-                debugFilePrint("MP: ai float relayed netId=%u font=%d color=%d outline=%d text='%.48s'",
+                MpLog(MP_LOG_CHAT, "netId=%u font=%d color=%d outline=%d text='%.48s'",
                     netId, ai->font, ai->color, ai->outline_color, relay.text);
             }
         }

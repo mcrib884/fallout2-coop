@@ -32,6 +32,7 @@
 #include "multiplayer.h"
 #include "multiplayer_combat.h"
 #include "multiplayer_profile.h"
+#include "multiplayer_log.h"
 #include "net.h"
 #include "object.h"
 #include "party_member.h"
@@ -129,7 +130,7 @@ static void mpLootHostSendState(MpLootHostSession* s, uint8_t op, bool ok,
     const MultiplayerPlayer* player = &gMpSession.players[s->netId - 1];
     if (player->peer != nullptr) {
         NetSendPacket(player->peer, NET_CHANNEL_RELIABLE, NET_PKT_LOOT_STATE, buffer, total);
-        debugFilePrint("MPLOOT host state netId=%u op=%d ok=%d items=%d deltas=%d",
+        MpLog(MP_LOG_LOOT, "host state netId=%u op=%d ok=%d items=%d deltas=%d",
             s->netId, op, ok, itemCount, deltaCount);
     }
 }
@@ -212,12 +213,12 @@ static void mpLootHostEnd(uint8_t netId, const char* overrideMsg)
             MpProfileSetPcStat(avatar, PC_STAT_EXPERIENCE, newXp);
             MpProfileSetPcStat(avatar, PC_STAT_LEVEL, level);
             inventoryFormatMessage(29, newXp - currentXp, msg, sizeof(msg));
-            debugFilePrint("MPLOOT host steal xp netId=%u capped=%d level=%d", netId, capped, level);
+            MpLog(MP_LOG_LOOT, "host steal xp netId=%u capped=%d level=%d", netId, capped, level);
         }
     }
 
     mpLootHostSendState(s, NET_LOOT_OP_END, true, msg[0] != '\0' ? msg : nullptr, nullptr, 0);
-    debugFilePrint("MPLOOT host end netId=%u", netId);
+    MpLog(MP_LOG_LOOT, "host end netId=%u", netId);
 }
 
 // Refreshes every other open session targeting the same object (another
@@ -322,12 +323,12 @@ static void mpLootHostMove(uint8_t netId, uint32_t pid, int32_t qty)
                 int teamBefore = target->data.critter.combat.team;
                 scriptSetObjects(sid, avatar, nullptr);
                 scriptExecProc(sid, SCRIPT_PROC_PICKUP);
-                debugFilePrint("MPLOOT host caught pickup sid=%d script='%s' progFlags=0x%X pickupProc=%d team=%d->%d",
+                MpLog(MP_LOG_LOOT, "host caught pickup sid=%d script='%s' progFlags=0x%X pickupProc=%d team=%d->%d",
                     sid, scriptName, progFlags, hasPickupProc,
                     teamBefore, target->data.critter.combat.team);
             }
             mpLootHostEnd(netId, msg[0] != '\0' ? msg : nullptr);
-            debugFilePrint("MPLOOT host caught netId=%u pid=0x%X", netId, pid);
+            MpLog(MP_LOG_LOOT, "host caught netId=%u pid=0x%X", netId, pid);
             return;
         }
     } else {
@@ -353,7 +354,7 @@ static void mpLootHostMove(uint8_t netId, uint32_t pid, int32_t qty)
     if (ok) {
         mpLootHostRefreshOtherSessions(netId, s->targetNetId);
     }
-    debugFilePrint("MPLOOT host move netId=%u pid=0x%X qty=%d roll=%d ok=%d",
+    MpLog(MP_LOG_LOOT, "host move netId=%u pid=0x%X qty=%d roll=%d ok=%d",
         netId, pid, qty, doRoll, ok);
 }
 
@@ -402,7 +403,7 @@ static void mpLootHostTakeAll(uint8_t netId)
     }
     mpLootHostSendState(s, NET_LOOT_OP_TAKE_ALL, true, nullptr, deltas, deltaCount);
     mpLootHostRefreshOtherSessions(netId, s->targetNetId);
-    debugFilePrint("MPLOOT host take-all netId=%u moved=%d", netId, deltaCount);
+    MpLog(MP_LOG_LOOT, "host take-all netId=%u moved=%d", netId, deltaCount);
 }
 
 void MpLootHostStart(uint8_t netId, Object* target, bool isSteal)
@@ -453,7 +454,7 @@ void MpLootHostStart(uint8_t netId, Object* target, bool isSteal)
     s->stealCount = 0;
     s->stealingXp = 0;
     s->stealXpBonus = 10;
-    debugFilePrint("MPLOOT host start netId=%u isSteal=%d targetNetId=%u",
+    MpLog(MP_LOG_LOOT, "host start netId=%u isSteal=%d targetNetId=%u",
         netId, isSteal, s->targetNetId);
 
     if (objectWithinWalkDistance(player->obj, target)) {
@@ -475,7 +476,7 @@ void MpLootOnHostPacket(const void* data, size_t dataLength, void* peer)
         return;
     }
     if (dataLength != sizeof(NetLootCmdPayload)) {
-        debugFilePrint("MPLOOT cmd rejected (bad length) len=%zu", dataLength);
+        MpLogAlways(MP_LOG_LOOT, "cmd rejected (bad length) len=%zu", dataLength);
         return;
     }
     const NetLootCmdPayload* p = static_cast<const NetLootCmdPayload*>(data);
@@ -484,11 +485,11 @@ void MpLootOnHostPacket(const void* data, size_t dataLength, void* peer)
     }
     MultiplayerPlayer* player = &gMpSession.players[p->netId - 1];
     if (!player->isConnected || player->peer != peer) {
-        debugFilePrint("MPLOOT cmd rejected (peer mismatch) netId=%u", p->netId);
+        MpLogAlways(MP_LOG_LOOT, "cmd rejected (peer mismatch) netId=%u", p->netId);
         return;
     }
     if (p->targetNetId != gLootHost[p->netId - 1].targetNetId) {
-        debugFilePrint("MPLOOT cmd rejected (target mismatch) netId=%u target=%u",
+        MpLogAlways(MP_LOG_LOOT, "cmd rejected (target mismatch) netId=%u target=%u",
             p->netId, p->targetNetId);
         return;
     }
@@ -504,7 +505,7 @@ void MpLootOnHostPacket(const void* data, size_t dataLength, void* peer)
         mpLootHostEnd(p->netId, nullptr);
         break;
     default:
-        debugFilePrint("MPLOOT cmd unknown op=%u netId=%u", p->op, p->netId);
+        MpLog(MP_LOG_LOOT, "cmd unknown op=%u netId=%u", p->op, p->netId);
         break;
     }
 }
@@ -519,7 +520,7 @@ void MpLootHostPlayerDisconnected(uint8_t netId)
         return;
     }
     s->active = false;
-    debugFilePrint("MPLOOT host session closed (disconnect) netId=%u", netId);
+    MpLog(MP_LOG_LOOT, "host session closed (disconnect) netId=%u", netId);
 }
 
 // Closes every host session without awarding XP — the targets die with the
@@ -530,7 +531,7 @@ void MpLootHostCloseAllSessions()
     for (int i = 0; i < NET_MAX_PLAYERS; i++) {
         if (gLootHost[i].active) {
             gLootHost[i].active = false;
-            debugFilePrint("MPLOOT host session closed (map change) netId=%u", gLootHost[i].netId);
+            MpLog(MP_LOG_LOOT, "host session closed (map change) netId=%u", gLootHost[i].netId);
         }
     }
 }
@@ -665,7 +666,7 @@ void MpLootOnClientPacket(const void* data, size_t dataLength)
         // The host never starts a session while one is active; a stray OPEN
         // is ignored rather than tearing down a running window.
         if (gLootClient.active) {
-            debugFilePrint("MPLOOT client open ignored (session active)");
+            MpLogAlways(MP_LOG_LOOT, "client open ignored (session active)");
             return;
         }
         if (p->targetFid == 0 || p->targetPid == 0) {
@@ -677,7 +678,7 @@ void MpLootOnClientPacket(const void* data, size_t dataLength)
 
         Object* mirror = nullptr;
         if (objectCreateWithFidPid(&mirror, (int)p->targetFid, (int)p->targetPid) == -1) {
-            debugFilePrint("MPLOOT client mirror create failed fid=0x%X pid=0x%X",
+            MpLogAlways(MP_LOG_LOOT, "client mirror create failed fid=0x%X pid=0x%X",
                 p->targetFid, p->targetPid);
             return;
         }
@@ -701,7 +702,7 @@ void MpLootOnClientPacket(const void* data, size_t dataLength)
         gLootClient.mirror = mirror;
         gLootClient.targetNetId = p->targetNetId;
         gLootClient.dirty = false;
-        debugFilePrint("MPLOOT client open netId=%u isSteal=%d mirror=%p targetNetId=%u",
+        MpLog(MP_LOG_LOOT, "client open netId=%u isSteal=%d mirror=%p targetNetId=%u",
             p->netId, gLootClient.isSteal, (void*)mirror, p->targetNetId);
 
         if (!p->lastOk) {
@@ -722,7 +723,7 @@ void MpLootOnClientPacket(const void* data, size_t dataLength)
         }
         if (openResult != 0) {
             // The window never ran (creation failure) — tear down now.
-            debugFilePrint("MPLOOT client window failed rc=%d", openResult);
+            MpLogAlways(MP_LOG_LOOT, "client window failed rc=%d", openResult);
             mpLootClientCloseSession();
         }
         break;
@@ -750,7 +751,7 @@ void MpLootOnClientPacket(const void* data, size_t dataLength)
         // Session dead — the modal loop breaks at its next tick and its tail
         // destroys the mirror. If no modal is running, tears down now.
         mpLootClientCloseSession();
-        debugFilePrint("MPLOOT client closed netId=%u", p->netId);
+        MpLog(MP_LOG_LOOT, "client closed netId=%u", p->netId);
         break;
     }
     default:
@@ -761,7 +762,7 @@ void MpLootOnClientPacket(const void* data, size_t dataLength)
 void MpLootOnClientReset()
 {
     if (gLootClient.active || gLootClient.mirror != nullptr) {
-        debugFilePrint("MPLOOT client session reset");
+        MpLog(MP_LOG_LOOT, "client session reset");
         mpLootClientCloseSession();
     }
 }
@@ -798,7 +799,7 @@ bool MpLootLoopTick()
     // (MpLootLoopEnded) sends END to the host and destroys the mirror, and
     // the deferred turn runs on the next top-level tick.
     if (MpCombatIsActive()) {
-        debugFilePrint("MPLOOT client session closing (combat active) netId=%u",
+        MpLog(MP_LOG_LOOT, "client session closing (combat active) netId=%u",
             gMpSession.localNetId);
         return false;
     }
@@ -830,7 +831,7 @@ void MpLootLoopEnded()
         p.netId = gMpSession.localNetId;
         p.targetNetId = gLootClient.targetNetId;
         NetSendPacket(gMpSession.hostPeer, NET_CHANNEL_RELIABLE, NET_PKT_LOOT_CMD, &p, sizeof(p));
-        debugFilePrint("MPLOOT client ended (local) netId=%u", gMpSession.localNetId);
+        MpLog(MP_LOG_LOOT, "client ended (local) netId=%u", gMpSession.localNetId);
     }
     mpLootClientCleanup();
 }
@@ -847,7 +848,7 @@ void MpLootClientSendMove(uint32_t pid, int32_t qty)
     p.pid = pid;
     p.qty = qty;
     NetSendPacket(gMpSession.hostPeer, NET_CHANNEL_RELIABLE, NET_PKT_LOOT_CMD, &p, sizeof(p));
-    debugFilePrint("MPLOOT client move pid=0x%X qty=%d", pid, qty);
+    MpLog(MP_LOG_LOOT, "client move pid=0x%X qty=%d", pid, qty);
 }
 
 void MpLootClientSendTakeAll()
@@ -860,7 +861,7 @@ void MpLootClientSendTakeAll()
     p.netId = gMpSession.localNetId;
     p.targetNetId = gLootClient.targetNetId;
     NetSendPacket(gMpSession.hostPeer, NET_CHANNEL_RELIABLE, NET_PKT_LOOT_CMD, &p, sizeof(p));
-    debugFilePrint("MPLOOT client take-all");
+    MpLog(MP_LOG_LOOT, "client take-all");
 }
 
 } // namespace fallout

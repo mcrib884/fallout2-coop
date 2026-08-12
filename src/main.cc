@@ -45,6 +45,7 @@
 #include "window_manager_private.h"
 #include "word_wrap.h"
 #include "worldmap.h"
+#include "multiplayer_log.h"
 
 namespace fallout {
 
@@ -183,7 +184,7 @@ mp_run_new_game:
                     pendingClientAddress[sizeof(pendingClientAddress) - 1] = '\0';
                     gMpPendingClientStartAfterLoad = 0;
                     gMpPendingClientAddress[0] = '\0';
-                    debugFilePrint("MAIN: new-game load complete pendingHostStart=%d map=%d",
+                    MpLog(MP_LOG_LIFECYCLE, "new-game load complete pendingHostStart=%d map=%d",
                         pendingHostStart, gMapHeader.index);
                     if (pendingHostStart == 1) {
                         // Fresh character: persist it as the session's base
@@ -195,9 +196,9 @@ mp_run_new_game:
                         if (gMpSessionSlot < 0) {
                             gMpSessionSlot = lsgGetCoopSaveSlot();
                         }
-                        debugFilePrint("MAIN: new-game host session slot=%d", gMpSessionSlot);
+                        MpLog(MP_LOG_LIFECYCLE, "new-game host session slot=%d", gMpSessionSlot);
                         int coopSaveRc = lsgQuickSaveGameCoop();
-                        debugFilePrint("MAIN: new-game coop save rc=%d", coopSaveRc);
+                        MpLog(MP_LOG_LIFECYCLE, "new-game coop save rc=%d", coopSaveRc);
                         if (MpHostStart(gMapHeader.index) != 0) {
                             win_timed_msg("Could not start co-op hosting", COLOR_RED);
                         }
@@ -212,7 +213,7 @@ mp_run_new_game:
                             gMpSessionSlot = lsgGetCoopSaveSlot();
                         }
                         int coopSaveRc = lsgQuickSaveGameCoop();
-                        debugFilePrint("MAIN: new-game coop save rc=%d sessionSlot=%d", coopSaveRc, gMpSessionSlot);
+                        MpLog(MP_LOG_LIFECYCLE, "new-game coop save rc=%d sessionSlot=%d", coopSaveRc, gMpSessionSlot);
                         if (MpClientConnect(pendingClientAddress, NET_DEFAULT_PORT) != 0) {
                             win_timed_msg("Could not join co-op session", COLOR_RED);
                         }
@@ -275,14 +276,14 @@ mp_run_load_game:
                         pendingClientAddress[sizeof(pendingClientAddress) - 1] = '\0';
                         gMpPendingClientStartAfterLoad = 0;
                         gMpPendingClientAddress[0] = '\0';
-                        debugFilePrint("MAIN: save load complete pendingHostStart=%d map=%d",
+                        MpLog(MP_LOG_LIFECYCLE, "save load complete pendingHostStart=%d map=%d",
                             pendingHostStart, gMapHeader.index);
                         if (pendingHostStart == 2) {
                             // The session slot is the save this game came
                             // from — every in-session host save writes back
                             // into that same SP slot.
                             gMpSessionSlot = lsgGetLastLoadedSlot();
-                            debugFilePrint("MAIN: load-host session slot=%d", gMpSessionSlot);
+                            MpLog(MP_LOG_LIFECYCLE, "load-host session slot=%d", gMpSessionSlot);
                             if (MpHostStart(gMapHeader.index) != 0) {
                                 win_timed_msg("Could not start co-op hosting", COLOR_RED);
                             }
@@ -292,7 +293,7 @@ mp_run_load_game:
                             // client save during the session writes back into
                             // that same SP slot.
                             gMpSessionSlot = lsgGetLastLoadedSlot();
-                            debugFilePrint("MAIN: load-client session slot=%d", gMpSessionSlot);
+                            MpLog(MP_LOG_LIFECYCLE, "load-client session slot=%d", gMpSessionSlot);
                             if (MpClientConnect(pendingClientAddress, NET_DEFAULT_PORT) != 0) {
                                 win_timed_msg("Could not join co-op session", COLOR_RED);
                             }
@@ -614,7 +615,7 @@ static void main_unload_new()
 // 0x480E48
 static void mainLoop()
 {
-    debugFilePrint("MAIN: mainLoop enter mpActive=%d host=%d client=%d loaded=%d",
+    MpLog(MP_LOG_LIFECYCLE, "mainLoop enter mpActive=%d host=%d client=%d loaded=%d",
         gMpActive, gMpIsHost, gMpIsClient, gGameLoaded);
     bool cursorWasHidden = cursorIsHidden();
     if (cursorWasHidden) {
@@ -633,7 +634,7 @@ static void mainLoop()
     static uint32_t gMainLastFrameTick = 0;
     while (_game_user_wants_to_quit == GAME_QUIT_REQUEST_NONE) {
         if (logFirstLoop) {
-            debugFilePrint("MAIN: first loop begin");
+            MpLog(MP_LOG_LIFECYCLE, "first loop begin");
         }
         sharedFpsLimiter.mark();
         MpPerfFrameStart();
@@ -642,7 +643,7 @@ static void mainLoop()
         if (gMainLastFrameTick != 0) {
             uint32_t since = getTicksSince(gMainLastFrameTick);
             if (since > 3000) {
-                debugFilePrint("MP: frame stall dt=%u lastSection=%d",
+                MpLog(MP_LOG_LIFECYCLE, "frame stall dt=%u lastSection=%d",
                     since, gMainLastSection);
             }
         }
@@ -651,7 +652,7 @@ static void mainLoop()
 
         int keyCode = inputGetInput();
         if (logFirstLoop) {
-            debugFilePrint("MAIN: first loop after input key=%d", keyCode);
+            MpLog(MP_LOG_LIFECYCLE, "first loop after input key=%d", keyCode);
         }
         MpPerfMark(MP_PERF_GLOBAL_SCRIPTS);
 
@@ -661,28 +662,28 @@ static void mainLoop()
             sfall_gl_scr_process_main();
         }
         if (logFirstLoop) {
-            debugFilePrint("MAIN: first loop after global scripts");
+            MpLog(MP_LOG_LIFECYCLE, "first loop after global scripts");
         }
         MpPerfMark(MP_PERF_GAME_KEY);
 
         gMainLastSection = 2;
         gameHandleKey(keyCode, false);
         if (logFirstLoop) {
-            debugFilePrint("MAIN: first loop after game key");
+            MpLog(MP_LOG_LIFECYCLE, "first loop after game key");
         }
         MpPerfMark(MP_PERF_SCRIPT_REQUESTS);
 
         gMainLastSection = 3;
         scriptsHandleRequests();
         if (logFirstLoop) {
-            debugFilePrint("MAIN: first loop after script requests");
+            MpLog(MP_LOG_LIFECYCLE, "first loop after script requests");
         }
         MpPerfMark(MP_PERF_MAP_TRANSITION);
 
         gMainLastSection = 4;
         mapHandleTransition();
         if (logFirstLoop) {
-            debugFilePrint("MAIN: first loop after map transition");
+            MpLog(MP_LOG_LIFECYCLE, "first loop after map transition");
         }
         MpPerfMark(MP_PERF_MPTICK);
 
@@ -690,7 +691,7 @@ static void mainLoop()
         gMainLastSection = 5;
         MpTick();
         if (logFirstLoop) {
-            debugFilePrint("MAIN: first loop after MpTick");
+            MpLog(MP_LOG_LIFECYCLE, "first loop after MpTick");
         }
 
         // Co-op: edge indicators for remote players outside the viewport.
@@ -718,7 +719,7 @@ static void mainLoop()
 
         renderPresent();
         if (logFirstLoop) {
-            debugFilePrint("MAIN: first loop after render");
+            MpLog(MP_LOG_LIFECYCLE, "first loop after render");
             logFirstLoop = false;
         }
         sharedFpsLimiter.throttle();

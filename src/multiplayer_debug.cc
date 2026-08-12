@@ -23,6 +23,7 @@
 #include "multiplayer.h"
 #include "multiplayer_perf.h"
 #include "multiplayer_profile.h"
+#include "multiplayer_log.h"
 #include "net.h"
 #include "object.h"
 #include "perk.h"
@@ -179,7 +180,7 @@ void dbgRefillAp()
     }
     int maxAp = critterGetStat(gDude, STAT_MAXIMUM_ACTION_POINTS);
     gDude->data.critter.combat.ap = maxAp;
-    debugFilePrint("MPDBG: ap refill local ap=%d", maxAp);
+    MpLog(MP_LOG_UI, "ap refill local ap=%d", maxAp);
 }
 
 // Gives [count] copies of item proto [pid] to the local dude. On a co-op
@@ -193,11 +194,11 @@ void dbgGiveItem(int pid, int count)
     }
     Object* item = nullptr;
     if (objectCreateWithPid(&item, pid) != 0 || item == nullptr) {
-        debugFilePrint("MPDBG: give item failed pid=0x%X", pid);
+        MpLogAlways(MP_LOG_UI, "give item failed pid=0x%X", pid);
         return;
     }
     itemAdd(gDude, item, count);
-    debugFilePrint("MPDBG: give item pid=0x%X count=%d", pid, count);
+    MpLog(MP_LOG_UI, "give item pid=0x%X count=%d", pid, count);
     interfaceUpdateItems(false, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
 }
 
@@ -223,7 +224,7 @@ void dbgRefillAmmo()
         ammoSetQuantity(weapon, capacity);
     }
     dbgGiveItem(ammoTypePid, 3);
-    debugFilePrint("MPDBG: ammo refill weapon pid=0x%X ammo=0x%X capacity=%d",
+    MpLog(MP_LOG_UI, "ammo refill weapon pid=0x%X ammo=0x%X capacity=%d",
         weapon->pid, ammoTypePid, capacity);
 }
 
@@ -251,7 +252,7 @@ void dbgToggleCheat(uint32_t flag)
     // Client gate: when the host disabled client cheats, the client's
     // toggles are inert (its flags were cleared by the policy packet).
     if (gMpActive && gMpIsClient && !gDbgClientCheatsEnabled) {
-        debugFilePrint("MPDBG: cheat toggle blocked (disabled by host) flag=0x%X", flag);
+        MpLogAlways(MP_LOG_UI, "cheat toggle blocked (disabled by host) flag=0x%X", flag);
         displayMonitorAddMessage("Cheats are disabled by the host.");
         return;
     }
@@ -260,7 +261,7 @@ void dbgToggleCheat(uint32_t flag)
     if (gMpActive && gMpIsHost) {
         gMpSession.players[0].debugCheatFlags = gDbgCheatFlags;
     }
-    debugFilePrint("MPDBG: cheat %s flags=0x%X",
+    MpLog(MP_LOG_UI, "cheat %s flags=0x%X",
         (gDbgCheatFlags & flag) != 0 ? "enabled" : "disabled", gDbgCheatFlags);
 }
 
@@ -319,7 +320,7 @@ void dbgApplyCheats(Object* critter, uint32_t flags)
         dbgRefillWeaponAmmo(critter);
     }
     if (hpChanged) {
-        debugFilePrint("MPDBG: god mode restored netId=%u hp=%d",
+        MpLog(MP_LOG_UI, "god mode restored netId=%u hp=%d",
             MpGetObjNetId(critter), critter->data.critter.hp);
         if (critter == gDude) {
             interfaceRenderHitPoints(true);
@@ -335,7 +336,7 @@ void dbgCheatModal()
     // Client gate: the whole cheats area is host-policy controlled — a
     // disabled client cannot even open the toggles.
     if (gMpActive && gMpIsClient && !gDbgClientCheatsEnabled) {
-        debugFilePrint("MPDBG: cheat options blocked (disabled by host)");
+        MpLogAlways(MP_LOG_UI, "cheat options blocked (disabled by host)");
         displayMonitorAddMessage("Cheats are disabled by the host.");
         return;
     }
@@ -346,7 +347,7 @@ void dbgCheatModal()
     int win = windowCreate(winX, winY, kDbgCheatWindowWidth, kDbgCheatWindowHeight,
         COLOR_BLACK, WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
     if (win == -1) {
-        debugFilePrint("MPDBG: cheat submenu window create failed");
+        MpLogAlways(MP_LOG_UI, "cheat submenu window create failed");
         return;
     }
     windowDrawBorder(win);
@@ -402,7 +403,7 @@ void dbgCheatModal()
         int keyCode = inputGetInput();
         switch (keyCode) {
         case KEY_ESCAPE:
-            debugFilePrint("MPDBG: modal close via ESC menu='cheat-toggles'");
+            MpLog(MP_LOG_UI, "modal close via ESC menu='cheat-toggles'");
         case DBG_BTN_CHEAT_BACK:
             keepGoing = false;
             break;
@@ -457,7 +458,7 @@ void dbgMaxLevel()
         pcAddExperience(xpToNext, nullptr);
         level = pcGetStat(PC_STAT_LEVEL);
     }
-    debugFilePrint("MPDBG: max level done level=%d", level);
+    MpLog(MP_LOG_UI, "max level done level=%d", level);
 }
 
 // ---------------------------------------------------------------------------
@@ -520,7 +521,7 @@ void dbgStatModify(int index, int delta)
     }
     Stat stat = static_cast<Stat>(index);
     int before = critterGetBaseStat(gDude, stat);
-    debugFilePrint("MPDBG: stat modify index=%d delta=%d stat=%s before=%d",
+    MpLog(MP_LOG_UI, "stat modify index=%d delta=%d stat=%s before=%d",
         index, delta, statGetName(stat), before);
     // The vanilla setter stores (target - traitModifier) into the raw base
     // (critterSetBaseStat subtracts the trait modifier so that
@@ -642,7 +643,7 @@ void dbgItemModify(int index, int delta)
             RemoveInventoryObjectHookReason::ItemRemoved);
         remaining -= removeQty;
     }
-    debugFilePrint("MPDBG: item removed pid=0x%X count=%d", kDbgItems[index].pid, -delta - remaining);
+    MpLog(MP_LOG_UI, "item removed pid=0x%X count=%d", kDbgItems[index].pid, -delta - remaining);
 }
 
 // Runs the modal loop for an editor submenu. The current entry line is
@@ -684,7 +685,7 @@ int dbgSubmenuModal(int win, const SubmenuCallbacks* cb, int current)
         int keyCode = inputGetInput();
         switch (keyCode) {
         case KEY_ESCAPE:
-            debugFilePrint("MPDBG: modal close via ESC menu='submenu-cycler'");
+            MpLog(MP_LOG_UI, "modal close via ESC menu='submenu-cycler'");
             rc = 0;
             break;
         case DBG_BTN_PREV:
@@ -735,7 +736,7 @@ void dbgSubmenuShow(const SubmenuCallbacks* cb)
     int current = 0;
     for (;;) {
         int choice = dbgSubmenuModal(win, cb, current);
-        debugFilePrint("MPDBG: submenu %s choice=%d current=%d name='%s' value=%d",
+        MpLog(MP_LOG_UI, "submenu %s choice=%d current=%d name='%s' value=%d",
             cb->title, choice, current, cb->name(current), cb->value(current));
         if (choice == 0 || choice == DBG_BTN_BACK) {
             break;
@@ -851,7 +852,7 @@ static void dbgPerkListShow()
         int keyCode = inputGetInput();
         switch (keyCode) {
         case KEY_ESCAPE:
-            debugFilePrint("MPDBG: modal close via ESC menu='perks'");
+            MpLog(MP_LOG_UI, "modal close via ESC menu='perks'");
         case DBG_BTN_PERK_BACK:
             keepGoing = false;
             break;
@@ -867,7 +868,7 @@ static void dbgPerkListShow()
             break;
         case DBG_BTN_PERK_DEC:
             perkRemove(gDude, static_cast<Perk>(selected));
-            debugFilePrint("MPDBG: perk remove index=%d name='%s'",
+            MpLog(MP_LOG_UI, "perk remove index=%d name='%s'",
                 selected, perkGetName(static_cast<Perk>(selected)));
             rebuild();
             break;
@@ -878,7 +879,7 @@ static void dbgPerkListShow()
                 if (perk >= 0 && perk < PERK_COUNT) {
                     selected = perk;
                     perkAddForce(gDude, static_cast<Perk>(perk));
-                    debugFilePrint("MPDBG: perk add index=%d name='%s'",
+                    MpLog(MP_LOG_UI, "perk add index=%d name='%s'",
                         perk, perkGetName(static_cast<Perk>(perk)));
                     rebuild();
                 }
@@ -979,7 +980,7 @@ static void dbgTraitListShow()
         int keyCode = inputGetInput();
         switch (keyCode) {
         case KEY_ESCAPE:
-            debugFilePrint("MPDBG: modal close via ESC menu='traits'");
+            MpLog(MP_LOG_UI, "modal close via ESC menu='traits'");
         case DBG_BTN_TRAIT_BACK:
             keepGoing = false;
             break;
@@ -1000,7 +1001,7 @@ static void dbgTraitListShow()
                     selected[1] = trait;
                 }
                 traitsSetSelected(selected[0], selected[1]);
-                debugFilePrint("MPDBG: traits set %d %d (%s %s)",
+                MpLog(MP_LOG_UI, "traits set %d %d (%s %s)",
                     (int)selected[0], (int)selected[1],
                     traitGetName(selected[0]) != nullptr ? traitGetName(selected[0]) : "none",
                     traitGetName(selected[1]) != nullptr ? traitGetName(selected[1]) : "none");
@@ -1034,7 +1035,7 @@ static int dbgKillHostiles()
         }
         probe = objectFindNext();
     }
-    debugFilePrint("MPDBG: kill hostile executed=%d", executed);
+    MpLog(MP_LOG_UI, "kill hostile executed=%d", executed);
     return executed;
 }
 
@@ -1056,7 +1057,7 @@ static void dbgItemBrowserShow()
                 miss++;
             }
         }
-        debugFilePrint("MPDBG: item browser enumerated %zu pids", sItemPids.size());
+        MpLog(MP_LOG_UI, "item browser enumerated %zu pids", sItemPids.size());
     }
     if (sItemPids.empty()) {
         win_timed_msg("No item protos found", COLOR_RED);
@@ -1081,6 +1082,7 @@ static void dbgItemBrowserShow()
         int win = windowCreate(winX, winY, kWindowWidth, kWindowHeight,
             COLOR_BLACK, WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
         if (win == -1) {
+            MpLogAlways(MP_LOG_UI, "item browser window create failed w=%d h=%d", kWindowWidth, kWindowHeight);
             return -1;
         }
         windowDrawBorder(win);
@@ -1135,7 +1137,7 @@ static void dbgItemBrowserShow()
         int keyCode = inputGetInput();
         switch (keyCode) {
         case KEY_ESCAPE:
-            debugFilePrint("MPDBG: modal close via ESC menu='items'");
+            MpLog(MP_LOG_UI, "modal close via ESC menu='items'");
         case DBG_BTN_ITEM_BACK:
             keepGoing = false;
             break;
@@ -1237,14 +1239,14 @@ static void dbgNameEditorShow()
         } else if (keyCode == KEY_RETURN) {
             if (nameBuf[0] != '\0') {
                 MpDebugSetLocalPlayerName(nameBuf);
-                debugFilePrint("MPDBG: player name set to '%s'", nameBuf);
+                MpLog(MP_LOG_UI, "player name set to '%s'", nameBuf);
             } else {
                 MpDebugSetLocalPlayerName(nullptr);
-                debugFilePrint("MPDBG: player name override cleared");
+                MpLog(MP_LOG_UI, "player name override cleared");
             }
             keepGoing = false;
         } else if (keyCode == KEY_ESCAPE) {
-            debugFilePrint("MPDBG: modal close via ESC menu='name-editor'");
+            MpLog(MP_LOG_UI, "modal close via ESC menu='name-editor'");
             keepGoing = false;
         }
         sharedFpsLimiter.throttle();
@@ -1432,12 +1434,12 @@ static void dbgColorPickerShow()
             int finalRgb = ((rVal & 0xFF) << 16) | ((gVal & 0xFF) << 8) | (bVal & 0xFF);
             int finalPal = _colorTable[rgb555(finalRgb)];
             MpDebugSetLocalPlayerColor(finalPal);
-            debugFilePrint("MPDBG: RGB player color applied pal=%d (R=%d G=%d B=%d)",
+            MpLog(MP_LOG_UI, "RGB player color applied pal=%d (R=%d G=%d B=%d)",
                 finalPal, rVal, gVal, bVal);
             if (_cmap != nullptr) {
                 // What the chosen palette entry actually renders as — proves
                 // whether the nearest-match mapping is faithful.
-                debugFilePrint("MPDBG: pal %d renders RGB=(%d,%d,%d)",
+                MpLog(MP_LOG_UI, "pal %d renders RGB=(%d,%d,%d)",
                     finalPal,
                     (_cmap[3 * finalPal] * 255) / 63,
                     (_cmap[3 * finalPal + 1] * 255) / 63,
@@ -1446,7 +1448,7 @@ static void dbgColorPickerShow()
             keepGoing = false;
         } else if (keyCode == KEY_ESCAPE || keyCode == 500
             || keyCode == DBG_BTN_COLOR_BASE + 9 || keyCode == DBG_BTN_CLOSE_X) {
-            debugFilePrint("MPDBG: modal close via ESC/Close menu='color-picker'");
+            MpLog(MP_LOG_UI, "modal close via ESC/Close menu='color-picker'");
             keepGoing = false;
         }
         sharedFpsLimiter.throttle();
@@ -1472,7 +1474,7 @@ void MpDebugToggleClientCheats()
             }
         }
     }
-    debugFilePrint("MPDBG: client cheats %s",
+    MpLog(MP_LOG_UI, "client cheats %s",
         gDbgClientCheatsEnabled ? "enabled" : "disabled");
     for (int index = 0; index < NET_MAX_PLAYERS; index++) {
         MultiplayerPlayer* player = &gMpSession.players[index];
@@ -1491,7 +1493,7 @@ void MpDebugSetClientCheatsEnabled(bool enabled)
         gDbgCheatFlags = 0;
         gDbgCheatFlagsDirty = false;
     }
-    debugFilePrint("MPDBG: client cheats policy %s", enabled ? "enabled" : "disabled");
+    MpLog(MP_LOG_UI, "client cheats policy %s", enabled ? "enabled" : "disabled");
 }
 
 bool MpDebugClientCheatsEnabled()
@@ -1590,11 +1592,11 @@ void MpDebugCheatsTick()
 // menu) ===
 static void dbgCheatsMenuShow()
 {
-    debugFilePrint("MPDBG: cheats menu begin");
+    MpLog(MP_LOG_UI, "cheats menu begin");
     // Client gate: the whole cheats area (money/heal/xp editors included) is
     // host-policy controlled — a disabled client gets no access at all.
     if (gMpActive && gMpIsClient && !gDbgClientCheatsEnabled) {
-        debugFilePrint("MPDBG: cheats menu blocked (disabled by host)");
+        MpLogAlways(MP_LOG_UI, "cheats menu blocked (disabled by host)");
         displayMonitorAddMessage("Cheats are disabled by the host.");
         return;
     }
@@ -1672,7 +1674,7 @@ static void dbgCheatsMenuShow()
             int keyCode = inputGetInput();
             switch (keyCode) {
             case KEY_ESCAPE:
-                debugFilePrint("MPDBG: modal close via ESC menu='cheats-menu'");
+                MpLog(MP_LOG_UI, "modal close via ESC menu='cheats-menu'");
                 rc = 0;
                 break;
             case DBG_BTN_MONEY_1000:
@@ -1712,7 +1714,7 @@ static void dbgCheatsMenuShow()
         // and ESC always pass so the window can always be exited.
         if (rc != 0 && rc != DBG_BTN_CLOSE && gMpActive && gMpIsClient
             && !gDbgClientCheatsEnabled) {
-            debugFilePrint("MPDBG: cheats action blocked (disabled by host) rc=%d", rc);
+            MpLogAlways(MP_LOG_UI, "cheats action blocked (disabled by host) rc=%d", rc);
             displayMonitorAddMessage("Cheats are disabled by the host.");
             continue;
         }
@@ -1797,7 +1799,7 @@ static void dbgCheatsMenuShow()
     if (cursorWasHidden) {
         mouseHideCursor();
     }
-    debugFilePrint("MPDBG: cheats menu end");
+    MpLog(MP_LOG_UI, "cheats menu end");
 }
 
 // === MpDebugMenuShow ===
@@ -1807,7 +1809,7 @@ static void dbgSkinStatusText(char* buf, size_t size);
 
 void MpDebugMenuShow()
 {
-    debugFilePrint("MPDBG: menu show begin");
+    MpLog(MP_LOG_UI, "menu show begin");
     if (gDude == nullptr) {
         return;
     }
@@ -1896,7 +1898,7 @@ void MpDebugMenuShow()
             int keyCode = inputGetInput();
             switch (keyCode) {
             case KEY_ESCAPE:
-                debugFilePrint("MPDBG: modal close via ESC menu='f11-settings'");
+                MpLog(MP_LOG_UI, "modal close via ESC menu='f11-settings'");
                 rc = 0;
                 break;
             case DBG_BTN_CHEATS:
@@ -1939,7 +1941,7 @@ void MpDebugMenuShow()
             break;
         case DBG_BTN_CHEATS:
             if (gMpActive && gMpIsClient && !gDbgClientCheatsEnabled) {
-                debugFilePrint("MPDBG: cheats menu blocked (disabled by host)");
+                MpLogAlways(MP_LOG_UI, "cheats menu blocked (disabled by host)");
                 displayMonitorAddMessage("Cheats are disabled by the host.");
             } else {
                 dbgCheatsMenuShow();
@@ -1966,7 +1968,7 @@ void MpDebugMenuShow()
             // Diagnostic: the menu window handle must still be valid after
             // the picker's create/destroy (seen: windowRefresh AV in the
             // post-picker redraw on the host).
-            debugFilePrint("MPDBG: color picker returned win=%d valid=%d buf=%p",
+            MpLog(MP_LOG_UI, "color picker returned win=%d valid=%d buf=%p",
                 win, windowGetWindow(win) != nullptr ? 1 : 0,
                 windowGetWindow(win) != nullptr ? (void*)windowGetWindow(win)->buffer : nullptr);
             curColor = MpDebugLocalPlayerColor();
@@ -1989,7 +1991,7 @@ void MpDebugMenuShow()
     if (cursorWasHidden) {
         mouseHideCursor();
     }
-    debugFilePrint("MPDBG: menu show end");
+    MpLog(MP_LOG_UI, "menu show end");
 }
 
 // ---------------------------------------------------------------------------
@@ -2038,7 +2040,7 @@ void MpDebugApplyModel(int modelIndex)
     }
     Proto* proto = nullptr;
     if (protoGetProto(gDude->pid, &proto) == -1 || proto == nullptr) {
-        debugFilePrint("MPDBG: skin apply protoGetProto failed pid=0x%X", gDude->pid);
+        MpLogAlways(MP_LOG_UI, "skin apply protoGetProto failed pid=0x%X", gDude->pid);
         return;
     }
     gDbgSkinOverrideModel = modelIndex;
@@ -2052,7 +2054,7 @@ void MpDebugApplyModel(int modelIndex)
     objectSetFid(gDude, fid, &rect);
     tileWindowRefreshRect(&rect, gDude->elevation);
     const char* name = artGetCritterModelName(modelIndex);
-    debugFilePrint("MPDBG: skin applied index=%d name='%.12s' preFid=0x%X newFid=0x%X busy=%d",
+    MpLog(MP_LOG_UI, "skin applied index=%d name='%.12s' preFid=0x%X newFid=0x%X busy=%d",
         modelIndex, name != nullptr ? name : "?", preFid, fid,
         animationIsBusy(gDude) != 0 ? 1 : 0);
     // Push the model change immediately — the periodic profile sync runs on
@@ -2082,7 +2084,7 @@ void MpDebugRestoreSkin()
         modelId = artListIndex(OBJ_TYPE_CRITTER, defaultName);
     }
     if (modelId < 0) {
-        debugFilePrint("MPDBG: skin restore default model not found name='%s'",
+        MpLogAlways(MP_LOG_UI, "skin restore default model not found name='%s'",
             defaultName != nullptr ? defaultName : "?");
         return;
     }
@@ -2106,7 +2108,7 @@ void MpDebugRestoreSkin()
     Rect rect;
     objectSetFid(gDude, fid, &rect);
     tileWindowRefreshRect(&rect, gDude->elevation);
-    debugFilePrint("MPDBG: skin restored model=%d override cleared", model);
+    MpLog(MP_LOG_UI, "skin restored model=%d override cleared", model);
 }
 
 
@@ -2133,7 +2135,7 @@ void MpDebugSetLocalPlayerName(const char* name)
 {
     if (name == nullptr || name[0] == '\0') {
         gMpLocalPlayerName[0] = '\0';
-        debugFilePrint("MPDBG: local player name cleared");
+        MpLog(MP_LOG_UI, "local player name cleared");
         return;
     }
     strncpy(gMpLocalPlayerName, name, MP_PROFILE_NAME_LENGTH - 1);
@@ -2160,13 +2162,13 @@ void MpDebugSetLocalPlayerName(const char* name)
             localRuntime->profile.name[MP_PROFILE_NAME_LENGTH - 1] = '\0';
         }
     }
-    debugFilePrint("MPDBG: local player name set '%s'", gMpLocalPlayerName);
+    MpLog(MP_LOG_UI, "local player name set '%s'", gMpLocalPlayerName);
 }
 
 void MpDebugSetLocalPlayerColor(int colorIndex)
 {
     gMpLocalPlayerColor = colorIndex;
-    debugFilePrint("MPDBG: local player color set %d", colorIndex);
+    MpLog(MP_LOG_UI, "local player color set %d", colorIndex);
 }
 
 int MpPlayerColorFor(const Object* obj)
@@ -2293,7 +2295,7 @@ void MpDebugModelPickerShow()
         i = end;
     }
     if (categories.empty()) {
-        debugFilePrint("MPDBG: skin picker no categories (art list empty)");
+        MpLog(MP_LOG_UI, "skin picker no categories (art list empty)");
         return;
     }
 
@@ -2413,7 +2415,7 @@ void MpDebugModelPickerShow()
         int keyCode = inputGetInput();
         switch (keyCode) {
         case KEY_ESCAPE:
-            debugFilePrint("MPDBG: modal close via ESC menu='skin-picker'");
+            MpLog(MP_LOG_UI, "modal close via ESC menu='skin-picker'");
         case DBG_BTN_SKIN_BACK:
             keepGoing = false;
             break;
@@ -2494,7 +2496,7 @@ void MpDebugSendHeal(int value)
     payload.arg2 = 0;
     NetSendPacket(gMpSession.hostPeer, NET_CHANNEL_RELIABLE,
         NET_PKT_PLAYER_CMD, &payload, sizeof(payload));
-    debugFilePrint("MP: heal sent value=%d", value);
+    MpLog(MP_LOG_COMBAT, "heal sent value=%d", value);
 }
 
 // Client: AP refill request for the local avatar. Rides the generic
@@ -2511,7 +2513,7 @@ void MpDebugSendApRefill()
     payload.arg2 = 0;
     NetSendPacket(gMpSession.hostPeer, NET_CHANNEL_RELIABLE,
         NET_PKT_PLAYER_CMD, &payload, sizeof(payload));
-    debugFilePrint("MP: ap refill sent");
+    MpLog(MP_LOG_COMBAT, "ap refill sent");
 }
 
 } // namespace fallout

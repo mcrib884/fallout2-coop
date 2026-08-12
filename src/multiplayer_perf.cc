@@ -1,4 +1,5 @@
 #include "multiplayer_perf.h"
+#include "multiplayer_log.h"
 
 #include <SDL.h>
 
@@ -283,7 +284,7 @@ void MpPerfTick()
                     "%s=%.1f ", kSectionNames[section], avgMs);
             }
 
-            debugFilePrint("MPPERF: fps=%.1f frameAvg=%.1f frameMax=%.1f | %s| obj=%u rec=%u chg=%u remCmp=%u pktO=%u pktP=%u",
+            MpLog(MP_LOG_MISC, "fps=%.1f frameAvg=%.1f frameMax=%.1f | %s| obj=%u rec=%u chg=%u remCmp=%u pktO=%u pktP=%u",
                 fps, frameAvgMs, frameMaxMs, sections,
                 gPerfWindowData.counters[MP_PERF_CNT_OBJ_SCANNED],
                 gPerfWindowData.counters[MP_PERF_CNT_OBJ_RECORDS],
@@ -313,7 +314,7 @@ void MpPerfSetEnabled(bool enabled)
     } else {
         mpPerfShowOverlay();
     }
-    debugFilePrint("MPPERF: meter %s", enabled ? "enabled" : "disabled");
+    MpLog(MP_LOG_MISC, "meter %s", enabled ? "enabled" : "disabled");
 }
 
 void MpPerfAddCounter(int counter, uint32_t delta)

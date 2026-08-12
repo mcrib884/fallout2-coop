@@ -42,6 +42,7 @@
 #include "text_font.h"
 #include "tile.h"
 #include "window_manager.h"
+#include "multiplayer_log.h"
 
 namespace fallout {
 
@@ -1383,7 +1384,7 @@ void _intface_use_item()
                     // the host falls back to its own ordering.
                     MpCombatSendStartRequest(nullptr);
                 } else {
-                    debugFilePrint("MPCOMBAT: host weapon combat entry");
+                    MpLog(MP_LOG_COMBAT, "host weapon combat entry");
                     _combat(nullptr);
                 }
             }

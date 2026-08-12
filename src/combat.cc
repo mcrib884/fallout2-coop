@@ -52,6 +52,7 @@
 #include "tile.h"
 #include "trait.h"
 #include "window_manager.h"
+#include "multiplayer_log.h"
 
 namespace fallout {
 
@@ -3371,7 +3372,7 @@ static int _combat_turn(Object* obj, bool reloadedDuringCombat)
     if (gMpIsHost && gMpActive) {
         uint8_t remoteNetId = MpCombatGetCritterPlayerNetId(obj);
         if (remoteNetId != 0) {
-            debugFilePrint("MPCOMBAT: turn guard hit remote netId=%u pid=0x%X tile=%d (intercept missed)",
+            MpLog(MP_LOG_COMBAT, "turn guard hit remote netId=%u pid=0x%X tile=%d (intercept missed)",
                 remoteNetId, obj->pid, obj->tile);
             return 0;
         }
@@ -3603,11 +3604,11 @@ static bool _combat_should_end()
         // wrongly-ended combat (hostiles on the player's team, or team
         // mismatch) is visible in the log.
         if (gMpIsHost && gMpActive) {
-            debugFilePrint("MPCOMBAT: shouldEnd TRUE list_com=%d dudeTeam=%d:",
+            MpLog(MP_LOG_COMBAT, "shouldEnd TRUE list_com=%d dudeTeam=%d:",
                 _list_com, gDude->data.critter.combat.team);
             for (int di = 0; di < _list_com; di++) {
                 Object* dc = _combat_list[di];
-                debugFilePrint("MPCOMBAT:   [%d] pid=0x%X team=%d hp=%d dead=%d whoHitMe=0x%X netId=%u",
+                MpLog(MP_LOG_COMBAT, "[%d] pid=0x%X team=%d hp=%d dead=%d whoHitMe=0x%X netId=%u",
                     di,
                     dc->pid,
                     dc->data.critter.combat.team,
@@ -3694,7 +3695,7 @@ void _combat(CombatStartData* csd)
     // entry point is gated, but keep a defensive net here so a stray call
     // (script opcode, load edge case) can never start a second authority.
     if (gMpIsClient && gMpActive) {
-        debugFilePrint("MPCOMBAT: _combat blocked on client; requesting host start");
+        MpLogAlways(MP_LOG_COMBAT, "_combat blocked on client; requesting host start");
         MpCombatSendStartRequest(csd != nullptr ? csd->defender : nullptr);
         return;
     }
@@ -3763,18 +3764,18 @@ void _combat(CombatStartData* csd)
                         // Diagnostic: the combat list holds a player avatar
                         // but the netId lookup failed — player->obj pointer
                         // mismatch or isConnected/isLocal state wrong.
-                        debugFilePrint("MPCOMBAT: player critter netId lookup FAILED pid=0x%X obj=%p",
+                        MpLogAlways(MP_LOG_COMBAT, "player critter netId lookup FAILED pid=0x%X obj=%p",
                             combatant->pid, (void*)combatant);
                         for (int di = 0; di < NET_MAX_PLAYERS; di++) {
                             MultiplayerPlayer* dp = &gMpSession.players[di];
                             if (dp->isConnected && !dp->isLocal) {
-                                debugFilePrint("MPCOMBAT:   player[%d] netId=%u obj=%p pid=0x%X",
+                                MpLog(MP_LOG_COMBAT, "player[%d] netId=%u obj=%p pid=0x%X",
                                     di, dp->netId, (void*)dp->obj,
                                     dp->obj != nullptr ? dp->obj->pid : 0);
                             }
                         }
                     }
-                    debugFilePrint("MPCOMBAT: sequence combatant pid=0x%X tile=%d netId=%u",
+                    MpLog(MP_LOG_COMBAT, "sequence combatant pid=0x%X tile=%d netId=%u",
                         combatant->pid, combatant->tile, remoteNetId);
                     if (remoteNetId != 0) {
                         // Co-op: a downed player cannot act — skip their turn
@@ -3783,7 +3784,7 @@ void _combat(CombatStartData* csd)
                         // without this skip the downed client would get a
                         // phantom TURN_START and an instant empty turn.
                         if (MpPlayerIsDownedByNetId(remoteNetId)) {
-                            debugFilePrint("MPCOMBAT: remote turn skipped netId=%u (downed)",
+                            MpLog(MP_LOG_COMBAT, "remote turn skipped netId=%u (downed)",
                                 remoteNetId);
                             _gcsd = nullptr;
                             continue;
@@ -3796,7 +3797,7 @@ void _combat(CombatStartData* csd)
                         // hostile on their turn. End combat right here instead
                         // of playing the rest of the round out.
                         if (mpCombatShouldEndNow()) {
-                            debugFilePrint("MPCOMBAT: combat end after remote turn");
+                            MpLog(MP_LOG_COMBAT, "combat end after remote turn");
                             break;
                         }
                         continue;
@@ -3819,13 +3820,13 @@ void _combat(CombatStartData* csd)
 
                 if (combatTurnHooked(_combat_list[curIndex], false) == -1) {
                     if (gMpIsHost && gMpActive) {
-                        debugFilePrint("MPCOMBAT: turn finished pid=0x%X rc=-1", _combat_list[curIndex]->pid);
+                        MpLog(MP_LOG_COMBAT, "turn finished pid=0x%X rc=-1", _combat_list[curIndex]->pid);
                     }
                     break;
                 }
 
                 if (gMpIsHost && gMpActive) {
-                    debugFilePrint("MPCOMBAT: turn finished pid=0x%X rc=0", _combat_list[curIndex]->pid);
+                    MpLog(MP_LOG_COMBAT, "turn finished pid=0x%X rc=0", _combat_list[curIndex]->pid);
                 }
 
                 if (_combat_ending_guy != nullptr) {
@@ -3836,7 +3837,7 @@ void _combat(CombatStartData* csd)
                 // the last hostile — end combat at the turn boundary instead
                 // of playing the remaining turns of the round out.
                 if (gMpIsHost && gMpActive && mpCombatShouldEndNow()) {
-                    debugFilePrint("MPCOMBAT: combat end after turn pid=0x%X",
+                    MpLog(MP_LOG_COMBAT, "combat end after turn pid=0x%X",
                         _combat_list[curIndex]->pid);
                     break;
                 }
@@ -5188,7 +5189,7 @@ static void attackComputeDamage(Attack* attack, int numRounds, int baseDamageMul
     if ((attack->attackerFlags & DAM_HIT) != 0
         && MpDebugCheatEnabled(attack->attacker, MP_DEBUG_CHEAT_INSTA_KILL)) {
         *damagePtr = critter->data.critter.hp;
-        debugFilePrint("MPDBG: insta-kill netId=%u targetHp=%d",
+        MpLog(MP_LOG_COMBAT, "netId=%u targetHp=%d",
             MpGetObjNetId(critter), critter->data.critter.hp);
     }
 
@@ -6306,7 +6307,7 @@ static int calledShotSelectHitLocation(Object* critter, HitLocation* hitLocation
         if (MpToHitResultTake(&resultTarget, &resultMode, probs)
             && resultTarget == MpGetObjNetId(critter)
             && resultMode == (uint8_t)hitMode) {
-            debugFilePrint("MPCOMBAT: called-shot host probs applied before draw targetNetId=%u",
+            MpLog(MP_LOG_COMBAT, "called-shot host probs applied before draw targetNetId=%u",
                 resultTarget);
         } else {
             combatComputeCalledShotProbabilities(gDude, critter, hitMode, probs);
@@ -6358,7 +6359,7 @@ static int calledShotSelectHitLocation(Object* critter, HitLocation* hitLocation
                 if (MpToHitResultTake(&resultTarget, &resultMode, resultProbs)
                     && resultTarget == MpGetObjNetId(critter)
                     && resultMode == (uint8_t)hitMode) {
-                    debugFilePrint("MPCOMBAT: called-shot host probs applied targetNetId=%u mode=%d",
+                    MpLog(MP_LOG_COMBAT, "called-shot host probs applied targetNetId=%u mode=%d",
                         resultTarget, resultMode);
                     calledShotDrawProbabilities(windowGetBuffer(gCalledShotWindow), resultProbs);
                     windowRefresh(gCalledShotWindow);
@@ -6496,7 +6497,7 @@ void _combat_attack_this(Object* target)
         // silent by vanilla design. The client's local turn loop soft-exits
         // on its AP mirror; when the mirror lags the host, clicks die here.
         if (gMpActive && gMpIsClient) {
-            debugFilePrint("MPCOMBAT: attack click ignored (not player turn) state=0x%X target=0x%X",
+            MpLogAlways(MP_LOG_COMBAT, "attack click ignored (not player turn) state=0x%X target=0x%X",
                 gCombatState, target != nullptr ? target->pid : 0);
         }
         return;
@@ -6512,7 +6513,7 @@ void _combat_attack_this(Object* target)
         // same whether the crosshair was armed by key or by cycling.
         if (!interface_get_current_attack_mode(&hitMode)) {
             if (gMpActive && gMpIsClient) {
-                debugFilePrint("MPCOMBAT: attack click ignored (no hit mode) target=0x%X", target->pid);
+                MpLogAlways(MP_LOG_COMBAT, "attack click ignored (no hit mode) target=0x%X", target->pid);
             }
             return;
         }
@@ -6554,7 +6555,7 @@ void _combat_attack_this(Object* target)
     case COMBAT_BAD_SHOT_ALREADY_DEAD:
         // Vanilla-silent; log client-side so a dead-target click is provable.
         if (gMpActive && gMpIsClient) {
-            debugFilePrint("MPCOMBAT: attack click ignored (target already dead) target=0x%X", target->pid);
+            MpLogAlways(MP_LOG_COMBAT, "attack click ignored (target already dead) target=0x%X", target->pid);
         }
         return;
     case COMBAT_BAD_SHOT_AIM_BLOCKED:

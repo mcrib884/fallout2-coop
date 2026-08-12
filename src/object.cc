@@ -33,6 +33,7 @@
 #include "text_object.h"
 #include "tile.h"
 #include "worldmap.h"
+#include "multiplayer_log.h"
 
 namespace fallout {
 
@@ -1574,7 +1575,7 @@ int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
                         if (movingObject == gDude) {
                             mapSetTransition(&transition);
                         } else if (gMpIsHost && gMpActive) {
-                            debugFilePrint("MP: exit grid entered netObj=%u tile=%d map=%d",
+                            MpLog(MP_LOG_SYNC, "entered netObj=%u tile=%d map=%d",
                                 MpGetObjNetId(movingObject), tile, transition.map);
                             MpOnNetworkedPlayerTransitionRequested(movingObject, &transition);
                         }
@@ -5209,7 +5210,7 @@ static void _obj_render_object(Object* object, Rect* rect, int light)
             || nowTicks - gMpRenderProbeLast[slot].tick >= 1000) {
             gMpRenderProbeLast[slot].tick = nowTicks;
             char* probePath = artBuildFilePath(object->fid);
-            debugFilePrint("MPDBG renderprobe obj=%p fid=0x%X model=%d anim=%d file='%s' frames=%d objFrame=%d rot=%d",
+            MpLog(MP_LOG_OBJECT, "obj=%p fid=0x%X model=%d anim=%d file='%s' frames=%d objFrame=%d rot=%d",
                 (void*)object, object->fid, object->fid & 0xFFF,
                 (int)animationTypeFromFid(object->fid),
                 probePath != nullptr ? probePath : "?",

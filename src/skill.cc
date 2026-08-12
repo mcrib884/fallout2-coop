@@ -34,6 +34,7 @@
 #include "sfall_script_hooks.h"
 #include "stat.h"
 #include "trait.h"
+#include "multiplayer_log.h"
 
 namespace fallout {
 
@@ -802,7 +803,7 @@ int skillRoll(Object* critter, Skill skill, int modifier, int* howMuch)
         if (howMuch != nullptr) {
             *howMuch = 100;
         }
-        debugFilePrint("MPDBG: always succeed skill=%d netId=%u",
+        MpLog(MP_LOG_STATS, "always succeed skill=%d netId=%u",
             skill, MpGetObjNetId(critter));
         return ROLL_SUCCESS;
     }

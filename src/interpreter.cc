@@ -19,6 +19,7 @@
 #include "scripts.h"
 #include "sfall_global_scripts.h"
 #include "svga.h"
+#include "multiplayer_log.h"
 
 namespace fallout {
 
@@ -882,7 +883,7 @@ static void opStore(Program* program)
         static int sLogged = 0;
         if (sLogged < 5) {
             sLogged++;
-            debugFilePrint("MPSCR: store overrun pos=%zu size=%zu basePtr=%d framePtr=%d",
+            MpLogAlways(MP_LOG_SCRIPT, "store overrun pos=%zu size=%zu basePtr=%d framePtr=%d",
                 pos, program->stackValues->size(), program->basePointer, program->framePointer);
         }
         if (value.opcode == VALUE_TYPE_DYNAMIC_STRING) {
@@ -918,7 +919,7 @@ static void opFetch(Program* program)
         static int sLogged = 0;
         if (sLogged < 5) {
             sLogged++;
-            debugFilePrint("MPSCR: fetch overrun pos=%zu size=%zu basePtr=%d framePtr=%d",
+            MpLogAlways(MP_LOG_SCRIPT, "fetch overrun pos=%zu size=%zu basePtr=%d framePtr=%d",
                 pos, program->stackValues->size(), program->basePointer, program->framePointer);
         }
         programStackPushValue(program, ProgramValue(0));
@@ -2319,7 +2320,7 @@ static void opFetchGlobalVariable(Program* program)
         static int sLogged = 0;
         if (sLogged < 5) {
             sLogged++;
-            debugFilePrint("MPSCR: fetch-global overrun pos=%zu size=%zu basePtr=%d framePtr=%d",
+            MpLogAlways(MP_LOG_SCRIPT, "fetch-global overrun pos=%zu size=%zu basePtr=%d framePtr=%d",
                 pos, program->stackValues->size(), program->basePointer, program->framePointer);
         }
         programStackPushValue(program, ProgramValue(0));
@@ -2343,7 +2344,7 @@ static void opStoreGlobalVariable(Program* program)
         static int sLogged = 0;
         if (sLogged < 5) {
             sLogged++;
-            debugFilePrint("MPSCR: store-global overrun pos=%zu size=%zu basePtr=%d framePtr=%d",
+            MpLogAlways(MP_LOG_SCRIPT, "store-global overrun pos=%zu size=%zu basePtr=%d framePtr=%d",
                 pos, program->stackValues->size(), program->basePointer, program->framePointer);
         }
         if (value.opcode == VALUE_TYPE_DYNAMIC_STRING) {
@@ -2735,14 +2736,14 @@ void programInterpret(Program* program, int numInstructions)
 
     if (interpreterBusy) {
         if (mpDialogIsDirectorReplyProgram(program)) {
-            debugFilePrint("MPDIAG interpret busy (dialogue program)");
+            MpLog(MP_LOG_SCRIPT, "interpret busy (dialogue program)");
         }
         return;
     }
 
     if (program->exited || (program->flags & PROGRAM_FLAG_CHILD_CALL) != 0 || (program->flags & PROGRAM_FLAG_CHILD_SPAWN) != 0) {
         if (mpDialogIsDirectorReplyProgram(program)) {
-            debugFilePrint("MPDIAG interpret refuse (dialogue program) exited=%d flags=0x%X",
+            MpLog(MP_LOG_SCRIPT, "interpret refuse (dialogue program) exited=%d flags=0x%X",
                 program->exited ? 1 : 0, program->flags);
         }
         return;

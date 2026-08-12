@@ -37,6 +37,7 @@
 #include "tile.h"
 #include "trait.h"
 #include "worldmap.h"
+#include "multiplayer_log.h"
 
 namespace fallout {
 
@@ -314,7 +315,7 @@ int critterAdjustHitPoints(Object* critter, int hp)
     }
 
     if (hp < 0 && MpDebugCheatEnabled(critter, MP_DEBUG_CHEAT_GOD_MODE)) {
-        debugFilePrint("MPDBG: god mode blocked damage netId=%u amount=%d",
+        MpLog(MP_LOG_COMBAT, "damage netId=%u amount=%d",
             MpGetObjNetId(critter), -hp);
         return 0;
     }

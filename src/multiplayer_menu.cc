@@ -1,4 +1,5 @@
 #include "multiplayer_menu.h"
+#include "multiplayer_log.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -74,7 +75,7 @@ int mpRunModalLoop()
         renderPresent();
         sharedFpsLimiter.throttle();
     }
-    debugFilePrint("MPMENU: modal choice=%d", rc);
+    MpLog(MP_LOG_UI, "modal choice=%d", rc);
     return rc;
 }
 
@@ -83,7 +84,7 @@ int mpRunModalLoop()
 // === MpMenuShow ===
 int MpMenuShow()
 {
-    debugFilePrint("MPMENU: show begin gameLoaded=%d", gGameLoaded ? 1 : 0);
+    MpLog(MP_LOG_UI, "show begin gameLoaded=%d", gGameLoaded ? 1 : 0);
     bool cursorWasHidden = cursorIsHidden();
     if (cursorWasHidden) {
         mouseShowCursor();
@@ -237,7 +238,7 @@ int MpJoinFlowShow()
         // during the session land there too.
         gMpSessionSlot = lsgGetCoopSaveSlot();
         int saveRc = lsgQuickSaveGameCoop();
-        debugFilePrint("MPMENU: in-game join coop save rc=%d sessionSlot=%d", saveRc, gMpSessionSlot);
+        MpLog(MP_LOG_UI, "in-game join coop save rc=%d sessionSlot=%d", saveRc, gMpSessionSlot);
         if (saveRc != 1) {
             win_timed_msg("Could not back up your game before joining", COLOR_RED);
             return 0;

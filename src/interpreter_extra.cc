@@ -52,6 +52,7 @@
 #include "trait.h"
 #include "worldmap.h"
 #include "input.h"
+#include "multiplayer_log.h"
 
 namespace fallout {
 
@@ -1186,7 +1187,7 @@ static void opGetDude(Program* program)
                         netId = 1; // host player is players[0].netId in practice
                     }
                 }
-                debugFilePrint("MPCOMBAT: dude_obj enemy sid=%d pid=0x%X tile=%d sees netId=%u tile=%d dist=%d",
+                MpLog(MP_LOG_COMBAT, "dude_obj enemy sid=%d pid=0x%X tile=%d sees netId=%u tile=%d dist=%d",
                     sid, script->target->pid, script->target->tile, netId,
                     nearest != nullptr ? nearest->tile : -1,
                     nearest != nullptr
@@ -1719,7 +1720,7 @@ static void opAddObjectToInventory(Program* program)
         Object* initiator = MpDialogGetInitiatorAvatar();
         if (initiator != nullptr) {
             owner = initiator;
-            debugFilePrint("MPDIALOG item reward routed to initiator pid=0x%X", item->pid);
+            MpLog(MP_LOG_DIALOG, "item reward routed to initiator pid=0x%X", item->pid);
         }
     }
 
@@ -1951,7 +1952,7 @@ static void opAttackComplex(Program* program)
         if (scriptGetScript(diagSid, &diagScript) != -1 && diagScript->target != nullptr) {
             diagTargetPid = diagScript->target->pid;
         }
-        debugFilePrint("MPCOMBAT: attack opcode sid=%d self=0x%X tile=%d target=0x%X tile=%d dist=%d",
+        MpLog(MP_LOG_COMBAT, "attack opcode sid=%d self=0x%X tile=%d target=0x%X tile=%d dist=%d",
             diagSid, diagSelfPid, diagSelf != nullptr ? diagSelf->tile : -1,
             diagTargetPid, target != nullptr ? target->tile : -1,
             diagSelf != nullptr && target != nullptr
@@ -1963,7 +1964,7 @@ static void opAttackComplex(Program* program)
     Object* self = scriptGetSelf(program);
     if (self == nullptr) {
         if (gMpActive && gMpIsHost) {
-            debugFilePrint("MPCOMBAT: attack refused (no self)");
+            MpLogAlways(MP_LOG_COMBAT, "attack refused (no self)");
         }
         program->flags &= ~PROGRAM_FLAG_CHILD_CALL;
         return;
@@ -1971,7 +1972,7 @@ static void opAttackComplex(Program* program)
 
     if (!critterIsActive(self) || (self->flags & OBJECT_HIDDEN) != 0) {
         if (gMpActive && gMpIsHost) {
-            debugFilePrint("MPCOMBAT: attack refused (self inactive/hidden) self=0x%X flags=0x%X",
+            MpLogAlways(MP_LOG_COMBAT, "attack refused (self inactive/hidden) self=0x%X flags=0x%X",
                 self->pid, self->flags);
         }
         debugPrint("\n   But is already Inactive (Dead/Stunned/Invisible)");
@@ -1981,7 +1982,7 @@ static void opAttackComplex(Program* program)
 
     if (!critterIsActive(target) || (target->flags & OBJECT_HIDDEN) != 0) {
         if (gMpActive && gMpIsHost) {
-            debugFilePrint("MPCOMBAT: attack refused (target inactive/hidden) target=0x%X flags=0x%X",
+            MpLogAlways(MP_LOG_COMBAT, "attack refused (target inactive/hidden) target=0x%X flags=0x%X",
                 target->pid, target->flags);
         }
         debugPrint("\n   But target is already dead or invisible");
@@ -1991,7 +1992,7 @@ static void opAttackComplex(Program* program)
 
     if ((target->data.critter.combat.maneuver & CRITTER_MANUEVER_FLEEING) != 0) {
         if (gMpActive && gMpIsHost) {
-            debugFilePrint("MPCOMBAT: attack refused (target fleeing) target=0x%X maneuver=0x%X",
+            MpLogAlways(MP_LOG_COMBAT, "attack refused (target fleeing) target=0x%X maneuver=0x%X",
                 target->pid, target->data.critter.combat.maneuver);
         }
         debugPrint("\n   But target is AFRAID");
@@ -2001,7 +2002,7 @@ static void opAttackComplex(Program* program)
 
     if (_gdialogActive()) {
         if (gMpActive && gMpIsHost) {
-            debugFilePrint("MPCOMBAT: attack refused (dialogue active) target=0x%X",
+            MpLogAlways(MP_LOG_COMBAT, "attack refused (dialogue active) target=0x%X",
                 target->pid);
         }
         // TODO: Might be an error, program flag is not removed.
@@ -2016,7 +2017,7 @@ static void opAttackComplex(Program* program)
         }
     } else {
         if (gMpActive && gMpIsHost) {
-            debugFilePrint("MPCOMBAT: attack requesting combat self=0x%X tile=%d target=0x%X tile=%d",
+            MpLog(MP_LOG_COMBAT, "attack requesting combat self=0x%X tile=%d target=0x%X tile=%d",
                 self->pid, self->tile, target->pid, target->tile);
         }
         CombatStartData combat;
@@ -3385,7 +3386,7 @@ static void opFloatMessage(Program* program)
             strncpy(relay.text, string, sizeof(relay.text) - 1);
             NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE,
                 NET_PKT_FLOAT_MESSAGE, &relay, sizeof(relay));
-            debugFilePrint("MP: float msg relayed netId=%u type=%d text='%.48s'",
+            MpLog(MP_LOG_CHAT, "netId=%u type=%d text='%.48s'",
                 netId, floatingMessageType, relay.text);
         }
     }
@@ -4893,7 +4894,7 @@ static void opMoveObjectInventoryToObject(Program* program)
         objectSetFid(object1, buildFid(objectTypeFromFid(object1->fid),
             object1->fid & 0xFFF, animationTypeFromFid(object1->fid),
             WEAPON_ANIMATION_NONE, rotationFromFid(object1->fid)), &unarmRect);
-        debugFilePrint("MP: strip source force-unarmed netId=%u", MpGetObjNetId(object1));
+        MpLog(MP_LOG_SYNC, "force-unarmed netId=%u", MpGetObjNetId(object1));
     }
 
     if (object1 == gDude) {

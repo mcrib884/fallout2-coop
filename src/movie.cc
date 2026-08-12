@@ -22,6 +22,7 @@
 #include "text_font.h"
 #include "window.h"
 #include "window_manager.h"
+#include "multiplayer_log.h"
 
 namespace fallout {
 
@@ -781,7 +782,7 @@ static int _stepMovie()
     }
 
     if (logClientStep) {
-        debugFilePrint("MPMOVIE: step result=%d", stepResult);
+        MpLog(MP_LOG_MOVIE, "step result=%d", stepResult);
     }
 
     return stepResult;

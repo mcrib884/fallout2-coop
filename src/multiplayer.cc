@@ -33,6 +33,7 @@
 #include "multiplayer_chat.h"
 #include "multiplayer_debug.h"
 #include "multiplayer_dialog.h"
+#include "multiplayer_log.h"
 #include "multiplayer_loot.h"
 #include "multiplayer_perf.h"
 #include "multiplayer_profile.h"
@@ -335,7 +336,7 @@ static bool mpSendProfile(ENetPeer* peer, uint8_t netId, uint32_t objNetId,
     uint32_t changedSections)
 {
     if (peer == nullptr || !MpProfileValidate(profile)) {
-        debugFilePrint("MP: send profile invalid peer=%p netId=%u", (void*)peer, netId);
+        MpLogAlways(MP_LOG_PROFILE, "send profile invalid peer=%p netId=%u", (void*)peer, netId);
         return false;
     }
 
@@ -346,7 +347,7 @@ static bool mpSendProfile(ENetPeer* peer, uint8_t netId, uint32_t objNetId,
     if (!MpProfileBuildBody(profile, changedSections, includeModel,
             &bytes, infos, &sectionCount, &bodyHash)
         || bytes.empty() || bytes.size() > MP_PROFILE_MAX_BYTES) {
-        debugFilePrint("MP: send profile build failed netId=%u name='%s' sections=%u",
+        MpLogAlways(MP_LOG_PROFILE, "send profile build failed netId=%u name='%s' sections=%u",
             netId, profile.name, changedSections);
         return false;
     }
@@ -369,7 +370,7 @@ static bool mpSendProfile(ENetPeer* peer, uint8_t netId, uint32_t objNetId,
             snprintf(buf, sizeof(buf), "%02X", bytes[i]);
             hex += buf;
         }
-        debugFilePrint("MP: send profile head netId=%u bytes=%zu head=%s",
+        MpLog(MP_LOG_PROFILE, "send profile head netId=%u bytes=%zu head=%s",
             netId, bytes.size(), hex.c_str());
     }
 
@@ -377,12 +378,12 @@ static bool mpSendProfile(ENetPeer* peer, uint8_t netId, uint32_t objNetId,
         - sizeof(NetPacketHeader) - sizeof(NetPlayerProfileChunkHeader);
     uint32_t chunkCount = (uint32_t)((bytes.size() + kChunkDataSize - 1) / kChunkDataSize);
     if (chunkCount == 0 || chunkCount > UINT16_MAX) {
-        debugFilePrint("MP: send profile chunk count invalid bytes=%zu chunks=%u", bytes.size(), chunkCount);
+        MpLogAlways(MP_LOG_PROFILE, "send profile chunk count invalid bytes=%zu chunks=%u", bytes.size(), chunkCount);
         return false;
     }
 
     uint32_t streamId = mpAllocProfileStreamId();
-    debugFilePrint("MP: send profile begin netId=%u name='%s' gen=%u objNet=%u bytes=%zu chunks=%u stream=%u model=%d sections=%u",
+    MpLog(MP_LOG_PROFILE, "send profile begin netId=%u name='%s' gen=%u objNet=%u bytes=%zu chunks=%u stream=%u model=%d sections=%u",
         netId, profile.name, profile.generation, objNetId, bytes.size(), chunkCount, streamId,
         includeModel ? 1 : 0, sectionCount);
     NetPlayerProfileBeginPayload begin;
@@ -479,17 +480,17 @@ static void mpApplyReceivedProfile(uint8_t netId, uint32_t objNetId,
     const MpPlayerProfile& profile, uint32_t changedSections)
 {
     if (!gMpIsClient || netId == 0 || netId > NET_MAX_PLAYERS) {
-        debugFilePrint("MP: apply received profile ignored netId=%u client=%d", netId, gMpIsClient);
+        MpLogAlways(MP_LOG_PROFILE, "apply received profile ignored netId=%u client=%d", netId, gMpIsClient);
         return;
     }
 
     MultiplayerPlayer* player = &gMpSession.players[netId - 1];
     if (player->profileReady && profile.generation < player->profileGeneration) {
-        debugFilePrint("MP: apply received profile stale netId=%u gen=%u have=%u",
+        MpLogAlways(MP_LOG_PROFILE, "apply received profile stale netId=%u gen=%u have=%u",
             netId, profile.generation, player->profileGeneration);
         return;
     }
-    debugFilePrint("MP: apply received profile netId=%u name='%s' gen=%u objNet=%u",
+    MpLog(MP_LOG_PROFILE, "apply received profile netId=%u name='%s' gen=%u objNet=%u",
         netId, profile.name, profile.generation, objNetId);
     player->netId = netId;
     player->isConnected = true;
@@ -503,7 +504,7 @@ static void mpApplyReceivedProfile(uint8_t netId, uint32_t objNetId,
 
     if (netId == gMpSession.localNetId) {
         if (!MpProfileBindLocal(netId, profile, gDude)) {
-            debugFilePrint("MP: apply received profile local bind failed netId=%u", netId);
+            MpLogAlways(MP_LOG_PROFILE, "apply received profile local bind failed netId=%u", netId);
             return;
         }
         player->obj = gDude;
@@ -524,7 +525,7 @@ static void mpApplyReceivedProfile(uint8_t netId, uint32_t objNetId,
         }
         if (profile.experience > localXp) {
             int gained = profile.experience - localXp;
-            debugFilePrint("MP: apply received profile combat xp netId=%u delta=%d",
+            MpLog(MP_LOG_PROFILE, "apply received profile combat xp netId=%u delta=%d",
                 netId, gained);
             pcAddExperience(gained);
         }
@@ -540,7 +541,7 @@ static void mpApplyReceivedProfile(uint8_t netId, uint32_t objNetId,
         MpPlayerRuntime* runtime = MpProfileCreateRuntime(netId, profile,
             profile.tile, profile.elevation, profile.rotation);
         if (runtime == nullptr) {
-            debugFilePrint("MP: apply received profile runtime create failed netId=%u", netId);
+            MpLogAlways(MP_LOG_PROFILE, "apply received profile runtime create failed netId=%u", netId);
             return;
         }
         // The runtime avatar is the player's only interactive object on this
@@ -557,7 +558,7 @@ static void mpApplyReceivedProfile(uint8_t netId, uint32_t objNetId,
     if (player->obj != nullptr) {
         mpShowClientPlayer(player->obj);
     }
-    debugFilePrint("MP: apply received profile done netId=%u ready=%d", netId, player->profileReady);
+    MpLog(MP_LOG_PROFILE, "apply received profile done netId=%u ready=%d", netId, player->profileReady);
     // A profile may be the last readiness condition (map/tile chunks and
     // states already complete); re-check so the client does not sit in
     // SYNCING forever.
@@ -582,7 +583,7 @@ static void mpHostSendGvarSnapshot(ENetPeer* peer, uint32_t netId)
     memcpy(snapshot->values, gGameGlobalVars, valueCount * sizeof(int32_t));
     NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_GVAR_SNAPSHOT, snapshot, payloadSize);
     free(snapshot);
-    debugFilePrint("MP: gvar snapshot sent netId=%u count=%d (local=%d)",
+    MpLog(MP_LOG_SCRIPT, "gvar snapshot sent netId=%u count=%d (local=%d)",
         netId, valueCount, gGameGlobalVarsLength);
 }
 
@@ -590,7 +591,7 @@ static void mpHostAcceptProfile(MultiplayerPlayer* player, ENetPeer* peer,
     const MpPlayerProfile& profile, uint32_t streamId, uint32_t changedSections)
 {
     if (!gMpIsHost || player == nullptr || peer == nullptr || !MpProfileValidate(profile)) {
-        debugFilePrint("MP: host accept profile rejected netId=%u handshaken=%d validate=%d",
+        MpLogAlways(MP_LOG_PROFILE, "host accept profile rejected netId=%u handshaken=%d validate=%d",
             player != nullptr ? player->netId : 0,
             player != nullptr ? player->isHandshaken : 0,
             MpProfileValidate(profile) ? 1 : 0);
@@ -603,16 +604,16 @@ static void mpHostAcceptProfile(MultiplayerPlayer* player, ENetPeer* peer,
     // the existing avatar in place and echo it to every other client. The
     // avatar object is never recreated, so combat/netId mappings survive.
     if (player->isHandshaken) {
-        debugFilePrint("MP: host accept profile update begin netId=%u name='%s' gen=%u",
+        MpLog(MP_LOG_PROFILE, "host accept profile update begin netId=%u name='%s' gen=%u",
             player->netId, profile.name, profile.generation);
         if (profile.generation <= player->profileGeneration) {
-            debugFilePrint("MP: host accept profile update stale netId=%u gen=%u have=%u",
+            MpLogAlways(MP_LOG_PROFILE, "host accept profile update stale netId=%u gen=%u have=%u",
                 player->netId, profile.generation, player->profileGeneration);
             mpSendProfileAck(peer, player->netId, streamId, player->profileGeneration, true);
             return;
         }
         if (!MpProfileApplyRuntimeUpdate(player->netId, profile, changedSections)) {
-            debugFilePrint("MP: host accept profile update apply failed netId=%u",
+            MpLogAlways(MP_LOG_PROFILE, "host accept profile update apply failed netId=%u",
                 player->netId);
             mpSendProfileReject(peer, player->netId, streamId, 6);
             return;
@@ -637,7 +638,7 @@ static void mpHostAcceptProfile(MultiplayerPlayer* player, ENetPeer* peer,
         return;
     }
 
-    debugFilePrint("MP: host accept profile begin netId=%u name='%s' gen=%u",
+    MpLog(MP_LOG_PROFILE, "host accept profile begin netId=%u name='%s' gen=%u",
         player->netId, profile.name, profile.generation);
 
     // The joining player's profile carries their real position on this map
@@ -662,11 +663,11 @@ static void mpHostAcceptProfile(MultiplayerPlayer* player, ENetPeer* peer,
     MpPlayerRuntime* runtime = MpProfileCreateRuntime(player->netId, profile,
         tile, elevation, rotation);
     if (runtime == nullptr) {
-        debugFilePrint("MP: host accept profile runtime create failed netId=%u", player->netId);
+        MpLogAlways(MP_LOG_PROFILE, "host accept profile runtime create failed netId=%u", player->netId);
         mpSendProfileReject(peer, player->netId, streamId, 2);
         return;
     }
-    debugFilePrint("MP: host accept profile runtime created netId=%u obj=%p pid=0x%X",
+    MpLog(MP_LOG_PROFILE, "host accept profile runtime created netId=%u obj=%p pid=0x%X",
         player->netId, (void*)runtime->object, runtime->syntheticPid);
 
     player->obj = runtime->object;
@@ -783,12 +784,12 @@ static void mpHostAcceptProfile(MultiplayerPlayer* player, ENetPeer* peer,
         // the next NPC TURN_START broadcast restores the red outline.
         NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_COMBAT_TURN_START,
             &turnPayload, sizeof(turnPayload));
-        debugFilePrint("MP: join mid-combat start sent netId=%u turn=%u",
+        MpLog(MP_LOG_COMBAT, "join mid-combat start sent netId=%u turn=%u",
             player->netId, gMpCombat.whoseTurn);
     }
 
     win_timed_msg("Player joined", COLOR_GREEN);
-    debugFilePrint("MP: host accept profile done netId=%u name='%s' objNet=%u players=%d",
+    MpLog(MP_LOG_PROFILE, "host accept profile done netId=%u name='%s' objNet=%u players=%d",
         player->netId, player->name, player->objNetId, gMpSession.numPlayers);
 }
 
@@ -811,12 +812,12 @@ static void mpHandleProfileBegin(ENetPeer* peer, const void* payload, size_t pay
     if (begin->schemaVersion != MP_PROFILE_SCHEMA_VERSION
         || begin->totalBytes == 0 || begin->totalBytes > MP_PROFILE_MAX_BYTES
         || begin->chunkCount == 0 || begin->chunkCount > UINT16_MAX) {
-        debugFilePrint("MP: profile begin invalid schema=%u bytes=%u chunks=%u",
+        MpLog(MP_LOG_PROFILE, "profile begin invalid schema=%u bytes=%u chunks=%u",
             begin->schemaVersion, begin->totalBytes, begin->chunkCount);
         if (gMpIsHost) mpSendProfileReject(peer, actualNetId, begin->streamId, 3);
         return;
     }
-    debugFilePrint("MP: profile begin netId=%u stream=%u gen=%u bytes=%u chunks=%u hash=%08X",
+    MpLog(MP_LOG_PROFILE, "profile begin netId=%u stream=%u gen=%u bytes=%u chunks=%u hash=%08X",
         actualNetId, begin->streamId, begin->generation, begin->totalBytes, begin->chunkCount,
         begin->contentHash);
 
@@ -854,7 +855,7 @@ static void mpHandleProfileChunk(ENetPeer* peer, const void* payload, size_t pay
         || chunk.chunkCount != state.expectedChunks
         || chunk.chunkIndex != state.nextChunk
         || state.receivedBytes + chunk.dataLength > state.expectedBytes) {
-        debugFilePrint("MP: profile chunk rejected netId=%u stream=%u idx=%u/%u have=%u want=%u",
+        MpLogAlways(MP_LOG_PROFILE, "profile chunk rejected netId=%u stream=%u idx=%u/%u have=%u want=%u",
             actualNetId, chunk.streamId, chunk.chunkIndex, chunk.chunkCount,
             state.nextChunk, state.expectedChunks);
         return;
@@ -864,7 +865,7 @@ static void mpHandleProfileChunk(ENetPeer* peer, const void* payload, size_t pay
     state.receivedBytes += chunk.dataLength;
     state.nextChunk++;
     if (state.nextChunk % 500 == 0 || state.nextChunk == state.expectedChunks) {
-        debugFilePrint("MP: profile chunk progress netId=%u stream=%u %u/%u bytes=%u/%u",
+        MpLog(MP_LOG_PROFILE, "profile chunk progress netId=%u stream=%u %u/%u bytes=%u/%u",
             actualNetId, chunk.streamId, state.nextChunk, state.expectedChunks,
             state.receivedBytes, state.expectedBytes);
     }
@@ -891,7 +892,7 @@ static void mpHandleProfileEnd(ENetPeer* peer, const void* payload, size_t paylo
         || state.expectedHash != end->contentHash
         || state.receivedBytes != state.expectedBytes
         || state.nextChunk != state.expectedChunks) {
-        debugFilePrint("MP: profile end mismatch netId=%u stream=%u gen=%u/%u bytes=%u/%u chunks=%u/%u hash=%08X/%08X",
+        MpLogAlways(MP_LOG_PROFILE, "profile end mismatch netId=%u stream=%u gen=%u/%u bytes=%u/%u chunks=%u/%u hash=%08X/%08X",
             state.netId, state.streamId, state.generation, end->generation,
             state.receivedBytes, state.expectedBytes, state.nextChunk, state.expectedChunks,
             state.expectedHash, end->contentHash);
@@ -900,7 +901,7 @@ static void mpHandleProfileEnd(ENetPeer* peer, const void* payload, size_t paylo
     }
     // The content hash covers exactly the shipped bytes (the received body).
     if (MpProfileHashBytes(state.bytes.data(), state.bytes.size()) != state.expectedHash) {
-        debugFilePrint("MP: profile end hash failed netId=%u stream=%u bytes=%zu",
+        MpLogAlways(MP_LOG_PROFILE, "profile end hash failed netId=%u stream=%u bytes=%zu",
             state.netId, state.streamId, state.bytes.size());
         mpSendProfileReject(peer, state.netId, state.streamId, 5);
         return;
@@ -915,7 +916,7 @@ static void mpHandleProfileEnd(ENetPeer* peer, const void* payload, size_t paylo
             snprintf(buf, sizeof(buf), "%02X", state.bytes[i]);
             hex += buf;
         }
-        debugFilePrint("MP: profile end head netId=%u bytes=%zu head=%s",
+        MpLog(MP_LOG_PROFILE, "profile end head netId=%u bytes=%zu head=%s",
             state.netId, state.bytes.size(), hex.c_str());
     }
 
@@ -930,7 +931,7 @@ static void mpHandleProfileEnd(ENetPeer* peer, const void* payload, size_t paylo
     uint32_t changedSections = MpProfileDeserializeSections(state.bytes.data(),
         state.bytes.size(), &merged);
     if (changedSections == 0) {
-        debugFilePrint("MP: profile end deserialize failed netId=%u stream=%u bytes=%zu",
+        MpLogAlways(MP_LOG_PROFILE, "profile end deserialize failed netId=%u stream=%u bytes=%zu",
             state.netId, state.streamId, state.bytes.size());
         mpSendProfileReject(peer, state.netId, state.streamId, 5);
         return;
@@ -946,11 +947,11 @@ static void mpHandleProfileEnd(ENetPeer* peer, const void* payload, size_t paylo
         req.netId = state.netId;
         req.modelHash = merged.modelHash;
         NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_MODEL_REQUEST, &req, sizeof(req));
-        debugFilePrint("MP: profile model missing, requested netId=%u hash=%08X",
+        MpLogAlways(MP_LOG_MODEL, "profile model missing, requested netId=%u hash=%08X",
             state.netId, merged.modelHash);
         return;
     }
-    debugFilePrint("MP: profile end complete netId=%u stream=%u name='%s' gen=%u bytes=%zu sections=%08X",
+    MpLog(MP_LOG_PROFILE, "profile end complete netId=%u stream=%u name='%s' gen=%u bytes=%zu sections=%08X",
         state.netId, state.streamId, merged.name, merged.generation, state.bytes.size(),
         changedSections);
 
@@ -1023,7 +1024,7 @@ static void mpSnapshotMapStaticObjects()
             gMpMapStaticObjIds.insert(it->id);
         }
     }
-    debugFilePrint("MP: map static objects snapshot=%zu", gMpMapStaticObjIds.size());
+    MpLog(MP_LOG_SYNC, "map static objects snapshot=%zu", gMpMapStaticObjIds.size());
 }
 
 // Fullscreen blackout held while a client is joining (CLIENT_SYNCING), so the
@@ -1041,7 +1042,7 @@ static void mpJoinBlackoutShow()
         COLOR_BLACK, WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
     if (gMpJoinBlackoutWin != -1) {
         windowRefresh(gMpJoinBlackoutWin);
-        debugFilePrint("MP: join blackout shown");
+        MpLog(MP_LOG_UI, "join blackout shown");
     }
 }
 
@@ -1052,12 +1053,13 @@ static void mpJoinBlackoutHide()
     }
     windowDestroy(gMpJoinBlackoutWin);
     gMpJoinBlackoutWin = -1;
-    debugFilePrint("MP: join blackout hidden");
+    MpLog(MP_LOG_UI, "join blackout hidden");
 }
 
 static int mpClientLoadMap(const NetMapSyncPayload* payload)
 {
     if (payload == nullptr || payload->mapId < 0) {
+        MpLogAlways(MP_LOG_SYNC, "client load map rejected null payload/mapId=%d", payload != nullptr ? payload->mapId : -1);
         return -1;
     }
 
@@ -1065,6 +1067,7 @@ static int mpClientLoadMap(const NetMapSyncPayload* payload)
     memcpy(mapName, payload->mapName, sizeof(mapName));
     mapName[sizeof(mapName) - 1] = '\0';
     if (mapName[0] == '\0') {
+        MpLogAlways(MP_LOG_SYNC, "client load map rejected empty name mapId=%d", payload->mapId);
         return -1;
     }
 
@@ -1093,7 +1096,7 @@ static int mpClientLoadMap(const NetMapSyncPayload* payload)
     }
     gMpClientDeferMapEnterScript = false;
     mpSetDudeInventoryProtected(false);
-    debugFilePrint("MPDBG after map load: rc=%d dude=%p pid=0x%X pt=%d tile=%d elev=%d hidden=%d st=%d carry=%d weight=%d",
+    MpLog(MP_LOG_SYNC, "after map load: rc=%d dude=%p pid=0x%X pt=%d tile=%d elev=%d hidden=%d st=%d carry=%d weight=%d",
         rc, (void*)gDude,
         gDude != nullptr ? gDude->pid : 0,
         gDude != nullptr ? objectTypeFromPid(gDude->pid) : -1,
@@ -1111,7 +1114,7 @@ static int mpClientLoadMap(const NetMapSyncPayload* payload)
         gMpClientMapEnteringTile = gMapHeader.enteringTile;
         gMpClientMapEnteringElevation = gMapHeader.enteringElevation;
         gMpClientMapEnteringRotation = gMapHeader.enteringRotation;
-        debugFilePrint("MP: client map entering snapshot tile=%d elev=%d rot=%d",
+        MpLog(MP_LOG_SYNC, "client map entering snapshot tile=%d elev=%d rot=%d",
             gMapHeader.enteringTile, gMapHeader.enteringElevation, gMapHeader.enteringRotation);
         mpSnapshotMapStaticObjects();
         mpDebugSnapshotPreSyncWalls();
@@ -1154,7 +1157,7 @@ static void mpDebugSnapshotPreSyncWalls()
             gMpPreSyncWalls.push_back(wall);
         }
     }
-    debugFilePrint("MPDBG wall pre-sync snapshot: %zu", gMpPreSyncWalls.size());
+    MpLog(MP_LOG_SYNC, "wall pre-sync snapshot: %zu", gMpPreSyncWalls.size());
 }
 
 static void mpDebugReportMissingWalls()
@@ -1249,7 +1252,7 @@ static void mpClientTryFinishMapSync()
             && hexGridTileIsValid(probe->tile) && elevationIsValid(probe->elevation)
             && !mpObjectIsInCritterInventory(probe, gDude)
             && MpGetObjNetId(probe) == 0) {
-            debugFilePrint("MP: prune phantom pid=0x%X fid=0x%X tile=%d elev=%d",
+            MpLog(MP_LOG_OBJECT, "prune phantom pid=0x%X fid=0x%X tile=%d elev=%d",
                 probe->pid, probe->fid, probe->tile, probe->elevation);
             mpDestroyNetworkObject(probe);
         }
@@ -1274,7 +1277,7 @@ static void mpClientTryFinishMapSync()
     if (gDude != nullptr) {
         for (int itemIndex = 0; itemIndex < gDude->data.inventory.length; itemIndex++) {
             const Object* invItem = gDude->data.inventory.items[itemIndex].item;
-            debugFilePrint("MPDBG sync item[%d]: obj=%p pid=0x%X qty=%d weight=%d",
+            MpLog(MP_LOG_SYNC, "sync item[%d]: obj=%p pid=0x%X qty=%d weight=%d",
                 itemIndex, (void*)invItem,
                 invItem != nullptr ? invItem->pid : 0,
                 invItem != nullptr ? gDude->data.inventory.items[itemIndex].quantity : -1,
@@ -1304,7 +1307,7 @@ static void mpClientTryFinishMapSync()
     if (gMpClientDeferredMapEnterPending) {
         gMpClientDeferredMapEnterPending = false;
         gMpClientDeferredMapEnterRun = true;
-        debugFilePrint("MAP: client deferred map enter queued sid=%d (exec from MpTick)",
+        MpLog(MP_LOG_SYNC, "client deferred map enter queued sid=%d (exec from MpTick)",
             gMapSid);
     }
     tileWindowRefreshFull();
@@ -1325,7 +1328,7 @@ static void mpEnterClientSync()
     }
     gMpSession.state = MP_STATE_CLIENT_SYNCING;
     gMpSession.clientSyncStartTick = getTicks();
-    debugFilePrint("MP: enter client syncing state map=%d", gMpSession.currentMapId);
+    MpLog(MP_LOG_SYNC, "enter client syncing state map=%d", gMpSession.currentMapId);
 }
 
 static MultiplayerPlayer* mpHostFindPlayerByObject(Object* obj)
@@ -1398,17 +1401,17 @@ int MpTruncateDestinationAtOccupant(Object* mover, int tile, int elevation)
 static int mpHostRegisterPlayerMovement(Object* obj, bool isRun, int tile, int elevation)
 {
     if (obj == nullptr) {
-        debugFilePrint("MP: movement rejected null obj tile=%d elev=%d", tile, elevation);
+        MpLogAlways(MP_LOG_SYNC, "movement rejected null obj tile=%d elev=%d", tile, elevation);
         return -1;
     }
     if (!hexGridTileIsValid(tile)) {
-        debugFilePrint("MP: movement rejected invalid tile=%d elev=%d obj=%p tile=%d elev=%d hidden=%d",
+        MpLogAlways(MP_LOG_SYNC, "movement rejected invalid tile=%d elev=%d obj=%p tile=%d elev=%d hidden=%d",
             tile, elevation, (void*)obj, obj->tile, obj->elevation,
             (obj->flags & OBJECT_HIDDEN) != 0 ? 1 : 0);
         return -1;
     }
     if (!elevationIsValid(elevation)) {
-        debugFilePrint("MP: movement rejected invalid elevation=%d tile=%d obj=%p tile=%d elev=%d hidden=%d",
+        MpLogAlways(MP_LOG_SYNC, "movement rejected invalid elevation=%d tile=%d obj=%p tile=%d elev=%d hidden=%d",
             elevation, tile, (void*)obj, obj->tile, obj->elevation,
             (obj->flags & OBJECT_HIDDEN) != 0 ? 1 : 0);
         return -1;
@@ -1428,7 +1431,7 @@ static int mpHostRegisterPlayerMovement(Object* obj, bool isRun, int tile, int e
     // critter — stacked avatars break targeting for both players.
     int targetTile = MpTruncateDestinationAtOccupant(obj, tile, elevation);
     if (targetTile != tile) {
-        debugFilePrint("MP: move truncated obj=%p tile=%d->%d (occupied)",
+        MpLog(MP_LOG_SYNC, "move truncated obj=%p tile=%d->%d (occupied)",
             (void*)obj, tile, targetTile);
         tile = targetTile;
     }
@@ -1441,7 +1444,7 @@ static int mpHostRegisterPlayerMovement(Object* obj, bool isRun, int tile, int e
     }
 
     if (reg_anim_begin(ANIMATION_REQUEST_RESERVED) != 0) {
-        debugFilePrint("MP: movement reg_anim_begin failed obj=%p netObj=%u busy=%d tile=%d elev=%d hidden=%d",
+        MpLogAlways(MP_LOG_SYNC, "movement reg_anim_begin failed obj=%p netObj=%u busy=%d tile=%d elev=%d hidden=%d",
             (void*)obj, MpGetObjNetId(obj), animationIsBusy(obj) != 0 ? 1 : 0,
             obj->tile, obj->elevation, (obj->flags & OBJECT_HIDDEN) != 0 ? 1 : 0);
         return -1;
@@ -1454,7 +1457,7 @@ static int mpHostRegisterPlayerMovement(Object* obj, bool isRun, int tile, int e
     if (rc != 0 || endRc != 0) {
         int walkFid = buildFid(objectTypeFromFid(obj->fid), obj->fid & 0xFFF,
             isRun ? ANIM_RUNNING : ANIM_WALK, (obj->fid & 0xF000) >> 12, obj->rotation + 1);
-        debugFilePrint("MP: movement registration failed netObj=%u run=%d tile=%d rc=%d end=%d objTile=%d objElev=%d hidden=%d busy=%d objFid=0x%X walkFid=0x%X artWalk=%d artRun=%d",
+        MpLogAlways(MP_LOG_SYNC, "movement registration failed netObj=%u run=%d tile=%d rc=%d end=%d objTile=%d objElev=%d hidden=%d busy=%d objFid=0x%X walkFid=0x%X artWalk=%d artRun=%d",
             MpGetObjNetId(obj), isRun ? 1 : 0, tile, rc, endRc,
             obj->tile, obj->elevation,
             (obj->flags & OBJECT_HIDDEN) != 0 ? 1 : 0,
@@ -1475,7 +1478,7 @@ static int mpHostRegisterPlayerMovement(Object* obj, bool isRun, int tile, int e
         if (protoGetProto(obj->pid, &playerProto) == 0
             && (playerProto->critter.data.flags & (1 << DUDE_STATE_SNEAKING)) != 0) {
             playerProto->critter.data.flags &= ~(1 << DUDE_STATE_SNEAKING);
-            debugFilePrint("MP: run cancelled sneak netId=%u", MpGetObjNetId(obj));
+            MpLog(MP_LOG_SYNC, "run cancelled sneak netId=%u", MpGetObjNetId(obj));
         }
     }
 
@@ -1486,7 +1489,7 @@ static int mpHostRegisterPlayerMovement(Object* obj, bool isRun, int tile, int e
     uint32_t nowTicks = getTicks();
     if (nowTicks - gMpRemoteMoveLogTick > 500) {
         gMpRemoteMoveLogTick = nowTicks;
-        debugFilePrint("MP: remote move registered obj=%p tile=%d->%d elev=%d run=%d busy=%d",
+        MpLog(MP_LOG_SYNC, "remote move registered obj=%p tile=%d->%d elev=%d run=%d busy=%d",
             (void*)obj, obj->tile, tile, elevation, isRun ? 1 : 0,
             animationIsBusy(obj) != 0 ? 1 : 0);
     }
@@ -1675,7 +1678,8 @@ static int mpRandomSpawnAnchor(int preferredTile, int elevation)
 
 int MpInit()
 {
-    debugFilePrint("MP: init");
+    MpLogInit();
+    MpLog(MP_LOG_LIFECYCLE, "init");
     mpZeroSession();
     MpProfileDestroyAllRuntimes();
     gMpProfileReceives.clear();
@@ -1683,7 +1687,7 @@ int MpInit()
     MpVoteInit();
     MpDialogInit();
     if (!NetInit()) {
-        debugFilePrint("MP: init NetInit failed");
+        MpLogAlways(MP_LOG_LIFECYCLE, "init NetInit failed");
         debugPrint("MpInit: NetInit failed\n");
         return -1;
     }
@@ -1692,7 +1696,7 @@ int MpInit()
 
 void MpShutdown()
 {
-    debugFilePrint("MP: shutdown begin active=%d", gMpActive);
+    MpLog(MP_LOG_LIFECYCLE, "shutdown begin active=%d", gMpActive);
     if (gMpActive) {
         if (gMpIsHost) {
             MpHostStop();
@@ -1714,12 +1718,12 @@ void MpShutdown()
     gMpPendingClientStartAfterLoad = 0;
     gMpPendingClientAddress[0] = '\0';
     gMpPendingClientProfileValid = false;
-    debugFilePrint("MP: shutdown done");
+    MpLog(MP_LOG_LIFECYCLE, "shutdown done");
 }
 
 void MpReset()
 {
-    debugFilePrint("MP: reset begin active=%d", gMpActive);
+    MpLog(MP_LOG_LIFECYCLE, "reset begin active=%d", gMpActive);
     if (gMpActive) {
         if (gMpIsHost) {
             MpHostStop();
@@ -1740,7 +1744,7 @@ void MpReset()
     gMpPendingClientProfileValid = false;
     // ENet itself stays initialized across game resets; NetInit is idempotent.
     NetInit();
-    debugFilePrint("MP: reset done");
+    MpLog(MP_LOG_LIFECYCLE, "reset done");
 }
 
 // ---------------------------------------------------------------------------
@@ -1749,12 +1753,12 @@ void MpReset()
 
 int MpHostStart(int32_t mapId)
 {
-    debugFilePrint("MP: MpHostStart begin map=%d active=%d loaded=%d dude=%p",
+    MpLog(MP_LOG_LIFECYCLE, "MpHostStart begin map=%d active=%d loaded=%d dude=%p",
         mapId, gMpActive, gGameLoaded, (void*)gDude);
     if (gMpActive || !gGameLoaded || gDude == nullptr || mapId < 0) {
         debugPrint("MpHostStart: invalid game state (active=%d, loaded=%d, dude=%p, map=%d)\n",
             gMpActive, gGameLoaded, (void*)gDude, mapId);
-        debugFilePrint("MP: MpHostStart rejected invalid state");
+        MpLogAlways(MP_LOG_LIFECYCLE, "MpHostStart rejected invalid state");
         return -1;
     }
 
@@ -1766,11 +1770,11 @@ int MpHostStart(int32_t mapId)
         if (gMpSessionSlot < 0) {
             gMpSessionSlot = lsgGetCoopSaveSlot();
         }
-        debugFilePrint("MP: host session slot fallback slot=%d", gMpSessionSlot);
+        MpLog(MP_LOG_LIFECYCLE, "host session slot fallback slot=%d", gMpSessionSlot);
     }
 
     ENetHost* host = NetHostCreate(NET_DEFAULT_PORT, NET_MAX_PLAYERS);
-    debugFilePrint("MP: NetHostCreate result=%p", (void*)host);
+    MpLog(MP_LOG_LIFECYCLE, "NetHostCreate result=%p", (void*)host);
     if (host == nullptr) {
         win_timed_msg("Failed to host on port 7777", COLOR_RED);
         debugPrint("MpHostStart: NetHostCreate failed\n");
@@ -1787,7 +1791,7 @@ int MpHostStart(int32_t mapId)
 
     MpPlayerProfile hostProfile;
     if (!MpProfileCaptureLocal(&hostProfile)) {
-        debugFilePrint("MP: MpHostStart failed profile capture");
+        MpLogAlways(MP_LOG_LIFECYCLE, "MpHostStart failed profile capture");
         NetHostDestroy(host);
         mpZeroSession();
         gMpIsHost = false;
@@ -1795,7 +1799,7 @@ int MpHostStart(int32_t mapId)
         return -1;
     }
     if (!MpProfileBindLocal(1, hostProfile, gDude)) {
-        debugFilePrint("MP: MpHostStart failed profile bind");
+        MpLogAlways(MP_LOG_LIFECYCLE, "MpHostStart failed profile bind");
         NetHostDestroy(host);
         mpZeroSession();
         gMpIsHost = false;
@@ -1821,33 +1825,33 @@ int MpHostStart(int32_t mapId)
     hostPlayer->hasSafePosition = true;
     MpRegisterObjNetId(gDude, hostPlayer->objNetId);
     objectReorder(gDude);
-    debugFilePrint("MP: host player registered object id=%d netId=%u", gDude->id, hostPlayer->objNetId);
+    MpLog(MP_LOG_LIFECYCLE, "host player registered object id=%d netId=%u", gDude->id, hostPlayer->objNetId);
 
     // Assign netIds to every other object on the current map.
     MpAssignNetIdsToAllObjects();
     mpSnapshotMapStaticObjects();
-    debugFilePrint("MP: object net ids assigned");
+    MpLog(MP_LOG_OBJECT, "object net ids assigned");
     // mpDebugDumpWalls("host", 12);
     MpResetObjectSyncBaseline();
-    debugFilePrint("MP: object sync baseline reset");
+    MpLog(MP_LOG_SYNC, "object sync baseline reset");
 
     gMpHostFirstTickPending = true;
     win_timed_msg("Hosting on port 7777", COLOR_GREEN);
-    debugFilePrint("MP: MpHostStart success");
+    MpLog(MP_LOG_LIFECYCLE, "MpHostStart success");
     return 0;
 }
 
 int MpHostCurrentGame()
 {
-    debugFilePrint("MP: MpHostCurrentGame begin loaded=%d active=%d combat=%d",
+    MpLog(MP_LOG_LIFECYCLE, "MpHostCurrentGame begin loaded=%d active=%d combat=%d",
         gGameLoaded, gMpActive, isInCombat());
     if (!gGameLoaded || gDude == nullptr || gMpActive) {
-        debugFilePrint("MP: MpHostCurrentGame rejected state");
+        MpLogAlways(MP_LOG_LIFECYCLE, "MpHostCurrentGame rejected state");
         return -1;
     }
 
     if (isInCombat()) {
-        debugFilePrint("MP: MpHostCurrentGame rejected during combat");
+        MpLogAlways(MP_LOG_LIFECYCLE, "MpHostCurrentGame rejected during combat");
         win_timed_msg("Finish combat before hosting", COLOR_RED);
         return -1;
     }
@@ -1856,7 +1860,7 @@ int MpHostCurrentGame()
     // network session starts. Uses the reserved hidden co-op slot so the
     // player's own save slots are never touched or overwritten.
     int saveRc = lsgQuickSaveGameCoop();
-    debugFilePrint("MP: MpHostCurrentGame quick save rc=%d", saveRc);
+    MpLog(MP_LOG_LIFECYCLE, "MpHostCurrentGame quick save rc=%d", saveRc);
     if (saveRc != 1) {
         return -1;
     }
@@ -1869,7 +1873,7 @@ int MpHostStop()
     if (!gMpIsHost) {
         return 0;
     }
-    debugFilePrint("MP: MpHostStop begin players=%d", gMpSession.numPlayers);
+    MpLog(MP_LOG_LIFECYCLE, "MpHostStop begin players=%d", gMpSession.numPlayers);
     // Tell all clients we're going away.
     NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE, NET_PKT_DISCONNECT, nullptr, 0);
     NetHostDestroy(gMpSession.enetHost);
@@ -1898,7 +1902,7 @@ int MpHostStop()
     gMpIsHost = false;
     gMpActive = false;
     gMpHostFirstTickPending = false;
-    debugFilePrint("MP: MpHostStop done");
+    MpLog(MP_LOG_LIFECYCLE, "MpHostStop done");
     return 0;
 }
 
@@ -1916,28 +1920,28 @@ int MpClientConnect(const char* address, uint16_t port)
         // No join path recorded a slot (should not happen): fall back to the
         // hidden co-op slot so client saves never hit a picker mid-session.
         gMpSessionSlot = lsgGetCoopSaveSlot();
-        debugFilePrint("MP: client join slot fallback coop slot=%d", gMpSessionSlot);
+        MpLog(MP_LOG_LIFECYCLE, "client join slot fallback coop slot=%d", gMpSessionSlot);
     }
 
     gMpPendingClientProfileValid = MpProfileCaptureLocal(&gMpPendingClientProfile);
     if (!gMpPendingClientProfileValid) {
-        debugFilePrint("MP: MpClientConnect profile capture failed addr='%s'", address);
+        MpLogAlways(MP_LOG_LIFECYCLE, "MpClientConnect profile capture failed addr='%s'", address);
         win_timed_msg("Could not capture player profile", COLOR_RED);
         return -1;
     }
-    debugFilePrint("MP: MpClientConnect begin addr='%s' name='%s' nodes=%zu models=%zu",
+    MpLog(MP_LOG_LIFECYCLE, "MpClientConnect begin addr='%s' name='%s' nodes=%zu models=%zu",
         address, gMpPendingClientProfile.name,
         gMpPendingClientProfile.inventory.size(), gMpPendingClientProfile.modelFiles.size());
 
     ENetHost* client = NetClientCreate();
     if (client == nullptr) {
-        debugFilePrint("MP: MpClientConnect NetClientCreate failed");
+        MpLogAlways(MP_LOG_LIFECYCLE, "MpClientConnect NetClientCreate failed");
         win_timed_msg("Could not create net client", COLOR_RED);
         return -1;
     }
     ENetPeer* peer = NetClientConnect(client, address, port);
     if (peer == nullptr) {
-        debugFilePrint("MP: MpClientConnect NetClientConnect failed addr='%s'", address);
+        MpLogAlways(MP_LOG_LIFECYCLE, "MpClientConnect NetClientConnect failed addr='%s'", address);
         NetHostDestroy(client);
         win_timed_msg("Connection failed", COLOR_RED);
         return -1;
@@ -1962,7 +1966,7 @@ static void mpClientDisconnectNow(bool notifyPeer)
     if (!gMpIsClient) {
         return;
     }
-    debugFilePrint("MP: client disconnect begin notify=%d", notifyPeer ? 1 : 0);
+    MpLog(MP_LOG_LIFECYCLE, "client disconnect begin notify=%d", notifyPeer ? 1 : 0);
 
     // Never leave the join blackout up (disconnect during sync / timeout).
     mpJoinBlackoutHide();
@@ -1998,7 +2002,7 @@ static void mpClientDisconnectNow(bool notifyPeer)
     mpZeroSession();
     gMpIsClient = false;
     gMpActive = false;
-    debugFilePrint("MP: client disconnect done");
+    MpLog(MP_LOG_LIFECYCLE, "client disconnect done");
 }
 
 static void mpRequestClientDisconnect(bool notifyPeer)
@@ -2075,7 +2079,7 @@ static void mpHostRemovePlayer(MultiplayerPlayer* player)
     uint8_t netId = player->netId;
     uint32_t objNetId = player->objNetId;
     bool wasHandshaken = player->isHandshaken;
-    debugFilePrint("MP: host remove player netId=%u name='%s' handshaken=%d",
+    MpLog(MP_LOG_LIFECYCLE, "host remove player netId=%u name='%s' handshaken=%d",
         netId, player->name, wasHandshaken ? 1 : 0);
 
     // Co-op: a dialogue participant disconnected — remove + recalc the vote.
@@ -2270,7 +2274,7 @@ static void mpHostSyncProfiles()
         // grants, host-resolved drops, script rewards) — go out here. This
         // breaks the upload->apply->detect->rebroadcast feedback loop.
         if (runtime->profile.generation <= player->lastProfileBroadcastGeneration) {
-            debugFilePrint("MP: profile change suppressed netId=%u generation=%u lastBroadcast=%u",
+            MpLog(MP_LOG_PROFILE, "profile change suppressed netId=%u generation=%u lastBroadcast=%u",
                 netId, runtime->profile.generation,
                 player->lastProfileBroadcastGeneration);
             continue;
@@ -2278,7 +2282,7 @@ static void mpHostSyncProfiles()
         mpBroadcastProfileToClients(netId, player->objNetId, runtime->profile,
             /*skipOwner=*/false, changedSections);
         player->lastProfileBroadcastGeneration = runtime->profile.generation;
-        debugFilePrint("MP: profile changed netId=%u generation=%u sections=%08X broadcast",
+        MpLog(MP_LOG_PROFILE, "profile changed netId=%u generation=%u sections=%08X broadcast",
             netId, runtime->profile.generation, changedSections);
     }
 }
@@ -2366,7 +2370,7 @@ static void mpClientSyncLocalProfile()
     bool modelChanged = (changedSections & (1u << (PROFILE_SECTION_MODEL - 1))) != 0;
     if (modelChanged) {
         if (!MpProfileCaptureLocal(&upload)) {
-            debugFilePrint("MP: local profile upload model capture failed");
+            MpLogAlways(MP_LOG_PROFILE, "local profile upload model capture failed");
             return;
         }
     }
@@ -2379,7 +2383,7 @@ static void mpClientSyncLocalProfile()
     bool includeModel = !gMpHostKnownModels.count(upload.modelHash);
     if (!mpSendProfile(gMpSession.hostPeer, localNetId, player->objNetId, upload,
             includeModel, /*receiverNetId=*/0, changedSections)) {
-        debugFilePrint("MP: local profile upload failed netId=%u gen=%u sections=%08X",
+        MpLogAlways(MP_LOG_PROFILE, "local profile upload failed netId=%u gen=%u sections=%08X",
             localNetId, upload.generation, changedSections);
         return;
     }
@@ -2389,7 +2393,7 @@ static void mpClientSyncLocalProfile()
     // broadcasts of this generation bump it further — either way it only
     // ever climbs.
     player->profileGeneration = upload.generation;
-    debugFilePrint("MP: local profile uploaded netId=%u gen=%u sections=%08X",
+    MpLog(MP_LOG_PROFILE, "local profile uploaded netId=%u gen=%u sections=%08X",
         localNetId, upload.generation, changedSections);
 }
 
@@ -2679,7 +2683,7 @@ static void mpDbgFidWatch()
             snprintf(nameBuf, sizeof(nameBuf), "?");
             modelName = nameBuf;
         }
-        debugFilePrint("MPDBG fidwatch netId=%u objFid=0x%X model=%d anim=%d busy=%d protoFid=0x%X protoModel=%d frame=%d tile=%d elev=%d hidden=%d art=%s name='%.12s'",
+        MpLog(MP_LOG_SYNC, "fidwatch netId=%u objFid=0x%X model=%d anim=%d busy=%d protoFid=0x%X protoModel=%d frame=%d tile=%d elev=%d hidden=%d art=%s name='%.12s'",
             p->netId, p->obj->fid, model,
             animationTypeFromFid(p->obj->fid),
             animationIsBusy(p->obj) != 0 ? 1 : 0,
@@ -2694,7 +2698,7 @@ static void mpDbgFidWatch()
             Object* other = objectFindFirstAtLocation(p->obj->elevation, p->obj->tile);
             while (other != nullptr) {
                 if (objectTypeFromFid(other->fid) == OBJ_TYPE_CRITTER) {
-                    debugFilePrint("MPDBG tileprobe netId=%u obj=%p pid=0x%X fid=0x%X model=%d netObj=%u isAvatar=%d",
+                    MpLog(MP_LOG_SYNC, "tileprobe netId=%u obj=%p pid=0x%X fid=0x%X model=%d netObj=%u isAvatar=%d",
                         p->netId, (void*)other, other->pid, other->fid, other->fid & 0xFFF,
                         MpGetObjNetId(other), other == p->obj ? 1 : 0);
                 }
@@ -2713,7 +2717,7 @@ void MpTick()
     }
     bool logFirstHostTick = gMpIsHost && gMpHostFirstTickPending;
     if (logFirstHostTick) {
-        debugFilePrint("MP: first host tick begin");
+        MpLog(MP_LOG_LIFECYCLE, "first host tick begin");
     }
 
     // Drain client-deferred packets (queued while a modal blocked the main
@@ -2769,7 +2773,7 @@ void MpTick()
     // the network handler. The escape hatch is cleared immediately after.
     if (gMpIsClient && gMpClientDeferredMapEnterRun) {
         gMpClientDeferredMapEnterRun = false;
-        debugFilePrint("MAP: client deferred map enter run sid=%d dudeTile=%d dudeElev=%d enteringTile=%d enteringElev=%d gameTime=%d",
+        MpLog(MP_LOG_SYNC, "client deferred map enter run sid=%d dudeTile=%d dudeElev=%d enteringTile=%d enteringElev=%d gameTime=%d",
             gMapSid,
             gDude != nullptr ? gDude->tile : -999,
             gDude != nullptr ? gDude->elevation : -999,
@@ -2783,7 +2787,7 @@ void MpTick()
         scriptExecProc(gMapSid, SCRIPT_PROC_MAP_ENTER);
         gMpAllowClientScriptExec = false;
         _scr_spatials_enable();
-        debugFilePrint("MAP: client deferred map script enter done sid=%d", gMapSid);
+        MpLog(MP_LOG_MISC, "client deferred map script enter done sid=%d", gMapSid);
         // debugFilePrint("MAPDBG ambient after client deferred map script enter=%d",
         //     lightGetAmbientIntensity());
         if (wmSetupRandomEncounter() == -1) {
@@ -2816,7 +2820,7 @@ void MpTick()
             MpBroadcastObjectStates();
             MpPerfEnd(MP_PERF_MPTICK_OBJECTS);
             if (logFirstHostTick) {
-                debugFilePrint("MP: first host tick after object broadcast");
+                MpLog(MP_LOG_LIFECYCLE, "first host tick after object broadcast");
             }
             MpPerfBegin(MP_PERF_MPTICK_PROFILES);
             mpHostSyncProfiles();
@@ -2846,12 +2850,12 @@ void MpTick()
             MpBroadcastPlayerStates();
             MpPerfEnd(MP_PERF_MPTICK_PLAYERS);
             if (logFirstHostTick) {
-                debugFilePrint("MP: first host tick after player broadcast");
+                MpLog(MP_LOG_LIFECYCLE, "first host tick after player broadcast");
                 gMpHostFirstTickPending = false;
             }
         } else {
             if (logFirstHostTick) {
-                debugFilePrint("MP: first host tick (broadcast already done in input pump)");
+                MpLog(MP_LOG_LIFECYCLE, "first host tick (broadcast already done in input pump)");
                 gMpHostFirstTickPending = false;
             }
         }
@@ -2876,7 +2880,7 @@ void MpTick()
         // main menu once the deadline passes.
         if (gMpSession.state == MP_STATE_CLIENT_SYNCING
             && getTicksSince(gMpSession.clientSyncStartTick) >= MP_SYNC_TIMEOUT_MS) {
-            debugFilePrint("MP: client sync timed out state=%d waited=%u ms",
+            MpLogAlways(MP_LOG_SYNC, "client sync timed out state=%d waited=%u ms",
                 gMpSession.state, (unsigned)getTicksSince(gMpSession.clientSyncStartTick));
             win_timed_msg("Synchronization timed out", COLOR_RED);
             mpRequestClientDisconnect(false);
@@ -2892,7 +2896,7 @@ void MpTick()
         if (gMpSession.state == MP_STATE_CLIENT_PLAYING
             && !MpCombatIsActive()
             && getTicksSince(gMpSession.lastHostPacketTime) >= MP_HOST_DEAD_TIMEOUT_MS) {
-            debugFilePrint("MP: host heartbeat lost state=%d silent=%u ms",
+            MpLog(MP_LOG_NET, "host heartbeat lost state=%d silent=%u ms",
                 gMpSession.state, (unsigned)getTicksSince(gMpSession.lastHostPacketTime));
             win_timed_msg("Host disconnected", COLOR_RED);
             mpRequestClientDisconnect(false);
@@ -2941,7 +2945,7 @@ void MpRenderPlayerLabels()
         static bool sMpTagEarlyLogged = false;
         if (!sMpTagEarlyLogged) {
             sMpTagEarlyLogged = true;
-            debugFilePrint("MPTAG: pass early return mpActive=%d surf=%p tex=%p",
+            MpLog(MP_LOG_UI, "pass early return mpActive=%d surf=%p tex=%p",
                 gMpActive ? 1 : 0, (void*)gSdlSurface, (void*)gSdlTextureSurface);
         }
         return;
@@ -2965,7 +2969,7 @@ void MpRenderPlayerLabels()
                 connectedCount++;
             }
         }
-        debugFilePrint("MPTAG: pass state mpActive=%d connected=%d localNetId=%u surf=%dx%d",
+        MpLog(MP_LOG_UI, "pass state mpActive=%d connected=%d localNetId=%u surf=%dx%d",
             gMpActive ? 1 : 0, connectedCount, gMpSession.localNetId,
             gSdlSurface->w, gSdlSurface->h);
     }
@@ -3014,7 +3018,7 @@ void MpRenderPlayerLabels()
             || (critter->flags & OBJECT_HIDDEN) != 0
             || !tileIsValid(critter->tile)) {
             if (mpTagCanLog()) {
-                debugFilePrint("MPTAG: skip player netId=%u connected=%d local=%d obj=%p hidden=%d tileValid=%d",
+                MpLog(MP_LOG_UI, "skip player netId=%u connected=%d local=%d obj=%p hidden=%d tileValid=%d",
                     p->netId, p->isConnected ? 1 : 0, p->isLocal ? 1 : 0, (void*)critter,
                     critter != nullptr ? ((critter->flags & OBJECT_HIDDEN) != 0) : -1,
                     critter != nullptr ? tileIsValid(critter->tile) : -1);
@@ -3074,7 +3078,7 @@ void MpRenderPlayerLabels()
         if (labelRect.w <= 0 || labelRect.h <= 0
             || windowIntersectsUiOrModal(labelRect.x, labelRect.y, labelRect.w, labelRect.h, gIsoWindow)) {
             if (mpTagCanLog()) {
-                debugFilePrint("MPTAG: skip label netId=%u name='%s' rect=%d,%d %dx%d uiIntersect=%d",
+                MpLog(MP_LOG_UI, "skip label netId=%u name='%s' rect=%d,%d %dx%d uiIntersect=%d",
                     p->netId, name, labelRect.x, labelRect.y, labelRect.w, labelRect.h,
                     windowIntersectsUiOrModal(labelRect.x, labelRect.y, labelRect.w, labelRect.h, gIsoWindow) ? 1 : 0);
             }
@@ -3117,7 +3121,7 @@ void MpRenderPlayerLabels()
                     else if (b == 0) src0++;
                 }
             }
-            debugFilePrint("MP: name tag draw surface=%p %dx%d name='%s' x=%d y=%d color=%d blit=%d srcColorPx=%d src0=%d",
+            MpLog(MP_LOG_UI, "name tag draw surface=%p %dx%d name='%s' x=%d y=%d color=%d blit=%d srcColorPx=%d src0=%d",
                 (void*)gSdlSurface, gSdlSurface->w, gSdlSurface->h,
                 name, clampedX, clampedY, labelColor, blitRc, srcColorPx, src0);
         }
@@ -3139,11 +3143,11 @@ static void mpGvarOnChange(const NetGvarChangePayload* payload)
         return;
     }
     if (payload->index < 0 || payload->index >= gGameGlobalVarsLength) {
-        debugFilePrint("MP: gvar change out of range idx=%d len=%d", payload->index, gGameGlobalVarsLength);
+        MpLog(MP_LOG_SCRIPT, "gvar change out of range idx=%d len=%d", payload->index, gGameGlobalVarsLength);
         return;
     }
     gGameGlobalVars[payload->index] = payload->value;
-    debugFilePrint("MP: gvar change idx=%d val=%d", payload->index, payload->value);
+    MpLog(MP_LOG_SCRIPT, "gvar change idx=%d val=%d", payload->index, payload->value);
 }
 
 static void mpGvarOnSnapshot(const NetGvarSnapshotPayload* payload, size_t payloadLen)
@@ -3158,7 +3162,7 @@ static void mpGvarOnSnapshot(const NetGvarSnapshotPayload* payload, size_t paylo
     if (applyCount > 0) {
         memcpy(gGameGlobalVars, payload->values, (size_t)applyCount * sizeof(int32_t));
     }
-    debugFilePrint("MP: gvar snapshot received count=%d applied=%d localLen=%d",
+    MpLog(MP_LOG_SCRIPT, "gvar snapshot received count=%d applied=%d localLen=%d",
         count, applyCount, gGameGlobalVarsLength);
 }
 
@@ -3218,14 +3222,14 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             switch (packetType) {
             case NET_PKT_HELLO: {
                 if (payloadLen != sizeof(NetHelloPayload)) {
-                    debugFilePrint("MP: hello bad length=%zu", payloadLen);
+                    MpLogAlways(MP_LOG_HANDSHAKE, "hello bad length=%zu", payloadLen);
                     return;
                 }
                 const NetHelloPayload* hello = (const NetHelloPayload*)payload;
-                debugFilePrint("MP: hello received name='%s' versionHash=%08X want=%08X",
+                MpLog(MP_LOG_HANDSHAKE, "hello received name='%s' versionHash=%08X want=%08X",
                     hello->peerName, hello->versionHash, NetGetVersionHash());
                 if (hello->versionHash != NetGetVersionHash()) {
-                    debugFilePrint("MP: hello version mismatch kick peer=%p", (void*)peer);
+                    MpLogAlways(MP_LOG_HANDSHAKE, "hello version mismatch kick peer=%p", (void*)peer);
                     NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_KICK, nullptr, 0);
                     NetPeerDisconnect(peer);
                     return;
@@ -3328,7 +3332,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                             }
                         }
                         if (item != nullptr) {
-                            debugFilePrint("MP: drop action netId=%u pid=0x%X tile=%d",
+                            MpLog(MP_LOG_NET, "drop action netId=%u pid=0x%X tile=%d",
                                 p->netId, item->pid, p->obj->tile);
                             // Ghost-spear diagnostic: watch the drop tile for
                             // 30s so the next test shows whether a tile node
@@ -3340,7 +3344,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                             gMpDropDiagLastDump = 0;
                             objectDrop(p->obj, item);
                         } else {
-                            debugFilePrint("MP: drop action no item netId=%u pid=0x%X",
+                            MpLogAlways(MP_LOG_NET, "drop action no item netId=%u pid=0x%X",
                                 p->netId, action->targetNetId);
                         }
                     }
@@ -3397,10 +3401,10 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                             if (scriptHooks_ExplosiveTimer(item, 10 * seconds, eventType) == -1) {
                                 queueAddEvent(delay, item, nullptr, eventType);
                             }
-                            debugFilePrint("MP: use item arm netId=%u pid=0x%X seconds=%d delay=%d type=%d",
+                            MpLog(MP_LOG_NET, "use item arm netId=%u pid=0x%X seconds=%d delay=%d type=%d",
                                 p->netId, item->pid, seconds, delay, eventType);
                         } else {
-                            debugFilePrint("MP: use item no item netId=%u pid=0x%X",
+                            MpLogAlways(MP_LOG_NET, "use item no item netId=%u pid=0x%X",
                                 p->netId, action->targetNetId);
                         }
                     }
@@ -3477,7 +3481,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                         }
                     }
                     if (item == nullptr) {
-                        debugFilePrint("MP: use-item-on no item netId=%u pid=0x%X",
+                        MpLogAlways(MP_LOG_NET, "use-item-on no item netId=%u pid=0x%X",
                             p->netId, action->tile);
                         break;
                     }
@@ -3490,7 +3494,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                             : itemGetActionPointCost(p->obj,
                                 HIT_MODE_RIGHT_WEAPON_PRIMARY, false);
                         if (p->obj->data.critter.combat.ap < cost) {
-                            debugFilePrint("MP: use-item-on rejected netId=%u pid=0x%X ap=%d cost=%d",
+                            MpLogAlways(MP_LOG_NET, "use-item-on rejected netId=%u pid=0x%X ap=%d cost=%d",
                                 p->netId, item->pid, p->obj->data.critter.combat.ap, cost);
                             break;
                         }
@@ -3504,7 +3508,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                     } else {
                         _action_use_an_item_on_object(p->obj, target, item);
                     }
-                    debugFilePrint("MP: use-item-on netId=%u targetNetId=%u pid=0x%X combat=%d",
+                    MpLog(MP_LOG_NET, "use-item-on netId=%u targetNetId=%u pid=0x%X combat=%d",
                         p->netId, action->targetNetId, item->pid, isInCombat() ? 1 : 0);
                     break;
                 }
@@ -3574,7 +3578,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                 break;
             case NET_PKT_COMBAT_START_REQUEST: {
                 if (payloadLen != sizeof(NetCombatStartRequestPayload)) {
-                    debugFilePrint("MP: combat start request bad length=%zu", payloadLen);
+                    MpLogAlways(MP_LOG_COMBAT, "combat start request bad length=%zu", payloadLen);
                     return;
                 }
                 MultiplayerPlayer* p = mpPlayerFindByPeer(peer);
@@ -3642,7 +3646,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                 const NetToHitQueryPayload* query = (const NetToHitQueryPayload*)payload;
                 Object* toHitTarget = mpHostFindObjectByNetId(query->targetNetId);
                 if (toHitTarget == nullptr) {
-                    debugFilePrint("MP: to-hit query ignored (no target) netId=%u targetNetId=%u",
+                    MpLogAlways(MP_LOG_COMBAT, "to-hit query ignored (no target) netId=%u targetNetId=%u",
                         p->netId, query->targetNetId);
                     return;
                 }
@@ -3659,7 +3663,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                 }
                 NetSendPacket(peer, NET_CHANNEL_RELIABLE,
                     NET_PKT_TO_HIT_RESULT, &result, sizeof(result));
-                debugFilePrint("MP: to-hit result sent netId=%u targetNetId=%u mode=%d probs=%d/%d/%d/%d/%d/%d/%d/%d",
+                MpLog(MP_LOG_COMBAT, "to-hit result sent netId=%u targetNetId=%u mode=%d probs=%d/%d/%d/%d/%d/%d/%d/%d",
                     p->netId, result.targetNetId, result.hitMode,
                     result.probs[0], result.probs[1], result.probs[2], result.probs[3],
                     result.probs[4], result.probs[5], result.probs[6], result.probs[7]);
@@ -3667,17 +3671,17 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             }
             case NET_PKT_CHAT_MESSAGE: {
                 if (payloadLen != sizeof(NetChatMessagePayload)) {
-                    debugFilePrint("MPCHAT: host reject bad length=%zu", payloadLen);
+                    MpLogAlways(MP_LOG_CHAT, "host reject bad length=%zu", payloadLen);
                     return;
                 }
                 MultiplayerPlayer* p = mpPlayerFindByPeer(peer);
                 if (p == nullptr || !p->isHandshaken) {
-                    debugFilePrint("MPCHAT: host reject unknown peer");
+                    MpLogAlways(MP_LOG_CHAT, "host reject unknown peer");
                     return;
                 }
                 const NetChatMessagePayload* in = (const NetChatMessagePayload*)payload;
                 if (in->senderNetId != p->netId) {
-                    debugFilePrint("MPCHAT: host reject spoofed sender packetNetId=%u peerNetId=%u",
+                    MpLogAlways(MP_LOG_CHAT, "host reject spoofed sender packetNetId=%u peerNetId=%u",
                         in->senderNetId, p->netId);
                     return;
                 }
@@ -3708,7 +3712,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                         Object* critter = p->obj;
                         int apBefore = critter->data.critter.combat.ap;
                         critter->data.critter.combat.ap = std::max(apBefore - cost, 0);
-                        debugFilePrint("MP: inv ap cost resolved netId=%u cost=%d ap=%d->%d",
+                        MpLog(MP_LOG_NET, "inv ap cost resolved netId=%u cost=%d ap=%d->%d",
                             p->netId, cost, apBefore, critter->data.critter.combat.ap);
                     }
                     break;
@@ -3719,16 +3723,16 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                 case NET_PLAYER_CMD_CHEAT_FLAGS:
                     if (MpDebugClientCheatsEnabled()) {
                         p->debugCheatFlags = (uint32_t)cmd->arg1 & MP_DEBUG_CHEAT_ALL;
-                        debugFilePrint("MP: cheat flags netId=%u flags=0x%X",
+                        MpLog(MP_LOG_NET, "cheat flags netId=%u flags=0x%X",
                             p->netId, p->debugCheatFlags);
                     } else {
                         p->debugCheatFlags = 0;
-                        debugFilePrint("MP: cheat flags rejected (client cheats disabled) netId=%u flags=0x%X",
+                        MpLogAlways(MP_LOG_NET, "cheat flags rejected (client cheats disabled) netId=%u flags=0x%X",
                             p->netId, (uint32_t)cmd->arg1);
                     }
                     break;
                 default:
-                    debugFilePrint("MP: player cmd unknown opcode=%u netId=%u",
+                    MpLog(MP_LOG_NET, "player cmd unknown opcode=%u netId=%u",
                         cmd->opcode, p->netId);
                     break;
                 }
@@ -3756,7 +3760,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                 mpSendProfile(peer, req->netId, target->objNetId,
                     targetRuntime->profile, /*includeModel=*/true, requester->netId,
                     (1u << (PROFILE_SECTION_MODEL - 1)));
-                debugFilePrint("MP: model resend netId=%u hash=%08X to netId=%u",
+                MpLog(MP_LOG_MODEL, "model resend netId=%u hash=%08X to netId=%u",
                     req->netId, req->modelHash, requester->netId);
                 break;
             }
@@ -3774,7 +3778,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
     // ----- client -----
     switch (eventType) {
     case 1: { // connect to host
-        debugFilePrint("MP: client connected to host, sending HELLO");
+        MpLog(MP_LOG_HANDSHAKE, "client connected to host, sending HELLO");
         NetHelloPayload hello;
         hello.versionHash = NetGetVersionHash();
         memset(hello.peerName, 0, sizeof(hello.peerName));
@@ -3787,13 +3791,13 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
         if (!NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_HELLO, &hello, sizeof(hello))
             || !gMpPendingClientProfileValid
             || !mpSendProfile(peer, 0, 0, gMpPendingClientProfile, /*includeModel=*/true)) {
-            debugFilePrint("MP: client hello/profile upload failed, disconnecting");
+            MpLogAlways(MP_LOG_HANDSHAKE, "client hello/profile upload failed, disconnecting");
             mpRequestClientDisconnect(false);
         }
         break;
     }
     case 2: { // disconnect (host gone)
-        debugFilePrint("MP: client lost host connection");
+        MpLog(MP_LOG_HANDSHAKE, "client lost host connection");
         win_timed_msg("Host disconnected", COLOR_RED);
         mpRequestClientDisconnect(false);
         _game_user_wants_to_quit = GAME_QUIT_REQUEST_MAIN_MENU;
@@ -3865,7 +3869,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             gToHitResultMode = result->hitMode;
             memcpy(gToHitResultProbs, result->probs, sizeof(gToHitResultProbs));
             gToHitResultPending = true;
-            debugFilePrint("MP: to-hit result received targetNetId=%u mode=%d",
+            MpLog(MP_LOG_COMBAT, "to-hit result received targetNetId=%u mode=%d",
                 result->targetNetId, result->hitMode);
             break;
         }
@@ -3903,7 +3907,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                 // The host now holds this model — skip the payload on future
                 // uploads with the same hash.
                 gMpHostKnownModels.insert(ack->modelHash);
-                debugFilePrint("MP: model ack received hash=%08X", ack->modelHash);
+                MpLog(MP_LOG_MODEL, "model ack received hash=%08X", ack->modelHash);
             }
             break;
         }
@@ -3925,7 +3929,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                             /*includeModel=*/true, /*receiverNetId=*/0,
                             (1u << (PROFILE_SECTION_MODEL - 1)))) {
                         gMpHostKnownModels.insert(req->modelHash);
-                        debugFilePrint("MP: model resend sent netId=%u hash=%08X",
+                        MpLog(MP_LOG_MODEL, "model resend sent netId=%u hash=%08X",
                             req->netId, req->modelHash);
                     }
                 }
@@ -3938,10 +3942,10 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             }
             const NetWelcomePayload* w = (const NetWelcomePayload*)payload;
             if (w->assignedNetId == 0 || w->assignedNetId > NET_MAX_PLAYERS) {
-                debugFilePrint("MP: welcome bad netId=%u", w->assignedNetId);
+                MpLogAlways(MP_LOG_HANDSHAKE, "welcome bad netId=%u", w->assignedNetId);
                 return;
             }
-            debugFilePrint("MP: welcome received netId=%u objNet=%u map=%d",
+            MpLog(MP_LOG_HANDSHAKE, "welcome received netId=%u objNet=%u map=%d",
                 w->assignedNetId, w->objNetId, w->map.mapId);
             gMpSession.localNetId = w->assignedNetId;
             gMpSession.currentMapId = w->map.mapId;
@@ -3971,7 +3975,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             // host broadcasts include us — but the count lives on host, not
             // here. Client never uses numPlayers.
             gMpSession.numPlayers = selfIdx + 1;
-            debugFilePrint("MPDBG welcome: dude=%p pid=0x%X pt=%d tile=%d elev=%d hidden=%d st=%d carry=%d weight=%d",
+            MpLog(MP_LOG_HANDSHAKE, "welcome: dude=%p pid=0x%X pt=%d tile=%d elev=%d hidden=%d st=%d carry=%d weight=%d",
                 (void*)gDude,
                 gDude != nullptr ? gDude->pid : 0,
                 gDude != nullptr ? objectTypeFromPid(gDude->pid) : -1,
@@ -4051,7 +4055,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                     // with the authoritative numbers.
                     MpReplayLocalAttackResult(evt->arg1, evt->arg2, evt->arg3);
                 } else {
-                    debugFilePrint("MP: attack result remote netId=%u dmg=%d flags=0x%X",
+                    MpLog(MP_LOG_COMBAT, "attack result remote netId=%u dmg=%d flags=0x%X",
                         evt->netId, evt->arg1, evt->arg2);
                 }
                 break;
@@ -4063,7 +4067,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                     // effect. Snap the local dude to the host's
                     // authoritative position so the next click targets from
                     // the same space the host will resolve from.
-                    debugFilePrint("MP: attack rejected targetNetId=%u tile=%d elev=%d",
+                    MpLogAlways(MP_LOG_COMBAT, "attack rejected targetNetId=%u tile=%d elev=%d",
                         (unsigned)evt->arg3, evt->arg1, evt->arg2);
                     if (gDude != nullptr && hexGridTileIsValid(evt->arg1)
                         && elevationIsValid(evt->arg2)
@@ -4071,12 +4075,12 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                             || gDude->elevation != evt->arg2)) {
                         reg_anim_clear(gDude);
                         objectSetLocation(gDude, evt->arg1, evt->arg2, nullptr);
-                        debugFilePrint("MP: attack rejection snap dude tile=%d->%d elev=%d",
+                        MpLogAlways(MP_LOG_COMBAT, "attack rejection snap dude tile=%d->%d elev=%d",
                             gDude->tile, evt->arg1, evt->arg2);
                     }
                     displayMonitorAddMessage("Attack failed - target unreachable.");
                 } else {
-                    debugFilePrint("MP: attack rejected remote netId=%u tile=%d",
+                    MpLogAlways(MP_LOG_COMBAT, "attack rejected remote netId=%u tile=%d",
                         evt->netId, evt->arg1);
                 }
                 break;
@@ -4098,7 +4102,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                 break;
             }
             default:
-                debugFilePrint("MP: player event unknown opcode=%u", evt->opcode);
+                MpLog(MP_LOG_MISC, "player event unknown opcode=%u", evt->opcode);
                 break;
             }
             break;
@@ -4171,7 +4175,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             // The host could not load the target map. The session stays on the
             // current map; the client must not sit in CLIENT_SYNCING waiting
             // for a MAP_CHANGED that will never arrive.
-            debugFilePrint("MP: map change abort received state=%d map=%d",
+            MpLogAlways(MP_LOG_MISC, "map change abort received state=%d map=%d",
                 gMpSession.state, gMpSession.currentMapId);
             if (gMpSession.state == MP_STATE_CLIENT_SYNCING) {
                 // Only reachable if a MAP_CHANGED was never applied (the
@@ -4236,7 +4240,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
         }
         case NET_PKT_COMBAT_MOVE_RESULT: {
             if (payloadLen < sizeof(NetCombatMoveResultPayload)) {
-                debugFilePrint("MP: combat move result bad length=%zu", payloadLen);
+                MpLogAlways(MP_LOG_COMBAT, "combat move result bad length=%zu", payloadLen);
                 return;
             }
             MpCombatOnMoveResult((const NetCombatMoveResultPayload*)payload);
@@ -4244,7 +4248,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
         }
         case NET_PKT_FLOAT_MESSAGE: {
             if (payloadLen < sizeof(NetFloatMessagePayload)) {
-                debugFilePrint("MP: float message bad length=%zu", payloadLen);
+                MpLogAlways(MP_LOG_MISC, "float message bad length=%zu", payloadLen);
                 return;
             }
             MpCombatOnFloatMessage((const NetFloatMessagePayload*)payload);
@@ -4252,7 +4256,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
         }
         case NET_PKT_GVAR_SNAPSHOT: {
             if (payloadLen < sizeof(NetGvarSnapshotPayload)) {
-                debugFilePrint("MP: gvar snapshot bad length=%zu", payloadLen);
+                MpLogAlways(MP_LOG_SCRIPT, "gvar snapshot bad length=%zu", payloadLen);
                 return;
             }
             mpGvarOnSnapshot((const NetGvarSnapshotPayload*)payload, payloadLen);
@@ -4260,7 +4264,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
         }
         case NET_PKT_GVAR_CHANGE: {
             if (payloadLen < sizeof(NetGvarChangePayload)) {
-                debugFilePrint("MP: gvar change bad length=%zu", payloadLen);
+                MpLogAlways(MP_LOG_SCRIPT, "gvar change bad length=%zu", payloadLen);
                 return;
             }
             mpGvarOnChange((const NetGvarChangePayload*)payload);
@@ -4268,7 +4272,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
         }
         case NET_PKT_COMBAT_MESSAGE: {
             if (payloadLen == 0 || payloadLen > 256) {
-                debugFilePrint("MP: combat message bad length=%zu", payloadLen);
+                MpLogAlways(MP_LOG_COMBAT, "combat message bad length=%zu", payloadLen);
                 return;
             }
             MpCombatOnMonitorMessage((const char*)payload, payloadLen);
@@ -4276,12 +4280,12 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
         }
         case NET_PKT_CHAT_MESSAGE: {
             if (payloadLen != sizeof(NetChatMessagePayload)) {
-                debugFilePrint("MPCHAT: client reject bad length=%zu", payloadLen);
+                MpLogAlways(MP_LOG_CHAT, "client reject bad length=%zu", payloadLen);
                 return;
             }
             const NetChatMessagePayload* in = (const NetChatMessagePayload*)payload;
             if (in->senderNetId == 0 || in->senderNetId > NET_MAX_PLAYERS) {
-                debugFilePrint("MPCHAT: client reject bad sender netId=%u", in->senderNetId);
+                MpLogAlways(MP_LOG_CHAT, "client reject bad sender netId=%u", in->senderNetId);
                 return;
             }
             MpChatClientOnIncoming(in->senderNetId, in->text);
@@ -4311,7 +4315,7 @@ void MpSendPlayerAction(uint8_t action, uint32_t targetNetId, int32_t tile, int3
     // carries stale-map coordinates that would apply to a freshly respawned
     // avatar on the host. Drop actions until PLAYING resumes.
     if (gMpSession.state != MP_STATE_CLIENT_PLAYING) {
-        debugFilePrint("MP: player action dropped state=%d action=%d tile=%d elev=%d",
+        MpLogAlways(MP_LOG_NET, "player action dropped state=%d action=%d tile=%d elev=%d",
             gMpSession.state, action, tile, elevation);
         return;
     }
@@ -4498,7 +4502,7 @@ void MpSendSkillUseFeedback(uint8_t netId, int messageId, int arg2, int arg3, in
     payload.arg4 = (uint32_t)fade;
     NetSendPacket(p->peer, NET_CHANNEL_RELIABLE, NET_PKT_PLAYER_EVENT,
         &payload, sizeof(payload));
-    debugFilePrint("MP: skill use feedback sent netId=%u msg=%d arg2=%d fade=%d",
+    MpLog(MP_LOG_NET, "skill use feedback sent netId=%u msg=%d arg2=%d fade=%d",
         netId, messageId, arg2, fade);
 }
 
@@ -4517,7 +4521,7 @@ static void mpBroadcastPlayerStatus(uint8_t netId, bool downed, int32_t hp)
     payload.arg4 = 0;
     NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE,
         NET_PKT_PLAYER_EVENT, &payload, sizeof(payload));
-    debugFilePrint("MP: player status broadcast netId=%u downed=%d hp=%d",
+    MpLog(MP_LOG_COMBAT, "player status broadcast netId=%u downed=%d hp=%d",
         netId, downed ? 1 : 0, hp);
 }
 
@@ -4542,7 +4546,7 @@ static void mpCheckAllPlayersDown()
         }
     }
     if (connected > 0 && downedCount >= connected) {
-        debugFilePrint("MP: GAME OVER — all %d players downed", connected);
+        MpLog(MP_LOG_COMBAT, "GAME OVER — all %d players downed", connected);
         NetPlayerEventPayload payload;
         payload.opcode = NET_PLAYER_EVENT_GAME_OVER;
         payload.netId = 0;
@@ -4585,14 +4589,14 @@ void MpPlayerDown(Object* critter)
         netId = gMpSession.localNetId;
     }
     if (netId == 0 || netId > NET_MAX_PLAYERS) {
-        debugFilePrint("MP: downed request without player netId critter=%p",
+        MpLog(MP_LOG_COMBAT, "downed request without player netId critter=%p",
             (void*)critter);
         return;
     }
 
     MultiplayerPlayer* player = &gMpSession.players[netId - 1];
     if (player->downed) {
-        debugFilePrint("MP: downed ignored (already downed) netId=%u", netId);
+        MpLogAlways(MP_LOG_COMBAT, "downed ignored (already downed) netId=%u", netId);
         return;
     }
 
@@ -4602,7 +4606,7 @@ void MpPlayerDown(Object* critter)
     critter->data.critter.combat.results |= DAM_DEAD;
     mpApplyDownedVisual(critter, true);
 
-    debugFilePrint("MP: player downed netId=%u critter=%p tile=%d fid=0x%X",
+    MpLog(MP_LOG_COMBAT, "player downed netId=%u critter=%p tile=%d fid=0x%X",
         netId, (void*)critter, critter->tile, critter->fid);
 
     if (gMpIsHost) {
@@ -4655,7 +4659,7 @@ void MpCombatEndReviveDowned()
             interfaceRenderHitPoints(true);
         }
 
-        debugFilePrint("MP: player revived netId=%u hp=%d/%d fid=0x%X",
+        MpLog(MP_LOG_COMBAT, "player revived netId=%u hp=%d/%d fid=0x%X",
             p->netId, reviveHp, maxHp, critter->fid);
         // The monitor message mirrors to every client while combat runs.
         displayMonitorAddMessage("A downed player gets back up!");
@@ -4699,12 +4703,12 @@ void MpDebugApplyHeal(Object* critter, int value)
         mpRestoreStandingVisual(critter, p->downedOrigFid, true);
         _dude_standup(critter);
         p->downedOrigFid = 0;
-        debugFilePrint("MPDBG: heal revived netId=%u hp=%d", p->netId, critter->data.critter.hp);
+        MpLog(MP_LOG_COMBAT, "MPDBG: heal revived netId=%u hp=%d", p->netId, critter->data.critter.hp);
         displayMonitorAddMessage("A downed player gets back up!");
         mpBroadcastPlayerStatus(p->netId, false, critter->data.critter.hp);
     } else {
         critter->data.critter.hp = newHp;
-        debugFilePrint("MPDBG: heal applied obj=%p hp=%d->%d", critter, hp, newHp);
+        MpLog(MP_LOG_COMBAT, "MPDBG: heal applied obj=%p hp=%d->%d", critter, hp, newHp);
     }
 }
 
@@ -4717,7 +4721,7 @@ void MpDebugApplyApRefill(Object* critter)
     }
     int maxAp = critterGetStat(critter, STAT_MAXIMUM_ACTION_POINTS);
     critter->data.critter.combat.ap = maxAp;
-    debugFilePrint("MPDBG: ap refill applied obj=%p ap=%d", critter, maxAp);
+    MpLog(MP_LOG_COMBAT, "MPDBG: ap refill applied obj=%p ap=%d", critter, maxAp);
 }
 
 // Client: a player's downed state changed (host authoritative).
@@ -4731,7 +4735,7 @@ void MpApplyPlayerStatus(const NetPlayerStatusPayload* s)
     if (s->netId != gMpSession.localNetId) {
         // Remote player downed/revived — their visual arrives through the
         // state broadcast; nothing to apply for a non-local avatar.
-        debugFilePrint("MP: player status remote netId=%u downed=%d hp=%d",
+        MpLog(MP_LOG_COMBAT, "player status remote netId=%u downed=%d hp=%d",
             s->netId, s->downed, s->hp);
         return;
     }
@@ -4741,7 +4745,7 @@ void MpApplyPlayerStatus(const NetPlayerStatusPayload* s)
     p->downed = s->downed != 0;
 
     if (dude == nullptr) {
-        debugFilePrint("MP: player status self netId=%u downed=%d (no dude yet)",
+        MpLog(MP_LOG_COMBAT, "player status self netId=%u downed=%d (no dude yet)",
             s->netId, s->downed);
         return;
     }
@@ -4758,7 +4762,7 @@ void MpApplyPlayerStatus(const NetPlayerStatusPayload* s)
         // Guarantee the lying visual even if the unreliable state packet is
         // lost — the host heartbeat re-sends it within 2s either way.
         mpApplyDownedVisual(dude, true);
-        debugFilePrint("MP: player status self downed hp=0 fid=0x%X", dude->fid);
+        MpLog(MP_LOG_COMBAT, "player status self downed hp=0 fid=0x%X", dude->fid);
         win_timed_msg("You have been downed!", COLOR_RED);
     } else {
         dude->data.critter.hp = s->hp;
@@ -4772,7 +4776,7 @@ void MpApplyPlayerStatus(const NetPlayerStatusPayload* s)
         _dude_standup(dude);
         p->downedOrigFid = 0;
         interfaceRenderHitPoints(true);
-        debugFilePrint("MP: player status self revived hp=%d fid=0x%X", s->hp, dude->fid);
+        MpLog(MP_LOG_COMBAT, "player status self revived hp=%d fid=0x%X", s->hp, dude->fid);
         win_timed_msg("You get back up!", COLOR_WHITE);
     }
 }
@@ -4784,7 +4788,7 @@ void MpApplyGameOver(const NetGameOverPayload* payload)
     if (!gMpIsClient || payload == nullptr) {
         return;
     }
-    debugFilePrint("MP: game over received — returning to main menu");
+    MpLog(MP_LOG_COMBAT, "game over received — returning to main menu");
     win_timed_msg("Everyone is downed — game over", COLOR_RED);
     _game_user_wants_to_quit = GAME_QUIT_REQUEST_MAIN_MENU;
 }
@@ -4895,7 +4899,7 @@ static void mpDropDiagDump()
                     && obj->tile == gMpDropDiagTile
                     && obj->elevation == gMpDropDiagElevation;
                 if (atTile || obj->pid == gMpDropDiagPid) {
-                    debugFilePrint("MP: dropdiag pid=0x%X fid=0x%X tile=%d elev=%d owner=%p flags=0x%X %s",
+                    MpLog(MP_LOG_OBJECT, "dropdiag pid=0x%X fid=0x%X tile=%d elev=%d owner=%p flags=0x%X %s",
                         obj->pid, obj->fid, obj->tile, obj->elevation,
                         (void*)obj->owner, obj->flags,
                         atTile ? "(at drop tile)" : "(pid match)");
@@ -4904,7 +4908,7 @@ static void mpDropDiagDump()
             }
         }
     } else if (gMpDropDiagLastDump != 0) {
-        debugFilePrint("MP: dropdiag watch ended");
+        MpLog(MP_LOG_OBJECT, "dropdiag watch ended");
         gMpDropDiagLastDump = 0;
         gMpDropDiagTile = -1;
         gMpDropDiagPid = 0;
@@ -4954,7 +4958,7 @@ void MpBroadcastObjectStateFor(Object* obj)
     }
     NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE,
         NET_PKT_OBJECT_STATE_UPDATE, &state, sizeof(state));
-    debugFilePrint("MP: object state forced netId=%u pid=0x%X tile=%d team=%d",
+    MpLog(MP_LOG_SYNC, "object state forced netId=%u pid=0x%X tile=%d team=%d",
         state.netId, state.pid, state.tile, state.combatTeam);
     // Keep the sweep's record in sync so it does not re-send the same state.
     int oldIndex = mpHostFindObjectRecord(state.netId);
@@ -5019,14 +5023,14 @@ void MpBroadcastObjectStates()
                         if (nowMs - last[found].ms > 500 || key != last[found].key) {
                             last[found].ms = nowMs;
                             last[found].key = key;
-                            debugFilePrint("MPDIAG host broadcast netId=%u pid=0x%X tile=%d fid=0x%X flags=0x%X hp=%d",
+                            MpLog(MP_LOG_SYNC, "host broadcast netId=%u pid=0x%X tile=%d fid=0x%X flags=0x%X hp=%d",
                                 state.netId, state.pid, state.tile, state.fid, state.flags, state.hp);
                         }
                     } else if (freeSlot >= 0) {
                         last[freeSlot].netId = state.netId;
                         last[freeSlot].ms = nowMs;
                         last[freeSlot].key = key;
-                        debugFilePrint("MPDIAG host broadcast netId=%u pid=0x%X tile=%d fid=0x%X flags=0x%X hp=%d (first)",
+                        MpLog(MP_LOG_SYNC, "host broadcast netId=%u pid=0x%X tile=%d fid=0x%X flags=0x%X hp=%d (first)",
                             state.netId, state.pid, state.tile, state.fid, state.flags, state.hp);
                     }
                 }
@@ -5070,7 +5074,7 @@ void MpBroadcastObjectStates()
             }
         }
         if (!isPlayer && objectTypeFromFid(oldRecord.state.fid) != OBJ_TYPE_INTERFACE) {
-            debugFilePrint("MP: object removed broadcast netId=%u pid=0x%X fid=0x%X tile=%d",
+            MpLog(MP_LOG_SYNC, "object removed broadcast netId=%u pid=0x%X fid=0x%X tile=%d",
                 oldRecord.netId, oldRecord.state.pid, oldRecord.state.fid, oldRecord.state.tile);
             NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE,
                 NET_PKT_OBJECT_REMOVED, &oldRecord.netId, sizeof(oldRecord.netId));
@@ -5115,7 +5119,7 @@ void MpBroadcastMapFullSync(ENetPeer* toPeer)
         }
         obj = objectFindNext();
     }
-    debugFilePrint("MP: full sync objects=%zu sent=%zu skipNoNetId=%d skipHidden=%d skipInventory=%d skipOther=%d",
+    MpLog(MP_LOG_SYNC, "full sync objects=%zu sent=%zu skipNoNetId=%d skipHidden=%d skipInventory=%d skipOther=%d",
         objects.size(), objects.size(), skipNoNetId, skipHidden, skipInventory, skipOther);
 
     uint32_t syncId = ++gMpSession.nextFullSyncId;
@@ -5295,7 +5299,7 @@ void MpBroadcastMapChanged(int32_t mapId)
     }
     NetMapChangedPayload p;
     mpBuildMapChangedPayload(&p, mapId);
-    debugFilePrint("MP: broadcast map changed map=%d enteringTile=%d elev=%d",
+    MpLog(MP_LOG_SYNC, "broadcast map changed map=%d enteringTile=%d elev=%d",
         mapId, p.map.enteringTile, p.map.enteringElevation);
     NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE, NET_PKT_MAP_CHANGED, &p, sizeof(p));
 }
@@ -5305,7 +5309,7 @@ void MpBroadcastMapChangeAbort()
     if (!gMpIsHost || gMpSession.enetHost == nullptr) {
         return;
     }
-    debugFilePrint("MP: broadcast map change abort map=%d", gMapHeader.index);
+    MpLogAlways(MP_LOG_SYNC, "broadcast map change abort map=%d", gMapHeader.index);
     NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE, NET_PKT_MAP_CHANGE_ABORT, nullptr, 0);
 }
 
@@ -5314,7 +5318,7 @@ void MpPrepareForMapChange()
     if (!gMpIsHost) {
         return;
     }
-    debugFilePrint("MP: prepare map change begin map=%d", gMapHeader.index);
+    MpLog(MP_LOG_SYNC, "prepare map change begin map=%d", gMapHeader.index);
 
     // Co-op: no dialogue or barter survives a map transition.
     MpDialogReset();
@@ -5334,7 +5338,7 @@ void MpPrepareForMapChange()
     for (int index = 1; index < NET_MAX_PLAYERS; index++) {
         MultiplayerPlayer* player = &gMpSession.players[index];
         if (player->isConnected && player->obj != nullptr) {
-            debugFilePrint("MP: prepare map change detach netId=%u", player->netId);
+            MpLog(MP_LOG_SYNC, "prepare map change detach netId=%u", player->netId);
             if (MpProfileGetRuntime(player->netId) != nullptr) {
                 MpProfileDetachAvatar(player->netId);
             } else {
@@ -5355,7 +5359,7 @@ void MpPrepareForMapChange()
         }
     }
     gMpHostObjectRecords.clear();
-    debugFilePrint("MP: prepare map change done");
+    MpLog(MP_LOG_SYNC, "prepare map change done");
 }
 
 void MpFinishHostMapChange()
@@ -5363,7 +5367,7 @@ void MpFinishHostMapChange()
     if (!gMpIsHost) {
         return;
     }
-    debugFilePrint("MP: finish map change begin map=%d", gMapHeader.index);
+    MpLog(MP_LOG_SYNC, "finish map change begin map=%d", gMapHeader.index);
 
     // Co-op: loot/steal sessions target objects of the old map — close them
     // all (no XP; the targets died with the map).
@@ -5401,7 +5405,7 @@ void MpFinishHostMapChange()
         }
         MpPlayerRuntime* runtime = MpProfileGetRuntime(player->netId);
         if (runtime == nullptr) {
-            debugFilePrint("MP: finish map change no runtime netId=%u", player->netId);
+            MpLog(MP_LOG_SYNC, "finish map change no runtime netId=%u", player->netId);
             continue;
         }
         MpPlayerProfile profileCopy = runtime->profile;
@@ -5410,10 +5414,10 @@ void MpFinishHostMapChange()
         runtime = MpProfileCreateRuntime(player->netId, profileCopy,
             playerTile, elevation, rotation);
         if (runtime == nullptr) {
-            debugFilePrint("MP: finish map change respawn failed netId=%u", player->netId);
+            MpLogAlways(MP_LOG_SYNC, "finish map change respawn failed netId=%u", player->netId);
             continue;
         }
-        debugFilePrint("MP: finish map change respawned netId=%u tile=%d", player->netId, runtime->object->tile);
+        MpLog(MP_LOG_SYNC, "finish map change respawned netId=%u tile=%d", player->netId, runtime->object->tile);
         player->obj = runtime->object;
         player->lastSafeTile = runtime->object->tile;
         player->lastSafeElevation = runtime->object->elevation;
@@ -5430,7 +5434,7 @@ void MpFinishHostMapChange()
     MpResetObjectSyncBaseline();
     gMpSuppressExitGridCheck = false;
     mpSetDudeInventoryProtected(false);
-    debugFilePrint("MP: finish map change done");
+    MpLog(MP_LOG_SYNC, "finish map change done");
     // mpDebugDumpLightState("host-after-finish");
 }
 
@@ -5597,7 +5601,7 @@ static void mpClearClientMapObjectsForFullSync()
             keptInventoryItems++;
         }
     }
-    debugFilePrint("MPDBG clear: destroying=%d keptDudeItems=%d keptStatic=%d",
+    MpLog(MP_LOG_MISC, "clear: destroying=%d keptDudeItems=%d keptStatic=%d",
         (int)objects.size(), keptInventoryItems, keptStaticObjects);
 
     for (Object* obj : objects) {
@@ -5684,7 +5688,7 @@ static Object* mpApplyObjectStateInternal(const NetMapFullSyncObjectPayload* sta
     // Local UI helpers (hex cursor etc.) are never sent by the host; a stray
     // INTERFACE-type state is corruption — refuse to materialize it.
     if (objectTypeFromFid(state->fid) == OBJ_TYPE_INTERFACE) {
-        debugFilePrint("MPDBG: rejected interface-type object state netId=%u pid=0x%X",
+        MpLogAlways(MP_LOG_MISC, "MPDBG: rejected interface-type object state netId=%u pid=0x%X",
             state->netId, state->pid);
         return nullptr;
     }
@@ -5694,12 +5698,12 @@ static Object* mpApplyObjectStateInternal(const NetMapFullSyncObjectPayload* sta
     // and zero his stats); refuse to apply it.
     if (player != nullptr && player->isLocal
         && objectTypeFromFid(state->fid) != OBJ_TYPE_CRITTER) {
-        debugFilePrint("MPDBG reject non-critter state for local player: netId=%u pid=0x%X fid=0x%X",
+        MpLogAlways(MP_LOG_MISC, "reject non-critter state for local player: netId=%u pid=0x%X fid=0x%X",
             state->netId, state->pid, state->fid);
         return obj;
     }
     if (player != nullptr && player->isLocal) {
-        debugFilePrint("MPDBG apply local state: netId=%u pid=0x%X fid=0x%X tile=%d elev=%d objpid=0x%X",
+        MpLog(MP_LOG_SYNC, "apply local state: netId=%u pid=0x%X fid=0x%X tile=%d elev=%d objpid=0x%X",
             state->netId, state->pid, state->fid, state->tile, state->elevation,
             obj != nullptr ? obj->pid : 0);
     }
@@ -5771,14 +5775,14 @@ static Object* mpApplyObjectStateInternal(const NetMapFullSyncObjectPayload* sta
             if (nowMs - last[found].ms > 500 || key != last[found].key) {
                 last[found].ms = nowMs;
                 last[found].key = key;
-                debugFilePrint("MPDIAG client apply netId=%u pid=0x%X tile=%d fid=0x%X flags=0x%X hp=%d team=%d mode=%s",
+                MpLog(MP_LOG_SYNC, "client apply netId=%u pid=0x%X tile=%d fid=0x%X flags=0x%X hp=%d team=%d mode=%s",
                     state->netId, state->pid, state->tile, state->fid, state->flags, state->hp, state->combatTeam, mpDiagMode);
             }
         } else if (freeSlot >= 0) {
             last[freeSlot].netId = state->netId;
             last[freeSlot].ms = nowMs;
             last[freeSlot].key = key;
-            debugFilePrint("MPDIAG client apply netId=%u pid=0x%X tile=%d fid=0x%X flags=0x%X hp=%d mode=%s (first)",
+            MpLog(MP_LOG_SYNC, "client apply netId=%u pid=0x%X tile=%d fid=0x%X flags=0x%X hp=%d mode=%s (first)",
                 state->netId, state->pid, state->tile, state->fid, state->flags, state->hp, mpDiagMode);
         }
     }
@@ -5835,11 +5839,11 @@ void MpApplyObjectRemoved(uint32_t netId)
         gMpSession.netIdToObj[netId] = nullptr;
     }
     if (obj != nullptr && obj != gDude) {
-        debugFilePrint("MP: object removed applied netId=%u pid=0x%X tile=%d elev=%d",
+        MpLog(MP_LOG_SYNC, "object removed applied netId=%u pid=0x%X tile=%d elev=%d",
             netId, obj->pid, obj->tile, obj->elevation);
         mpDestroyNetworkObject(obj);
     } else {
-        debugFilePrint("MP: object removed miss netId=%u obj=%p",
+        MpLog(MP_LOG_SYNC, "object removed miss netId=%u obj=%p",
             netId, (void*)obj);
     }
 }
@@ -5977,7 +5981,7 @@ void MpApplyPlayerState(const NetPlayerStateUpdatePayload* s)
         uint32_t nowTicks = getTicks();
         if (nowTicks - gMpLocalHpLogTick > 500) {
             gMpLocalHpLogTick = nowTicks;
-            debugFilePrint("MP: local hp state %d->%d", oldLocalHp, obj->data.critter.hp);
+            MpLog(MP_LOG_SYNC, "local hp state %d->%d", oldLocalHp, obj->data.critter.hp);
         }
     }
     // Thin client: the AP bar no longer updates from local action writes (the
@@ -5999,7 +6003,7 @@ void MpApplyPlayerState(const NetPlayerStateUpdatePayload* s)
             uint32_t nowTicks = getTicks();
             if (nowTicks - gMpStateApLogTick > 500) {
                 gMpStateApLogTick = nowTicks;
-                debugFilePrint("MP: state ap %d->%d free=%d",
+                MpLog(MP_LOG_SYNC, "state ap %d->%d free=%d",
                     oldLocalAp, obj->data.critter.combat.ap, _combat_free_move);
             }
         }
@@ -6016,7 +6020,7 @@ void MpApplyPlayerState(const NetPlayerStateUpdatePayload* s)
             uint32_t nowTicks = getTicks();
             if (nowTicks - gMpStateBoundsLogTick > 2000) {
                 gMpStateBoundsLogTick = nowTicks;
-                debugFilePrint("MP: state bounds anomaly netId=%u hp=%d/%d ap=%d/%d",
+                MpLog(MP_LOG_SYNC, "state bounds anomaly netId=%u hp=%d/%d ap=%d/%d",
                     s->netId, obj->data.critter.hp, maxHp,
                     obj->data.critter.combat.ap, maxAp);
             }
@@ -6091,7 +6095,7 @@ void MpSyncCritterWeaponFid(Object* critter)
         if (objectSetFid(critter, fid, &rect) == 0) {
             tileWindowRefreshRect(&rect, critter->elevation);
         }
-        debugFilePrint("MP: weapon fid synced pid=0x%X anim=%d weapon=%d",
+        MpLog(MP_LOG_SYNC, "weapon fid synced pid=0x%X anim=%d weapon=%d",
             critter->pid, (int)animationTypeFromFid(critter->fid),
             (int)weaponAnimationCode);
     }
@@ -6283,10 +6287,10 @@ void MpApplyMapTileSync(const void* data, size_t dataLength)
 void MpApplyMapChanged(const NetMapSyncPayload* payload)
 {
     if (payload == nullptr || payload->mapId < 0) {
-        debugFilePrint("MP: apply map changed bad payload mapId=%d", payload != nullptr ? payload->mapId : -1);
+        MpLogAlways(MP_LOG_SYNC, "apply map changed bad payload mapId=%d", payload != nullptr ? payload->mapId : -1);
         return;
     }
-    debugFilePrint("MP: apply map changed begin map=%d name='%s'", payload->mapId, payload->mapName);
+    MpLog(MP_LOG_SYNC, "apply map changed begin map=%d name='%s'", payload->mapId, payload->mapName);
 
     // A passed vote's modal stays up showing the final tally until the map
     // change actually begins — close it now. The vote session is also reset:
@@ -6361,19 +6365,19 @@ void MpApplyMapChanged(const NetMapSyncPayload* payload)
         player->hasInitialState = false;
         MpRegisterObjNetId(runtime->object, player->objNetId);
         mpShowClientPlayer(runtime->object);
-        debugFilePrint("MP: apply map changed rebuilt avatar netId=%u tile=%d",
+        MpLog(MP_LOG_SYNC, "apply map changed rebuilt avatar netId=%u tile=%d",
             player->netId, runtime->object->tile);
     }
 
     int area = -1;
     if (wmMatchAreaContainingMapIdx(payload->mapId, &area) == 0 && wmTeleportToArea(area) == -1) {
-        debugFilePrint("MP: client could not synchronize world-map area for map=%d area=%d", payload->mapId, area);
+        MpLog(MP_LOG_SYNC, "client could not synchronize world-map area for map=%d area=%d", payload->mapId, area);
     }
     gMpSuppressExitGridCheck = false;
     mpSetDudeInventoryProtected(false);
     // The fresh MAP_FULL_SYNC will be appended under MP_STATE_CLIENT_SYNCING.
     mpEnterClientSync();
-    debugFilePrint("MP: apply map changed done state=syncing");
+    MpLog(MP_LOG_SYNC, "apply map changed done state=syncing");
 }
 
 // A passed vote resolved a transition to another tile/elevation of the
@@ -6387,7 +6391,7 @@ void MpOnMapElevationChange(const NetMapElevationPayload* payload)
         || !hexGridTileIsValid(payload->tile) || !elevationIsValid(payload->elevation)) {
         return;
     }
-    debugFilePrint("MP: map elevation change tile=%d elev=%d rot=%d",
+    MpLog(MP_LOG_SYNC, "map elevation change tile=%d elev=%d rot=%d",
         payload->tile, payload->elevation, payload->rotation);
     MpVoteHideUI();
     gVoteSession.state = VOTE_STATE_NONE;
@@ -6445,7 +6449,7 @@ void MpHostMirrorItemRemoval(Object* avatar, Object* item, int quantity)
         NetItemRemovePayload payload;
         payload.pid = remoteItem->pid;
         payload.quantity = remoteQty;
-        debugFilePrint("MP: item remove spread netId=%u pid=0x%X qty=%d",
+        MpLog(MP_LOG_SYNC, "item remove spread netId=%u pid=0x%X qty=%d",
             player->netId, remoteItem->pid, remoteQty);
         NetSendPacket(player->peer, NET_CHANNEL_RELIABLE, NET_PKT_ITEM_REMOVE, &payload, sizeof(payload));
     }
@@ -6461,7 +6465,7 @@ void MpHostMirrorItemRemoval(Object* avatar, Object* item, int quantity)
         NetItemRemovePayload payload;
         payload.pid = item->pid;
         payload.quantity = quantity;
-        debugFilePrint("MP: item remove relay netId=%u pid=0x%X qty=%d", player->netId, item->pid, quantity);
+        MpLog(MP_LOG_SYNC, "item remove relay netId=%u pid=0x%X qty=%d", player->netId, item->pid, quantity);
         NetSendPacket(player->peer, NET_CHANNEL_RELIABLE, NET_PKT_ITEM_REMOVE, &payload, sizeof(payload));
         break;
     }
@@ -6542,7 +6546,7 @@ void MpHostMirrorInventoryMove(Object* sourceAvatar, Object* destContainer,
                 NetItemRemovePayload payload;
                 payload.pid = losePids[i];
                 payload.quantity = loseQtys[i];
-                debugFilePrint("MP: item strip %s netId=%u pid=0x%X qty=%d",
+                MpLog(MP_LOG_SYNC, "item strip %s netId=%u pid=0x%X qty=%d",
                     isSource ? "relay" : "spread",
                     player->netId, losePids[i], loseQtys[i]);
                 NetSendPacket(player->peer, NET_CHANNEL_RELIABLE, NET_PKT_ITEM_REMOVE,
@@ -6573,7 +6577,7 @@ void MpHostMirrorInventoryMove(Object* sourceAvatar, Object* destContainer,
             _proto_dude_update_gender();
             bool animated = !gameUiIsDisabled();
             interfaceUpdateItems(animated, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
-            debugFilePrint("MP: item strip local dude cleaned up");
+            MpLog(MP_LOG_SYNC, "item strip local dude cleaned up");
         } else if (!isSource && oldWeapon != nullptr) {
             int flags = 0;
             if ((oldWeapon->flags & OBJECT_IN_LEFT_HAND) != 0) {
@@ -6594,7 +6598,7 @@ void MpHostMirrorInventoryMove(Object* sourceAvatar, Object* destContainer,
                     player->obj->fid & 0xFFF, animationTypeFromFid(player->obj->fid),
                     WEAPON_ANIMATION_NONE, rotationFromFid(player->obj->fid)), &unarmRect);
             }
-            debugFilePrint("MP: item strip avatar fid corrected netId=%u", player->netId);
+            MpLog(MP_LOG_SYNC, "item strip avatar fid corrected netId=%u", player->netId);
         }
     }
 }
@@ -6613,10 +6617,10 @@ void MpOnItemRemove(const NetItemRemovePayload* payload)
         }
     }
     if (item == nullptr) {
-        debugFilePrint("MP: item remove no item pid=0x%X qty=%d", payload->pid, payload->quantity);
+        MpLogAlways(MP_LOG_SYNC, "item remove no item pid=0x%X qty=%d", payload->pid, payload->quantity);
         return;
     }
-    debugFilePrint("MP: item remove applied pid=0x%X qty=%d", payload->pid, payload->quantity);
+    MpLog(MP_LOG_SYNC, "item remove applied pid=0x%X qty=%d", payload->pid, payload->quantity);
     int quantity = payload->quantity;
     int have = itemGetQuantity(gDude, item);
     if (quantity > have) {
@@ -6661,7 +6665,7 @@ void MpOnItemRemove(const NetItemRemovePayload* payload)
             objectSetFid(gDude, buildFid(objectTypeFromFid(gDude->fid),
                 gDude->fid & 0xFFF, animationTypeFromFid(gDude->fid),
                 WEAPON_ANIMATION_NONE, rotationFromFid(gDude->fid)), &unarmRect);
-            debugFilePrint("MP: item remove client force-unarmed pid=0x%X", payload->pid);
+            MpLog(MP_LOG_SYNC, "item remove client force-unarmed pid=0x%X", payload->pid);
         }
         bool animated = !gameUiIsDisabled();
         interfaceUpdateItems(animated, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
@@ -6803,13 +6807,13 @@ void MpToHitQuery(Object* target, int hitMode)
     query.targetNetId = MpGetObjNetId(target);
     query.hitMode = (uint8_t)hitMode;
     if (query.targetNetId == 0) {
-        debugFilePrint("MP: to-hit query dropped (target has no netId) mode=%d", hitMode);
+        MpLogAlways(MP_LOG_COMBAT, "to-hit query dropped (target has no netId) mode=%d", hitMode);
         return;
     }
 
     NetSendPacket(gMpSession.hostPeer, NET_CHANNEL_RELIABLE,
         NET_PKT_TO_HIT_QUERY, &query, sizeof(query));
-    debugFilePrint("MP: to-hit query sent targetNetId=%u mode=%d",
+    MpLog(MP_LOG_COMBAT, "to-hit query sent targetNetId=%u mode=%d",
         query.targetNetId, query.hitMode);
 }
 
@@ -6895,7 +6899,7 @@ static void mpApplySessionElevationChange(const MapTransition* transition)
         || !hexGridTileIsValid(transition->tile) || !elevationIsValid(transition->elevation)) {
         return;
     }
-    debugFilePrint("MP: session elevation change tile=%d elev=%d rot=%d",
+    MpLog(MP_LOG_SYNC, "session elevation change tile=%d elev=%d rot=%d",
         transition->tile, transition->elevation, transition->rotation);
     for (int index = 0; index < NET_MAX_PLAYERS; index++) {
         MultiplayerPlayer* player = &gMpSession.players[index];
@@ -7004,16 +7008,16 @@ int MpOnNetworkedPlayerTransitionRequested(Object* obj, MapTransition* transitio
 
     MultiplayerPlayer* player = mpHostFindPlayerByObject(obj);
     if (player == nullptr || !player->isHandshaken) {
-        debugFilePrint("MP: networked transition rejected (no player) netObj=%u map=%d",
+        MpLogAlways(MP_LOG_VOTE, "networked transition rejected (no player) netObj=%u map=%d",
             MpGetObjNetId(obj), transition->map);
         return 0;
     }
     if (gVoteSession.state == VOTE_STATE_ACTIVE) {
-        debugFilePrint("MP: networked transition blocked (vote active) netId=%u map=%d",
+        MpLogAlways(MP_LOG_VOTE, "networked transition blocked (vote active) netId=%u map=%d",
             player->netId, transition->map);
         return 1;
     }
-    debugFilePrint("MP: networked transition vote start netId=%u map=%d tile=%d elev=%d",
+    MpLog(MP_LOG_VOTE, "networked transition vote start netId=%u map=%d tile=%d elev=%d",
         player->netId, transition->map, transition->tile, transition->elevation);
     // Start the vote BEFORE clearing the walk: the hook runs inside
     // _obj_connect_to_tile, and clearing a running move sequence re-places the

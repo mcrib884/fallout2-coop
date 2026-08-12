@@ -13,6 +13,7 @@
 #include "multiplayer.h"
 #include "multiplayer_combat.h"
 #include "multiplayer_dialog.h"
+#include "multiplayer_log.h"
 #include "object.h"
 #include "svga.h"
 #include "text_font.h"
@@ -65,16 +66,17 @@ void MpVoteReset()
 int MpVoteStart(const MapTransition* transition, uint8_t initiatorNetId)
 {
     if (!gMpIsHost) {
+        MpLogAlways(MP_LOG_VOTE, "vote start rejected (not host) initiator=%u", initiatorNetId);
         return -1;
     }
     if (gVoteSession.state == VOTE_STATE_ACTIVE) {
-        debugFilePrint("MP: vote start ignored (active) initiator=%u", initiatorNetId);
+        MpLogAlways(MP_LOG_VOTE, "vote start ignored (active) initiator=%u", initiatorNetId);
         return -1;
     }
     // Co-op: combat and map votes are mutually exclusive. A map change mid-
     // combat would tear down the combat list under the sequence.
     if (isInCombat() || MpCombatIsActive()) {
-        debugFilePrint("MP: vote start ignored (in combat) initiator=%u", initiatorNetId);
+        MpLogAlways(MP_LOG_VOTE, "vote start ignored (in combat) initiator=%u", initiatorNetId);
         return -1;
     }
 
@@ -90,7 +92,7 @@ int MpVoteStart(const MapTransition* transition, uint8_t initiatorNetId)
     gVoteSession.totalPlayers = (uint8_t)gMpSession.numPlayers;
     gVoteSession.voteWindow = -1;
     gVoteSession.isInitiator = (initiatorNetId == gMpSession.localNetId);
-    debugFilePrint("MP: vote start initiator=%u targetMap=%d tile=%d elev=%d players=%u local=%u",
+    MpLog(MP_LOG_VOTE, "vote start initiator=%u targetMap=%d tile=%d elev=%d players=%u local=%u",
         initiatorNetId, gVoteSession.transition.map, gVoteSession.transition.tile,
         gVoteSession.transition.elevation, gVoteSession.totalPlayers, gMpSession.localNetId);
 
@@ -158,7 +160,7 @@ void MpVoteCastVote(uint8_t voterNetId, uint8_t vote)
         // Only the initiator may change their auto-cast YES to NO (vetoing
         // their own proposal). Everyone else votes once.
         if (voterNetId != gVoteSession.initiatorNetId) {
-            debugFilePrint("MP: vote cast ignored (already voted) voter=%u vote=%d", voterNetId, vote);
+            MpLogAlways(MP_LOG_VOTE, "vote cast ignored (already voted) voter=%u vote=%d", voterNetId, vote);
             return;
         }
         if (oldVote == 1) {
@@ -167,7 +169,7 @@ void MpVoteCastVote(uint8_t voterNetId, uint8_t vote)
             gVoteSession.noCount--;
         }
     }
-    debugFilePrint("MP: vote cast voter=%u vote=%d (flip=%d)",
+    MpLog(MP_LOG_VOTE, "vote cast voter=%u vote=%d (flip=%d)",
         voterNetId, vote, oldVote != 0 ? 1 : 0);
     // vote payload: 0 = no, 1 = yes — matches our internal mapping (0 pending,
     // 1 yes, 2 no). Translate.
@@ -216,7 +218,7 @@ void MpVoteOnVoteTally(const NetVoteTallyPayload* payload)
     if (payload->totalCount != 0) {
         gVoteSession.totalPlayers = payload->totalCount;
     }
-    debugFilePrint("MP: vote tally received yes=%u no=%u total=%u",
+    MpLog(MP_LOG_VOTE, "vote tally received yes=%u no=%u total=%u",
         payload->yesCount, payload->noCount, payload->totalCount);
     // The next MpTick's MpVoteUpdateUI redraws the modal with the new numbers.
 }
@@ -250,7 +252,7 @@ void MpVoteResolve()
     }
 
     bool passed = (gVoteSession.noCount == 0) && (gVoteSession.yesCount == gVoteSession.totalPlayers);
-    debugFilePrint("MP: vote resolve passed=%d yes=%u no=%u total=%u",
+    MpLog(MP_LOG_VOTE, "vote resolve passed=%d yes=%u no=%u total=%u",
         passed ? 1 : 0, gVoteSession.yesCount, gVoteSession.noCount, gVoteSession.totalPlayers);
 
     NetVoteResultPayload result;
@@ -289,7 +291,7 @@ void MpVoteResolve()
                 int safeElevation = elevationIsValid(gVoteSession.lastSafeElevation)
                     ? gVoteSession.lastSafeElevation
                     : ip->obj->elevation;
-                debugFilePrint("MP: vote failed teleport initiator=%u from=%d to=%d elev=%d",
+                MpLogAlways(MP_LOG_VOTE, "vote failed teleport initiator=%u from=%d to=%d elev=%d",
                     gVoteSession.initiatorNetId, ip->obj->tile, safeTile, safeElevation);
                 gMpSuppressExitGridCheck = true;
                 objectSetLocation(ip->obj, safeTile, safeElevation, nullptr);
@@ -306,7 +308,7 @@ void MpVoteCancel()
     if (!gMpIsHost || gVoteSession.state != VOTE_STATE_ACTIVE) {
         return;
     }
-    debugFilePrint("MP: vote cancelled initiator=%u", gVoteSession.initiatorNetId);
+    MpLog(MP_LOG_VOTE, "vote cancelled initiator=%u", gVoteSession.initiatorNetId);
     gVoteSession.state = VOTE_STATE_CANCELLED;
     gMpSession.initiatorFrozen = false;
     MpVoteHideUI();
@@ -350,7 +352,7 @@ void MpVoteOnVoteStart(const NetVoteStartPayload* payload)
         gVoteSession.votes[gMpSession.localNetId - 1] = 1;
         gVoteSession.yesCount = 1;
     }
-    debugFilePrint("MP: vote start received initiator=%u targetMap=%d local=%u isInitiator=%d",
+    MpLog(MP_LOG_VOTE, "vote start received initiator=%u targetMap=%d local=%u isInitiator=%d",
         payload->initiatorNetId, payload->targetMap, gMpSession.localNetId,
         gVoteSession.isInitiator ? 1 : 0);
     if (gVoteSession.isInitiator) {
@@ -370,7 +372,7 @@ void MpVoteOnVoteResult(const NetVoteResultPayload* payload)
     if (!gMpIsClient || payload == nullptr) {
         return;
     }
-    debugFilePrint("MP: vote result received passed=%d yes=%u total=%u",
+    MpLog(MP_LOG_VOTE, "vote result received passed=%d yes=%u total=%u",
         payload->passed ? 1 : 0, payload->yesCount, payload->totalCount);
     if (gVoteSession.isInitiator) {
         gMpSession.initiatorFrozen = false;
@@ -401,7 +403,7 @@ void MpVoteSendCast(uint8_t vote)
     NetVoteCastPayload p;
     p.voterNetId = gMpSession.localNetId;
     p.vote = vote ? 1 : 0;
-    debugFilePrint("MP: vote cast sent vote=%d", p.vote);
+    MpLog(MP_LOG_VOTE, "vote cast sent vote=%d", p.vote);
     NetSendPacket(gMpSession.hostPeer, NET_CHANNEL_RELIABLE, NET_PKT_VOTE_CAST, &p, sizeof(p));
 }
 

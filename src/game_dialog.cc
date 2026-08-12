@@ -49,6 +49,7 @@
 #include "tile.h"
 #include "touch.h"
 #include "window_manager.h"
+#include "multiplayer_log.h"
 
 namespace fallout {
 
@@ -1024,7 +1025,7 @@ int _gdialogInitFromScript(int headFid, int reaction)
 
     // CE: Fix Barter button.
     if (_gdCreateHeadWindow() == -1) {
-        debugFilePrint("MPDIALOG init: head window creation failed — dialogue will abort");
+        MpLogAlways(MP_LOG_DIALOG, "init: head window creation failed — dialogue will abort");
     }
     tickersAdd(gameDialogTicker);
     _gdSetupFidget(headFid, reaction);
@@ -1331,7 +1332,7 @@ int _gdialogGo()
     }
 
     if (rc != -1) {
-        debugFilePrint("MPDIALOG gdialogGo entry director=%d replyList=%d entries=%d",
+        MpLog(MP_LOG_DIALOG, "gdialogGo entry director=%d replyList=%d entries=%d",
             MpDialogDirectorMode() ? 1 : 0, gDialogReplyMessageListId, gGameDialogOptionEntriesLength);
         if (MpDialogDirectorMode()) {
             // Co-op director host: the host is NOT a participant — capture
@@ -1344,7 +1345,7 @@ int _gdialogGo()
             // (head art, caps blit, red buttons). A failed window creation
             // must abort the dialogue cleanly instead of dereferencing a
             // stale window id.
-            debugFilePrint("MPDIALOG guard: modal without main dialog window — aborting dialogue");
+            MpLogAlways(MP_LOG_DIALOG, "guard: modal without main dialog window — aborting dialogue");
             rc = 0;
         } else {
             rc = gameDialogProcessUI();
@@ -2381,7 +2382,7 @@ static int mpDialogDirectorProcessChoice(int optionIndex)
     gGameDialogOptionEntriesLength = 0;
 
     uint32_t nodeSeqBefore = MpDialogHostNodeSeq();
-    debugFilePrint("MPDIALOG director choice session=%u node=%u opt=%d proc=%d program=%p exited=%d flags=0x%X",
+    MpLog(MP_LOG_DIALOG, "director choice session=%u node=%u opt=%d proc=%d program=%p exited=%d flags=0x%X",
         MpDialogHostSessionId(), MpDialogHostNodeSeq(), optionIndex,
         dialogOptionEntry->proc, (void*)gDialogReplyProgram,
         gDialogReplyProgram != nullptr ? (gDialogReplyProgram->exited ? 1 : 0) : -1,
@@ -2393,7 +2394,7 @@ static int mpDialogDirectorProcessChoice(int optionIndex)
         gDialogReplyProgram->flags &= ~(PROGRAM_FLAG_EXITED | PROGRAM_FLAG_STOPPED | PROGRAM_FLAG_FATAL_ERROR);
         programExecuteProcedure(gDialogReplyProgram, dialogOptionEntry->proc);
     }
-    debugFilePrint("MPDIALOG director choice done before=%u after=%u flags=0x%X postEntries=%d postReplyList=%d ip=%d",
+    MpLog(MP_LOG_DIALOG, "director choice done before=%u after=%u flags=0x%X postEntries=%d postReplyList=%d ip=%d",
         nodeSeqBefore, MpDialogHostNodeSeq(),
         gDialogReplyProgram != nullptr ? gDialogReplyProgram->flags : 0u,
         gGameDialogOptionEntriesLength, gDialogReplyMessageListId,
@@ -4123,7 +4124,7 @@ static void mpDialogNodeReadyCapture()
     if (!gMpActive || !gMpIsHost) {
         return;
     }
-    debugFilePrint("MPDIALOG capture entry active=%d director=%d replyList=%d entries=%d",
+    MpLog(MP_LOG_DIALOG, "capture entry active=%d director=%d replyList=%d entries=%d",
         _gdialogActive() ? 1 : 0, MpDialogDirectorMode() ? 1 : 0,
         gDialogReplyMessageListId, gGameDialogOptionEntriesLength);
     // Gate on the real dialogue states, not just the session: the FIRST node
@@ -4133,7 +4134,7 @@ static void mpDialogNodeReadyCapture()
     // modal, join modal, parked director) has a live session. Dropping any
     // of them stalls or kills the synchronized conversation.
     if (!_gdialogActive() && !MpDialogDirectorMode() && !MpDialogHostActive()) {
-        debugFilePrint("MPDIALOG capture dropped (not active, not director, no session)");
+        MpLogAlways(MP_LOG_DIALOG, "capture dropped (not active, not director, no session)");
         return;
     }
 
@@ -5064,7 +5065,7 @@ int _talkToRefreshDialogWindowRect(Rect* rect)
     // A failed _gdCreateHeadWindow otherwise makes this a null-pointer
     // memcpy (windowGetBuffer(-1) garbage) — turn it into a logged abort.
     if (gGameDialogWindow == -1) {
-        debugFilePrint("MPDIALOG guard: caps render without main window (rect %d,%d,%d,%d)",
+        MpLog(MP_LOG_DIALOG, "guard: caps render without main window (rect %d,%d,%d,%d)",
             rect->left, rect->top, rect->right, rect->bottom);
         return -1;
     }

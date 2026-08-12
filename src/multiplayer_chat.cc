@@ -37,6 +37,7 @@
 #include "mouse.h"
 #include "multiplayer.h"
 #include "multiplayer_debug.h"
+#include "multiplayer_log.h"
 #include "net.h"
 #include "obj_types.h"
 #include "svga.h"
@@ -182,7 +183,7 @@ void mpChatFloatMessage(uint8_t netId, const char* text)
     Object* obj = mpChatSenderCritter(netId);
     if (obj == nullptr || (obj->flags & OBJECT_HIDDEN) != 0
         || obj->elevation != gElevation) {
-        debugFilePrint("MPCHAT: float skipped netId=%u obj=%p", netId, (void*)obj);
+        MpLog(MP_LOG_CHAT, "float skipped netId=%u obj=%p", netId, (void*)obj);
         return;
     }
     char buffer[MP_CHAT_MESSAGE_MAX_LENGTH + 1];
@@ -195,7 +196,7 @@ void mpChatFloatMessage(uint8_t netId, const char* text)
     static int sFloatDiag = 0;
     if (sFloatDiag < 4) {
         sFloatDiag++;
-        debugFilePrint("MPCHAT: float netId=%u text='%s' color=%d", netId, buffer, COLOR_LIGHT_YELLOW);
+        MpLog(MP_LOG_CHAT, "float netId=%u text='%s' color=%d", netId, buffer, COLOR_LIGHT_YELLOW);
     }
 
     // Stack first: shift the critter's live floats up by the new float's
@@ -214,7 +215,7 @@ void mpChatFloatMessage(uint8_t netId, const char* text)
     static int sFloatInDiag = 0;
     if (sFloatInDiag < 20) {
         sFloatInDiag++;
-        debugFilePrint("MPCHAT: float in netId=%u obj=%p tile=%d elev=%d total=%d stackDy=%d",
+        MpLog(MP_LOG_CHAT, "float in netId=%u obj=%p tile=%d elev=%d total=%d stackDy=%d",
             netId, (void*)obj, obj->tile, obj->elevation, textObjectsGetCount(), stackDy);
     }
 
@@ -262,7 +263,7 @@ void mpChatFloatMessage(uint8_t netId, const char* text)
         static int sFloatOutDiag = 0;
         if (sFloatOutDiag < 20) {
             sFloatOutDiag++;
-            debugFilePrint("MPCHAT: float out netId=%u rc=0 rect=%d,%d-%d,%d liftDy=%d total=%d",
+            MpLog(MP_LOG_CHAT, "float out netId=%u rc=0 rect=%d,%d-%d,%d liftDy=%d total=%d",
                 netId, rect.left, rect.top, rect.right, rect.bottom, liftDy, textObjectsGetCount());
         }
     }
@@ -371,7 +372,7 @@ int mpChatWrapLine(const ChatLine& line, int maxTextWidth, char* display,
     static int sWrapDiag = 0;
     if (sWrapDiag < 8) {
         sWrapDiag++;
-        debugFilePrint("MPCHAT: wrap rows=%d width=%d text='%s'",
+        MpLog(MP_LOG_CHAT, "wrap rows=%d width=%d text='%s'",
             rows, maxTextWidth, display);
     }
     return rows;
@@ -551,7 +552,7 @@ void mpChatRedraw(int win, int width, int height)
                 static int sColorDiag = 0;
                 if (sColorDiag < 10) {
                     sColorDiag++;
-                    debugFilePrint("MPCHAT: name color netId=%u color=%d", line.netId, nameColor);
+                    MpLog(MP_LOG_CHAT, "name color netId=%u color=%d", line.netId, nameColor);
                 }
                 int colorLen = std::min(nameLen, rowEnd - rowStart);
                 char namePart[80];
@@ -628,7 +629,7 @@ void mpChatAppendTextInput(const char* utf8)
     static int sTextDiag = 0;
     if (sTextDiag < 20) {
         sTextDiag++;
-        debugFilePrint("MPCHAT: text input '%s'", utf8);
+        MpLog(MP_LOG_CHAT, "text input '%s'", utf8);
     }
     size_t len = strlen(gChatInput);
     while (*utf8 != '\0' && len < MP_CHAT_MESSAGE_MAX_LENGTH) {
@@ -694,7 +695,7 @@ int MpChatShow()
     int win = windowCreate(winX, winY, winWidth, winHeight, COLOR_BLACK,
         WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
     if (win == -1) {
-        debugFilePrint("MPCHAT: window create failed w=%d h=%d", winWidth, winHeight);
+        MpLogAlways(MP_LOG_CHAT, "window create failed w=%d h=%d", winWidth, winHeight);
         delete[] gChatBackground;
         gChatBackground = nullptr;
         return 0;
@@ -705,7 +706,7 @@ int MpChatShow()
     gChatScroll = 0;
     gChatInput[0] = '\0';
 
-    debugFilePrint("MPCHAT: open x=%d y=%d w=%d h=%d", winX, winY, winWidth, winHeight);
+    MpLog(MP_LOG_CHAT, "open x=%d y=%d w=%d h=%d", winX, winY, winWidth, winHeight);
 
     int sent = 0;
     SDL_StartTextInput();
@@ -730,7 +731,7 @@ int MpChatShow()
                 switch (event.key.keysym.scancode) {
                 case SDL_SCANCODE_RETURN:
                     if (gChatInput[0] != '\0') {
-                        debugFilePrint("MPCHAT: send text='%s'", gChatInput);
+                        MpLog(MP_LOG_CHAT, "send text='%s'", gChatInput);
                         MpChatSendMessage(gChatInput);
                         sent = 1;
                     }
@@ -816,7 +817,7 @@ int MpChatShow()
     gChatWindow = -1;
     delete[] gChatBackground;
     gChatBackground = nullptr;
-    debugFilePrint("MPCHAT: close input='%s' sent=%d", gChatInput, sent);
+    MpLog(MP_LOG_CHAT, "close input='%s' sent=%d", gChatInput, sent);
     return sent;
 }
 
@@ -857,7 +858,7 @@ void MpChatSendMessage(const char* text)
         return;
     }
 
-    debugFilePrint("MPCHAT: local send text='%s'", buffer);
+    MpLog(MP_LOG_CHAT, "local send text='%s'", buffer);
 
     if (!gMpActive) {
         // Single player: the chat is a combat-log viewer and the message
@@ -880,7 +881,7 @@ void MpChatSendMessage(const char* text)
             NetSendPacket(gMpSession.hostPeer, NET_CHANNEL_RELIABLE,
                 NET_PKT_CHAT_MESSAGE, &payload, sizeof(payload));
         } else {
-            debugFilePrint("MPCHAT: client send dropped (no host peer)");
+            MpLogAlways(MP_LOG_CHAT, "client send dropped (no host peer)");
         }
     } else {
         // Host: the host path handles append/float/relay in one place.
@@ -899,16 +900,16 @@ void MpChatHostOnMessage(uint8_t senderNetId, const char* text)
         return;
     }
     if (senderNetId == 0 || senderNetId > NET_MAX_PLAYERS) {
-        debugFilePrint("MPCHAT: host reject out-of-range sender netId=%u", senderNetId);
+        MpLogAlways(MP_LOG_CHAT, "host reject out-of-range sender netId=%u", senderNetId);
         return;
     }
     const MultiplayerPlayer* sender = &gMpSession.players[senderNetId - 1];
     if (!sender->isConnected) {
-        debugFilePrint("MPCHAT: host reject disconnected sender netId=%u", senderNetId);
+        MpLogAlways(MP_LOG_CHAT, "host reject disconnected sender netId=%u", senderNetId);
         return;
     }
 
-    debugFilePrint("MPCHAT: host relay netId=%u text='%s'", senderNetId, text);
+    MpLog(MP_LOG_CHAT, "host relay netId=%u text='%s'", senderNetId, text);
 
     mpChatAppendUserLine(senderNetId, text);
     mpChatFloatMessage(senderNetId, text);
@@ -937,7 +938,7 @@ void MpChatClientOnIncoming(uint8_t senderNetId, const char* text)
     if (!gMpIsClient || !gMpActive || text == nullptr || text[0] == '\0') {
         return;
     }
-    debugFilePrint("MPCHAT: client received netId=%u text='%s'", senderNetId, text);
+    MpLog(MP_LOG_CHAT, "client received netId=%u text='%s'", senderNetId, text);
     mpChatAppendUserLine(senderNetId, text);
     mpChatFloatMessage(senderNetId, text);
 }

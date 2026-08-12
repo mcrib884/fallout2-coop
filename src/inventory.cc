@@ -58,6 +58,7 @@
 #include "text_font.h"
 #include "tile.h"
 #include "window_manager.h"
+#include "multiplayer_log.h"
 
 namespace fallout {
 
@@ -1604,7 +1605,7 @@ void inventoryOpen()
 {
     if (isInCombat()) {
         if (gMpActive) {
-            debugFilePrint("MPINV: open attempt client=%d invenDudeIsDude=%d cost=%d ap=%d qp=%d",
+            MpLog(MP_LOG_COMBAT, "open attempt client=%d invenDudeIsDude=%d cost=%d ap=%d qp=%d",
                 gMpIsClient ? 1 : 0, _inven_dude == gDude ? 1 : 0,
                 inventoryGetInvenApCost(),
                 gDude != nullptr ? gDude->data.critter.combat.ap : -1,
@@ -1618,7 +1619,7 @@ void inventoryOpen()
             // mirror's own turn tracking: same rule as vanilla ÔÇö only the
             // acting player opens inventory during combat.
             if (!gMpCombat.turnActive || gMpCombat.whoseTurn != gMpSession.localNetId) {
-                debugFilePrint("MPINV: open blocked (not client's turn) turnActive=%d whoseTurn=%u local=%u",
+                MpLogAlways(MP_LOG_COMBAT, "open blocked (not client's turn) turnActive=%d whoseTurn=%u local=%u",
                     gMpCombat.turnActive ? 1 : 0, gMpCombat.whoseTurn, gMpSession.localNetId);
                 return;
             }
@@ -1636,7 +1637,7 @@ void inventoryOpen()
             int actionPointsRequired = inventoryGetInvenApCost();
             if (actionPointsRequired > 0 && actionPointsRequired > gDude->data.critter.combat.ap) {
                 if (gMpActive) {
-                    debugFilePrint("MPINV: open blocked (not enough AP) cost=%d ap=%d",
+                    MpLogAlways(MP_LOG_COMBAT, "open blocked (not enough AP) cost=%d ap=%d",
                         actionPointsRequired, gDude->data.critter.combat.ap);
                 }
                 inventoryDisplayMessage(19); // You don't have enough action points to use inventory.
@@ -1664,7 +1665,7 @@ void inventoryOpen()
                     interfaceRenderActionPoints(gDude->data.critter.combat.ap, _combat_free_move);
                 }
                 if (gMpActive) {
-                    debugFilePrint("MPINV: open consumed cost=%d apBefore=%d apAfter=%d client=%d",
+                    MpLog(MP_LOG_COMBAT, "open consumed cost=%d apBefore=%d apAfter=%d client=%d",
                         actionPointsRequired, apBefore, gDude->data.critter.combat.ap,
                         gMpIsClient ? 1 : 0);
                 }
@@ -3233,7 +3234,7 @@ void inventoryOpenUseItemOn(Object* targetObj)
                                             targetNetId, inventoryItem->item->pid,
                                             targetObj->elevation, 1);
                                     } else {
-                                        debugFilePrint("MPDBG: picker use-item-on no netId target pid=0x%X",
+                                        MpLog(MP_LOG_UI, "picker use-item-on no netId target pid=0x%X",
                                             targetObj->pid);
                                     }
                                 }
@@ -4767,7 +4768,7 @@ int inventoryOpenLooting(Object* looter, Object* target)
         && MpProfileIsNetworkPlayer(looter)) {
         uint32_t netId = MpCombatGetCritterPlayerNetId(looter);
         if (netId != 0) {
-            debugFilePrint("MPLOOT: script-requested loot netId=%u targetPid=0x%X",
+            MpLog(MP_LOG_LOOT, "script-requested loot netId=%u targetPid=0x%X",
                 netId, target != nullptr ? target->pid : 0);
             MpLootHostStart(netId, target, false);
             return 0;
@@ -6210,7 +6211,7 @@ void mpBarterTradeRefreshWithTables(Object* leftTable, Object* rightTable)
     if (win == -1) {
         return;
     }
-    debugFilePrint("MPBARTER refresh player=%d target=%d offer=%d req=%d",
+    MpLog(MP_LOG_DIALOG, "refresh player=%d target=%d offer=%d req=%d",
         _pud->length, _target_pud->length,
         leftTable != nullptr ? leftTable->data.inventory.length : -1,
         rightTable != nullptr ? rightTable->data.inventory.length : -1);

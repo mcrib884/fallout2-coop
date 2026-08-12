@@ -77,6 +77,7 @@
 #include "window_manager.h"
 #include "window_manager_private.h"
 #include "worldmap.h"
+#include "multiplayer_log.h"
 
 #if __APPLE__
 #include <TargetConditionals.h>
@@ -653,7 +654,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
     case KEY_UPPERCASE_A:
     case KEY_LOWERCASE_A:
         if (gMpActive) {
-            debugFilePrint("MPCOMBAT: A key pressed inCombat=%d uiDisabled=%d barEnabled=%d",
+            MpLog(MP_LOG_COMBAT, "A key pressed inCombat=%d uiDisabled=%d barEnabled=%d",
                 isInCombatMode ? 1 : 0, gameUiIsDisabled() ? 1 : 0, interfaceBarEnabled() ? 1 : 0);
         }
         if (interfaceBarEnabled()) {
@@ -664,11 +665,11 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                     // target: the host falls back to its own ordering.
                     MpCombatSendStartRequest(nullptr);
                 } else {
-                    debugFilePrint("MPCOMBAT: host manual combat entry (A key)");
+                    MpLog(MP_LOG_COMBAT, "host manual combat entry (A key)");
                     _combat(nullptr);
                 }
             } else if (gMpActive) {
-                debugFilePrint("MPCOMBAT: A key ignored (already in combat)");
+                MpLogAlways(MP_LOG_COMBAT, "A key ignored (already in combat)");
             }
         }
         break;

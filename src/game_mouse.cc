@@ -40,6 +40,7 @@
 #include "text_font.h"
 #include "tile.h"
 #include "window_manager.h"
+#include "multiplayer_log.h"
 
 namespace fallout {
 
@@ -350,7 +351,7 @@ static bool gameMouseSendPlayerAction(uint8_t action, Object* target, uint8_t sk
         MultiplayerPlayer* localPlayer = localNetId > 0 && localNetId <= NET_MAX_PLAYERS
             ? &gMpSession.players[localNetId - 1]
             : nullptr;
-        debugFilePrint("MPDBG: player action send failed action=%d obj=%p pid=0x%X localSlotNetId=%u localObjNetId=%u",
+        MpLogAlways(MP_LOG_NET, "failed action=%d obj=%p pid=0x%X localSlotNetId=%u localObjNetId=%u",
             action, (void*)target, target->pid,
             localPlayer != nullptr ? localPlayer->netId : 0,
             localPlayer != nullptr ? localPlayer->objNetId : 0);
@@ -1296,7 +1297,7 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                         // The repeated-destination rule lives in the shared
                         // movement helper, so prediction and the host receive
                         // the same walk/run decision.
-                        debugFilePrint("MPCLICK: move tile=%d elev=%d mode=%d shift=%d run=%d rc=%d sneak=%d",
+                        MpLog(MP_LOG_INPUT, "move tile=%d elev=%d mode=%d shift=%d run=%d rc=%d sneak=%d",
                             tile, gDude->elevation, usesMoveMode ? 1 : 0, shiftHeld ? 1 : 0,
                             isRun ? 1 : 0, movementRc,
                             dudeHasState(DUDE_STATE_SNEAKING) ? 1 : 0);
@@ -1498,7 +1499,7 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
             || gGameMouseMode == GAME_MOUSE_MODE_USE_REPAIR) {
             Object* object = gameMouseGetObjectUnderCursor(OBJ_TYPE_INVALID, true, gElevation);
             if (gMpActive && gMpIsClient) {
-                debugFilePrint("MPDBG: skill click client mode=%d obj=%p pid=0x%X fidType=%d tile=%d",
+                MpLog(MP_LOG_STATS, "client mode=%d obj=%p pid=0x%X fidType=%d tile=%d",
                     gGameMouseMode, (void*)object,
                     object != nullptr ? object->pid : 0,
                     object != nullptr ? objectTypeFromFid(object->fid) : -1,

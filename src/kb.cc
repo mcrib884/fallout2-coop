@@ -5,6 +5,7 @@
 #include "debug.h"
 #include "input.h"
 #include "svga.h"
+#include "multiplayer_log.h"
 
 namespace fallout {
 
@@ -475,7 +476,7 @@ static int keyboardDequeueLogicalKeyCode()
     static int sLoggedKeyCount = 0;
     if (logicalKey != -1 && sLoggedKeyCount < 60) {
         sLoggedKeyCount++;
-        debugFilePrint("MPKB: scan=%d mods=0x%X key=%d",
+        MpLog(MP_LOG_INPUT, "scan=%d mods=0x%X key=%d",
             keyboardEvent->scanCode, keyboardEvent->modifiers, logicalKey);
     }
 

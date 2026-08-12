@@ -38,6 +38,7 @@
 #include "text_object.h"
 #include "tile.h"
 #include "trait.h"
+#include "multiplayer_log.h"
 
 namespace fallout {
 
@@ -1952,7 +1953,7 @@ int actionTalk(Object* obj, Object* critter)
         if (MpDialogDirectorMode()) {
             // A client's dialogue is parked on the host (director mode); one
             // dialogue at a time — the host's own new talk must wait.
-            debugFilePrint("MPDIALOG host talk blocked (director session active)");
+            MpLogAlways(MP_LOG_DIALOG, "host talk blocked (director session active)");
             return 0;
         }
         if (!MpDialogHostActive()) {

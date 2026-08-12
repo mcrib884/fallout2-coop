@@ -13,6 +13,7 @@
 #include "text_font.h"
 #include "tile.h"
 #include "word_wrap.h"
+#include "multiplayer_log.h"
 
 namespace fallout {
 
@@ -333,7 +334,7 @@ static int textObjectAddInternal(Object* object, char* string, int font, int col
     static int sAddDiag = 0;
     if (sAddDiag < 20) {
         sAddDiag++;
-        debugFilePrint("MPTOBJ: add owner=%p replace=%d lines=%d total=%d",
+        MpLog(MP_LOG_CHAT, "add owner=%p replace=%d lines=%d total=%d",
             (void*)object, replacePrevious ? 1 : 0, textObject->linesCount, gTextObjectsCount);
     }
 
@@ -395,7 +396,7 @@ static void textObjectsTicker()
             static int sTickerDiag = 0;
             if (sTickerDiag < 20) {
                 sTickerDiag++;
-                debugFilePrint("MPTOBJ: ticker removed owner=%p age=%u lines=%d delay=%u marked=%d total=%d",
+                MpLog(MP_LOG_CHAT, "ticker removed owner=%p age=%u lines=%d delay=%u marked=%d total=%d",
                     (void*)textObject->owner,
                     getTicksBetween(_get_bk_time(), textObject->time),
                     textObject->linesCount, delay,
@@ -535,7 +536,7 @@ void textObjectsRemoveByOwner(Object* object)
     static int sRemoveDiag = 0;
     if (sRemoveDiag < 20) {
         sRemoveDiag++;
-        debugFilePrint("MPTOBJ: removeByOwner owner=%p removed=%d total=%d",
+        MpLog(MP_LOG_CHAT, "removeByOwner owner=%p removed=%d total=%d",
             (void*)object, removedCount, gTextObjectsCount);
     }
 }
@@ -579,7 +580,7 @@ void textObjectsShiftVertically(Object* object, int dy)
     static int sShiftDiag = 0;
     if (sShiftDiag < 20) {
         sShiftDiag++;
-        debugFilePrint("MPTOBJ: shift owner=%p dy=%d total=%d", (void*)object, dy, gTextObjectsCount);
+        MpLog(MP_LOG_CHAT, "shift owner=%p dy=%d total=%d", (void*)object, dy, gTextObjectsCount);
     }
 }
 

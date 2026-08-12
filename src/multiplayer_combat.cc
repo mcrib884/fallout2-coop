@@ -39,6 +39,7 @@
 #include "multiplayer_dialog.h"
 #include "multiplayer_loot.h"
 #include "multiplayer_vote.h"
+#include "multiplayer_log.h"
 #include "object.h"
 #include "perk.h"
 #include "proto.h"
@@ -186,7 +187,7 @@ static void mpCombatCreateCards()
         // No windowDrawBorder(): the vanilla bevel is replaced by the
         // per-player colored border drawn in mpCombatUpdateCards.
         gCombatCardWindows[index] = win;
-        debugFilePrint("MPCOMBAT: card created win=%d netId=%u x=%d y=%d", win, player->netId, x, y);
+        MpLog(MP_LOG_COMBAT, "card created win=%d netId=%u x=%d y=%d", win, player->netId, x, y);
         cardIndex++;
         if (cardIndex >= 5) {
             break;
@@ -233,7 +234,7 @@ static void mpCombatUpdateCards()
             uint32_t nowTicks = getTicks();
             if (nowTicks - gMpCardObjMissLogTick > 2000) {
                 gMpCardObjMissLogTick = nowTicks;
-                debugFilePrint("MPCOMBAT: card obj missing netId=%u objNet=%u pObj=%p",
+                MpLogAlways(MP_LOG_COMBAT, "card obj missing netId=%u objNet=%u pObj=%p",
                     player->netId, player->objNetId, (void*)player->obj);
             }
         }
@@ -309,7 +310,7 @@ void MpCombatOnStarted()
         return;
     }
     if (gMpCombat.inCombat) {
-        debugFilePrint("MPCOMBAT: start rejected (already in combat)");
+        MpLogAlways(MP_LOG_COMBAT, "start rejected (already in combat)");
         return;
     }
     // A client can be mid-loot when the host's script starts combat. The
@@ -331,7 +332,7 @@ void MpCombatOnStarted()
     gCombatState &= ~COMBAT_STATE_EXIT_REQUESTED;
     mpCombatBroadcast(NET_PKT_COMBAT_STARTED, nullptr, 0);
     mpCombatCreateCards();
-    debugFilePrint("MPCOMBAT: host combat started, STARTED broadcast");
+    MpLog(MP_LOG_COMBAT, "host combat started, STARTED broadcast");
 }
 
 void MpCombatOnEnded()
@@ -357,7 +358,7 @@ void MpCombatOnEnded()
     gameMouseSetMode(GAME_MOUSE_MODE_MOVE);
     mpCombatBroadcast(NET_PKT_COMBAT_ENDED, nullptr, 0);
     mpCombatDestroyCards();
-    debugFilePrint("MPCOMBAT: host combat ended, ENDED broadcast");
+    MpLog(MP_LOG_COMBAT, "host combat ended, ENDED broadcast");
 }
 
 uint8_t MpCombatGetCritterPlayerNetId(Object* critter)
@@ -402,7 +403,7 @@ int MpCombatHostRemoteTurn(Object* critter, uint8_t netId)
     gMpCombat.waitingForTurnEnd = netId;
     gMpCombat.turnEndPending = false;
     gMpCombat.turnActive = false;
-    debugFilePrint("MPCOMBAT: host remote turn begin netId=%u ap=%d maxAp=%d", netId, ap, maxAp);
+    MpLog(MP_LOG_COMBAT, "host remote turn begin netId=%u ap=%d maxAp=%d", netId, ap, maxAp);
 
     MultiplayerPlayer* player = &gMpSession.players[netId - 1];
 
@@ -424,15 +425,15 @@ int MpCombatHostRemoteTurn(Object* critter, uint8_t netId)
         }
 
         if ((gCombatState & COMBAT_STATE_EXIT_REQUESTED) != 0) {
-            debugFilePrint("MPCOMBAT: host remote turn exit requested");
+            MpLog(MP_LOG_COMBAT, "host remote turn exit requested");
             break;
         }
         if (player == nullptr || !player->isConnected) {
-            debugFilePrint("MPCOMBAT: remote turn netId=%u disconnected, skipping", netId);
+            MpLog(MP_LOG_COMBAT, "remote turn netId=%u disconnected, skipping", netId);
             break;
         }
         if (critterIsDead(critter)) {
-            debugFilePrint("MPCOMBAT: remote turn critter died, ending turn");
+            MpLog(MP_LOG_COMBAT, "remote turn critter died, ending turn");
             break;
         }
 
@@ -447,7 +448,7 @@ int MpCombatHostRemoteTurn(Object* critter, uint8_t netId)
     // The remote avatar's free move must not leak into the host's own next
     // turn (the vanilla dude-turn re-derives its own value at combat.cc:3373).
     _combat_free_move = 0;
-    debugFilePrint("MPCOMBAT: host remote turn end netId=%u", netId);
+    MpLog(MP_LOG_COMBAT, "host remote turn end netId=%u", netId);
 
     return (gCombatState & COMBAT_STATE_EXIT_REQUESTED) != 0 ? -1 : 0;
 }
@@ -496,7 +497,7 @@ static void mpCombatSendAttackRejected(MultiplayerPlayer* player,
     rejected.arg4 = 0;
     NetSendPacket(player->peer, NET_CHANNEL_RELIABLE,
         NET_PKT_PLAYER_EVENT, &rejected, sizeof(rejected));
-    debugFilePrint("MPCOMBAT: attack rejected netId=%u targetNetId=%u rc=%d tile=%d elev=%d",
+    MpLogAlways(MP_LOG_COMBAT, "attack rejected netId=%u targetNetId=%u rc=%d tile=%d elev=%d",
         player->netId, targetNetId, rc, rejected.arg1, rejected.arg2);
 }
 
@@ -504,23 +505,23 @@ static void mpCombatResolveMove(MultiplayerPlayer* player, const NetCombatCmdPay
 {
     Object* critter = player->obj;
     if (critter == nullptr) {
-        debugFilePrint("MPCOMBAT: move rejected (no critter) netId=%u", player->netId);
+        MpLogAlways(MP_LOG_COMBAT, "move rejected (no critter) netId=%u", player->netId);
         return;
     }
     if (!hexGridTileIsValid(cmd->tile) || !elevationIsValid(cmd->elevation)) {
-        debugFilePrint("MPCOMBAT: move rejected (bad tile/elev) netId=%u tile=%d elev=%d",
+        MpLogAlways(MP_LOG_COMBAT, "move rejected (bad tile/elev) netId=%u tile=%d elev=%d",
             player->netId, cmd->tile, cmd->elevation);
         mpCombatSendMoveResult(player, critter->tile, critter->elevation);
         return;
     }
     if (cmd->elevation != critter->elevation) {
-        debugFilePrint("MPCOMBAT: move rejected (elevation) netId=%u", player->netId);
+        MpLogAlways(MP_LOG_COMBAT, "move rejected (elevation) netId=%u", player->netId);
         mpCombatSendMoveResult(player, critter->tile, critter->elevation);
         return;
     }
     int ap = critter->data.critter.combat.ap;
     if (ap <= 0) {
-        debugFilePrint("MPCOMBAT: move rejected (no AP) netId=%u", player->netId);
+        MpLogAlways(MP_LOG_COMBAT, "move rejected (no AP) netId=%u", player->netId);
         mpCombatSendMoveResult(player, critter->tile, critter->elevation);
         return;
     }
@@ -529,7 +530,7 @@ static void mpCombatResolveMove(MultiplayerPlayer* player, const NetCombatCmdPay
     // MpTruncateDestinationAtOccupant) — stacked avatars break targeting.
     int targetTile = MpTruncateDestinationAtOccupant(critter, cmd->tile, cmd->elevation);
     if (targetTile != cmd->tile) {
-        debugFilePrint("MPCOMBAT: move truncated netId=%u tile=%d->%d (occupied)",
+        MpLog(MP_LOG_COMBAT, "move truncated netId=%u tile=%d->%d (occupied)",
             player->netId, cmd->tile, targetTile);
     }
 
@@ -549,7 +550,7 @@ static void mpCombatResolveMove(MultiplayerPlayer* player, const NetCombatCmdPay
         // the acting client already walked optimistically and must snap back
         // to the authoritative position (the post-kill desync). The queue
         // deferral catches most of these earlier; this is the safety net.
-        debugFilePrint("MPCOMBAT: move registration failed netId=%u tile=%d busy=%d",
+        MpLogAlways(MP_LOG_COMBAT, "move registration failed netId=%u tile=%d busy=%d",
             player->netId, targetTile, animationIsBusy(critter) != 0 ? 1 : 0);
         mpCombatSendMoveResult(player, critter->tile, critter->elevation);
         return;
@@ -565,12 +566,12 @@ static void mpCombatResolveMove(MultiplayerPlayer* player, const NetCombatCmdPay
         if (protoGetProto(critter->pid, &playerProto) == 0
             && (playerProto->critter.data.flags & (1 << DUDE_STATE_SNEAKING)) != 0) {
             playerProto->critter.data.flags &= ~(1 << DUDE_STATE_SNEAKING);
-            debugFilePrint("MPCOMBAT: run cancelled sneak netId=%u", player->netId);
+            MpLog(MP_LOG_COMBAT, "run cancelled sneak netId=%u", player->netId);
         }
     }
 
     mpCombatSendMoveResult(player, targetTile, cmd->elevation);
-    debugFilePrint("MPCOMBAT: move resolved netId=%u tile=%d elev=%d run=%d ap=%d free=%d",
+    MpLog(MP_LOG_COMBAT, "move resolved netId=%u tile=%d elev=%d run=%d ap=%d free=%d",
         player->netId, targetTile, cmd->elevation, isRun ? 1 : 0,
         critter->data.critter.combat.ap, _combat_free_move);
 }
@@ -579,25 +580,25 @@ static void mpCombatResolveAttack(MultiplayerPlayer* player, const NetCombatCmdP
 {
     Object* critter = player->obj;
     if (critter == nullptr) {
-        debugFilePrint("MPCOMBAT: attack rejected (no critter) netId=%u", player->netId);
+        MpLogAlways(MP_LOG_COMBAT, "attack rejected (no critter) netId=%u", player->netId);
         mpCombatSendAttackRejected(player, cmd->targetNetId, -1);
         return;
     }
     Object* target = MpFindObjByNetId(cmd->targetNetId);
     if (target == nullptr) {
-        debugFilePrint("MPCOMBAT: attack rejected (no target) netId=%u targetNetId=%u",
+        MpLogAlways(MP_LOG_COMBAT, "attack rejected (no target) netId=%u targetNetId=%u",
             player->netId, cmd->targetNetId);
         mpCombatSendAttackRejected(player, cmd->targetNetId, -1);
         return;
     }
     if (target->elevation != critter->elevation) {
-        debugFilePrint("MPCOMBAT: attack rejected (elevation) netId=%u", player->netId);
+        MpLogAlways(MP_LOG_COMBAT, "attack rejected (elevation) netId=%u", player->netId);
         mpCombatSendAttackRejected(player, cmd->targetNetId, -1);
         return;
     }
     int ap = critter->data.critter.combat.ap;
     if (ap <= 0) {
-        debugFilePrint("MPCOMBAT: attack rejected (no AP) netId=%u", player->netId);
+        MpLogAlways(MP_LOG_COMBAT, "attack rejected (no AP) netId=%u", player->netId);
         mpCombatSendAttackRejected(player, cmd->targetNetId, -1);
         return;
     }
@@ -639,7 +640,7 @@ static void mpCombatResolveAttack(MultiplayerPlayer* player, const NetCombatCmdP
             ? critterGetStat(target, STAT_DAMAGE_RESISTANCE + resolvedType)
             : 0;
         int attackerUnarmed = skillGetValue(critter, SKILL_UNARMED);
-        debugFilePrint("MPCOMBAT: attack resolved netId=%u targetNetId=%u mode=%d loc=%d dmg=%d flags=0x%X melee=%d weapon=%p wpnPid=0x%X dt=%d dr=%d unarmed=%d str=%d",
+        MpLog(MP_LOG_COMBAT, "attack resolved netId=%u targetNetId=%u mode=%d loc=%d dmg=%d flags=0x%X melee=%d weapon=%p wpnPid=0x%X dt=%d dr=%d unarmed=%d str=%d",
             player->netId, cmd->targetNetId, (int)hitMode, (int)hitLocation,
             damage, attackerFlags,
             critterGetStat(critter, STAT_MELEE_DAMAGE),
@@ -655,7 +656,7 @@ static void mpCombatResolveAttack(MultiplayerPlayer* player, const NetCombatCmdP
         // mpCombatSendAttackRejected).
         mpCombatSendAttackRejected(player, cmd->targetNetId, rc);
     } else {
-        debugFilePrint("MPCOMBAT: attack resolved (no result sent) netId=%u rc=%d",
+        MpLog(MP_LOG_COMBAT, "attack resolved (no result sent) netId=%u rc=%d",
             player->netId, rc);
     }
 }
@@ -683,7 +684,7 @@ static void mpCombatDrainQueue()
             uint32_t nowTicks = getTicks();
             if (nowTicks - gLastQueueDeferLogTick > 500) {
                 gLastQueueDeferLogTick = nowTicks;
-                debugFilePrint("MPCOMBAT: cmd queue deferred (avatar busy) netId=%u cmds=%zu",
+                MpLog(MP_LOG_COMBAT, "cmd queue deferred (avatar busy) netId=%u cmds=%zu",
                     owner, gCombatCmdQueue.size());
             }
             return;
@@ -695,7 +696,7 @@ static void mpCombatDrainQueue()
 
     for (const MpCombatQueuedCmd& queued : queue) {
         if (queued.netId != gMpCombat.waitingForTurnEnd) {
-            debugFilePrint("MPCOMBAT: cmd rejected (not turn owner) netId=%u waiting=%u",
+            MpLogAlways(MP_LOG_COMBAT, "cmd rejected (not turn owner) netId=%u waiting=%u",
                 queued.netId, gMpCombat.waitingForTurnEnd);
             continue;
         }
@@ -711,7 +712,7 @@ static void mpCombatDrainQueue()
             mpCombatResolveAttack(player, &queued.payload);
             break;
         default:
-            debugFilePrint("MPCOMBAT: unknown cmd %d netId=%u", queued.payload.cmd, queued.netId);
+            MpLog(MP_LOG_COMBAT, "unknown cmd %d netId=%u", queued.payload.cmd, queued.netId);
             break;
         }
     }
@@ -737,10 +738,10 @@ static void mpCombatDrainEndRequest()
             }
             if (peer != nullptr) {
                 NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_COMBAT_END_DENIED, nullptr, 0);
-                debugFilePrint("MPCOMBAT: end denied sent to netId=%u", gMpCombat.endRequesterNetId);
+                MpLogAlways(MP_LOG_COMBAT, "end denied sent to netId=%u", gMpCombat.endRequesterNetId);
             }
         } else {
-            debugFilePrint("MPCOMBAT: host end combat refused (hostiles nearby)");
+            MpLogAlways(MP_LOG_COMBAT, "host end combat refused (hostiles nearby)");
         }
     }
 }
@@ -801,17 +802,17 @@ void MpCombatOnStartRequest(Object* attacker, uint32_t targetNetId)
         return;
     }
     if (gMpCombat.inCombat || isInCombat()) {
-        debugFilePrint("MPCOMBAT: start request rejected (already in combat)");
+        MpLogAlways(MP_LOG_COMBAT, "start request rejected (already in combat)");
         return;
     }
     if (mpCombatVoteOrTransitionActive()) {
-        debugFilePrint("MPCOMBAT: start request rejected (vote active)");
+        MpLogAlways(MP_LOG_COMBAT, "start request rejected (vote active)");
         return;
     }
     gMpCombat.pendingStart = true;
     gPendingStartAttacker = attacker;
     gPendingStartTargetNetId = targetNetId;
-    debugFilePrint("MPCOMBAT: start request queued attacker=%p targetNet=%u",
+    MpLog(MP_LOG_COMBAT, "start request queued attacker=%p targetNet=%u",
         (void*)attacker, targetNetId);
 }
 
@@ -827,7 +828,7 @@ void MpCombatOnCmd(uint8_t netId, const NetCombatCmdPayload* payload)
     queued.netId = netId;
     queued.payload = *payload;
     gCombatCmdQueue.push_back(queued);
-    debugFilePrint("MPCOMBAT: cmd queued netId=%u cmd=%d", netId, payload->cmd);
+    MpLog(MP_LOG_COMBAT, "cmd queued netId=%u cmd=%d", netId, payload->cmd);
 }
 
 void MpCombatOnTurnEnd(uint8_t netId)
@@ -841,9 +842,9 @@ void MpCombatOnTurnEnd(uint8_t netId)
         // queue and must drain while the wait state is still theirs. The
         // wait loop breaks on turnEndPending after the drain.
         gMpCombat.turnEndPending = true;
-        debugFilePrint("MPCOMBAT: turn end received netId=%u", netId);
+        MpLog(MP_LOG_COMBAT, "turn end received netId=%u", netId);
     } else {
-        debugFilePrint("MPCOMBAT: turn end ignored netId=%u waiting=%u", netId, gMpCombat.waitingForTurnEnd);
+        MpLogAlways(MP_LOG_COMBAT, "turn end ignored netId=%u waiting=%u", netId, gMpCombat.waitingForTurnEnd);
     }
 }
 
@@ -854,7 +855,7 @@ void MpCombatOnEndRequest(uint8_t netId)
     }
     gMpCombat.endRequestPending = true;
     gMpCombat.endRequesterNetId = netId;
-    debugFilePrint("MPCOMBAT: end request received netId=%u", netId);
+    MpLog(MP_LOG_COMBAT, "end request received netId=%u", netId);
 }
 
 // ---------------------------------------------------------------------------
@@ -867,7 +868,7 @@ void MpCombatOnStartedPacket()
         return;
     }
     if (gMpCombat.inCombat) {
-        debugFilePrint("MPCOMBAT: started ignored (already in mirror)");
+        MpLogAlways(MP_LOG_COMBAT, "started ignored (already in mirror)");
         return;
     }
     gMpCombat.inCombat = true;
@@ -901,7 +902,7 @@ void MpCombatOnStartedPacket()
     // MpCombatClientTurnLoop paints the real bar at his TURN_START.
     interfaceRenderActionPoints(-1, -1);
     mpCombatCreateCards();
-    debugFilePrint("MPCOMBAT: client mirror entered");
+    MpLog(MP_LOG_COMBAT, "client mirror entered");
 }
 
 // Host: an NPC's turn began. The acting-critter red outline is drawn by the
@@ -918,7 +919,7 @@ void MpCombatOnNpcTurnStarted(Object* npc)
     payload.maxAp = 0;
     payload.targetNetId = MpGetObjNetId(npc);
     mpCombatBroadcast(NET_PKT_COMBAT_TURN_START, &payload, sizeof(payload));
-    debugFilePrint("MPCOMBAT: npc turn start broadcast targetNet=%u", payload.targetNetId);
+    MpLog(MP_LOG_COMBAT, "npc turn start broadcast targetNet=%u", payload.targetNetId);
 }
 
 static void mpCombatClearActingNpcOutline()
@@ -976,13 +977,13 @@ void MpCombatOnTurnStart(const NetCombatTurnStartPayload* payload)
         // TURN_START (player or NPC) clears it.
         gMpCombat.turnStartPending = false;
         mpCombatSetActingNpcOutline(payload->targetNetId);
-        debugFilePrint("MPCOMBAT: npc turn start targetNet=%u", payload->targetNetId);
+        MpLog(MP_LOG_COMBAT, "npc turn start targetNet=%u", payload->targetNetId);
         return;
     }
     // Player turn: any acting-NPC outline ends here.
     mpCombatClearActingNpcOutline();
     gMpCombat.turnStartPending = true;
-    debugFilePrint("MPCOMBAT: turn start received netId=%u ap=%d maxAp=%d",
+    MpLog(MP_LOG_COMBAT, "turn start received netId=%u ap=%d maxAp=%d",
         payload->netId, payload->ap, payload->maxAp);
 }
 
@@ -992,7 +993,7 @@ void MpCombatOnEndDenied()
         return;
     }
     combatShowEndDeniedMessage();
-    debugFilePrint("MPCOMBAT: end denied received");
+    MpLogAlways(MP_LOG_COMBAT, "end denied received");
 }
 
 void MpCombatOnEndedPacket()
@@ -1001,7 +1002,7 @@ void MpCombatOnEndedPacket()
         return;
     }
     MpCombatForceExit();
-    debugFilePrint("MPCOMBAT: client mirror exited (ENDED)");
+    MpLog(MP_LOG_COMBAT, "client mirror exited (ENDED)");
     MpCombatClearMoveIntent();
 }
 
@@ -1013,9 +1014,10 @@ int MpCombatClientTurnLoop()
 {
     Object* dude = gDude;
     if (dude == nullptr) {
+        MpLogAlways(MP_LOG_COMBAT, "client turn loop rejected no dude");
         return -1;
     }
-    debugFilePrint("MPCOMBAT: client turn begin ap=%d maxAp=%d", gMpCombat.turnAp, gMpCombat.turnMaxAp);
+    MpLog(MP_LOG_COMBAT, "client turn begin ap=%d maxAp=%d", gMpCombat.turnAp, gMpCombat.turnMaxAp);
 
     gMpCombat.turnStartPending = false;
     gMpCombat.turnActive = true;
@@ -1075,7 +1077,7 @@ int MpCombatClientTurnLoop()
                 gMpCombat.endRequestPending = true;
                 gMpCombat.endRequesterNetId = gMpSession.localNetId;
                 mpCombatSendNonEmpty(NET_PKT_COMBAT_END_REQUEST);
-                debugFilePrint("MPCOMBAT: end request sent");
+                MpLog(MP_LOG_COMBAT, "end request sent");
             }
             continue;
         }
@@ -1111,16 +1113,16 @@ int MpCombatClientTurnLoop()
         interfaceBarEndButtonsRenderRedLights();
         interfaceRenderActionPoints(-1, -1);
         mpCombatSendNonEmpty(NET_PKT_COMBAT_TURN_END);
-        debugFilePrint("MPCOMBAT: turn end sent");
+        MpLog(MP_LOG_COMBAT, "turn end sent");
     } else {
         // Combat ended while this turn was running: COMBAT_ENDED already ran
         // MpCombatForceExit and restored the UI. Re-applying the wait posture
         // here would overwrite that restore and strand the player on a
         // disabled UI with the wait cursor forever.
-        debugFilePrint("MPCOMBAT: client turn end after mirror exit, wait posture skipped");
+        MpLog(MP_LOG_COMBAT, "client turn end after mirror exit, wait posture skipped");
     }
 
-    debugFilePrint("MPCOMBAT: client turn end rc=%d", rc);
+    MpLog(MP_LOG_COMBAT, "client turn end rc=%d", rc);
     return rc;
 }
 
@@ -1130,18 +1132,18 @@ void MpCombatSendStartRequest(Object* defender)
         return;
     }
     if (gMpCombat.inCombat || isInCombat()) {
-        debugFilePrint("MPCOMBAT: start request suppressed (already in combat)");
+        MpLog(MP_LOG_COMBAT, "start request suppressed (already in combat)");
         return;
     }
     if (gMpCombat.startRequestPending) {
-        debugFilePrint("MPCOMBAT: start request suppressed (already pending)");
+        MpLog(MP_LOG_COMBAT, "start request suppressed (already pending)");
         return;
     }
     gMpCombat.startRequestPending = true;
     NetCombatStartRequestPayload payload;
     payload.targetNetId = defender != nullptr ? MpGetObjNetId(defender) : 0;
     mpCombatSend(NET_PKT_COMBAT_START_REQUEST, &payload, sizeof(payload));
-    debugFilePrint("MPCOMBAT: start request sent targetNet=%u", payload.targetNetId);
+    MpLog(MP_LOG_COMBAT, "start request sent targetNet=%u", payload.targetNetId);
 }
 
 void MpCombatSendEndRequest()
@@ -1156,10 +1158,10 @@ void MpCombatSendEndRequest()
     gMpCombat.endRequesterNetId = gMpSession.localNetId;
     if (gMpIsHost) {
         // The host validates locally; the drain runs from MpTick or a pump.
-        debugFilePrint("MPCOMBAT: end request queued (host)");
+        MpLog(MP_LOG_COMBAT, "end request queued (host)");
     } else {
         mpCombatSendNonEmpty(NET_PKT_COMBAT_END_REQUEST);
-        debugFilePrint("MPCOMBAT: end request sent");
+        MpLog(MP_LOG_COMBAT, "end request sent");
     }
 }
 
@@ -1197,7 +1199,7 @@ void MpCombatSendMoveIntent(int tile, int elevation, bool isRun)
     mpCombatSend(NET_PKT_COMBAT_CMD, &payload, sizeof(payload));
     gMpLastMoveIntentTile = tile;
     gMpLastMoveIntentElevation = elevation;
-    debugFilePrint("MPCOMBAT: move intent sent tile=%d elev=%d run=%d", tile, elevation, isRun ? 1 : 0);
+    MpLog(MP_LOG_COMBAT, "move intent sent tile=%d elev=%d run=%d", tile, elevation, isRun ? 1 : 0);
 
     // Client-side free-move prediction: the host consumes the avatar's Bonus
     // Move points first (one per resolved tile), then real AP. Mirror that
@@ -1226,7 +1228,7 @@ void MpCombatSendInventoryApCost(int cost)
     payload.arg2 = 0;
     NetSendPacket(gMpSession.hostPeer, NET_CHANNEL_RELIABLE,
         NET_PKT_PLAYER_CMD, &payload, sizeof(payload));
-    debugFilePrint("MP: inv ap cost sent cost=%d", cost);
+    MpLog(MP_LOG_COMBAT, "inv ap cost sent cost=%d", cost);
 }
 
 void MpCombatSendAttackIntent(Object* target, HitMode hitMode, HitLocation hitLocation)
@@ -1248,7 +1250,7 @@ void MpCombatSendAttackIntent(Object* target, HitMode hitMode, HitLocation hitLo
                 }
             }
         }
-        debugFilePrint("MPCOMBAT: attack intent dropped target=%p pid=0x%X fid=0x%X tile=%d elev=%d isDude=%d count=%d inMapAt=%d",
+        MpLogAlways(MP_LOG_COMBAT, "attack intent dropped target=%p pid=0x%X fid=0x%X tile=%d elev=%d isDude=%d count=%d inMapAt=%d",
             (void*)target, target != nullptr ? target->pid : 0,
             target != nullptr ? target->fid : 0,
             target != nullptr ? target->tile : -1,
@@ -1264,7 +1266,7 @@ void MpCombatSendAttackIntent(Object* target, HitMode hitMode, HitLocation hitLo
     payload.hitLocation = (uint16_t)hitLocation;
     payload.targetNetId = targetNetId;
     mpCombatSend(NET_PKT_COMBAT_CMD, &payload, sizeof(payload));
-    debugFilePrint("MPCOMBAT: attack intent sent targetNetId=%u mode=%d loc=%d",
+    MpLog(MP_LOG_COMBAT, "attack intent sent targetNetId=%u mode=%d loc=%d",
         targetNetId, (int)hitMode, (int)hitLocation);
 }
 
@@ -1407,7 +1409,7 @@ void MpCombatOnMoveResult(const NetCombatMoveResultPayload* payload)
     const int oldIntent = gMpLastMoveIntentTile;
     MpApplyLocalDudeSnap((int)payload->tile, payload->elevation);
     MpCombatClearMoveIntent();
-    debugFilePrint("MPCOMBAT: move result snap tile=%d elev=%d (intent was %d)",
+    MpLog(MP_LOG_COMBAT, "move result snap tile=%d elev=%d (intent was %d)",
         (int)payload->tile, payload->elevation, oldIntent);
 }
 
@@ -1607,11 +1609,11 @@ void MpCombatTick()
                 if (defender != nullptr && !critterIsDead(defender)) {
                     csd.defender = defender;
                 }
-                debugFilePrint("MPCOMBAT: host starting combat (client ambush) netId=%u target=%p",
+                MpLog(MP_LOG_COMBAT, "host starting combat (client ambush) netId=%u target=%p",
                     MpCombatGetCritterPlayerNetId(attacker), (void*)csd.defender);
                 _combat(&csd);
             } else {
-                debugFilePrint("MPCOMBAT: host starting combat (no valid ambusher)");
+                MpLog(MP_LOG_COMBAT, "host starting combat (no valid ambusher)");
                 _combat(nullptr);
             }
             return;

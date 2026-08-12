@@ -24,6 +24,7 @@
 #include "text_font.h"
 #include "touch.h"
 #include "window_manager.h"
+#include "multiplayer_log.h"
 
 namespace fallout {
 
@@ -171,7 +172,7 @@ int gameMoviePlay(int movie, int flags)
         return -1;
     }
 
-    debugFilePrint("MPMOVIE: play begin movie=%d file=%s", movie, movieFilePath);
+    MpLog(MP_LOG_MOVIE, "play begin movie=%d file=%s", movie, movieFilePath);
 
     if ((flags & GAME_MOVIE_FADE_IN) != 0) {
         paletteFadeTo(gPaletteBlack);
@@ -262,7 +263,7 @@ int gameMoviePlay(int movie, int flags)
         // frozen client still shows us where the pump died.
         int inputResult = inputGetInput();
         if (movieLoopIterations < 10 || movieLoopIterations % 120 == 0) {
-            debugFilePrint("MPMOVIE: loop iter=%d playing=%d movie=%d input=%d",
+            MpLog(MP_LOG_MOVIE, "loop iter=%d playing=%d movie=%d input=%d",
                 movieLoopIterations, _moviePlaying() ? 1 : 0, movie, inputResult);
         }
         movieLoopIterations++;
@@ -284,7 +285,7 @@ int gameMoviePlay(int movie, int flags)
         // least once, then wait until both are released.
     } while (((pressed & 1) == 0 && (pressed & 2) == 0) || (buttons & 1) != 0 || (buttons & 2) != 0);
 
-    debugFilePrint("MPMOVIE: loop exited iter=%d playing=%d movie=%d", movieLoopIterations, _moviePlaying() ? 1 : 0, movie);
+    MpLog(MP_LOG_MOVIE, "loop exited iter=%d playing=%d movie=%d", movieLoopIterations, _moviePlaying() ? 1 : 0, movie);
 
     _movieStop();
     _moviefx_stop();

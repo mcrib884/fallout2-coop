@@ -80,6 +80,10 @@ struct MpBarterSession {
     Object* requestTable;
 };
 
+// Co-op: set by partyMemberAdd when recruitment is blocked; consumed (and
+// cleared) by the director-choice executor after the option proc returns.
+int gMpPartyAddBlockedPid = -1;
+
 struct MpDialogSession {
     bool active;
     uint32_t sessionId;

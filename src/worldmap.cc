@@ -38,6 +38,7 @@
 #include "multiplayer_chat.h"
 #include "multiplayer_debug.h"
 #include "multiplayer.h"
+#include "multiplayer_log.h"
 #include "multiplayer_worldmap.h"
 #include "mouse.h"
 #include "object.h"
@@ -7877,6 +7878,13 @@ void wmDiscoveryApplyChanges(const WmDiscoveryChange* changes, int count)
             continue;
         }
         wmTileInfoList[c->tile].subtiles[c->subY][c->subX].state = c->state;
+    }
+}
+
+void wmDiscoveryRebuildLabels()
+{
+    if (wmMakeTabsLabelList(&wmLabelList, &wmLabelCount) == -1) {
+        MpLog(MP_LOG_WORLDMAP, "discovery label rebuild failed");
     }
 }
 

@@ -1816,6 +1816,17 @@ int pathfinderFindPath(Object* object, int from, int to, unsigned char* rotation
         }
     }
 
+    // Co-op: time budget for the search. The A* here is O(n²) over the
+    // open list (linear min-scan + linear free-slot scan per expansion) with
+    // a 10000-node capacity, so a pathological search — an unreachable click
+    // far across a big map, or a mid-walk re-path against a blocked corridor
+    // (the client's stale map copies can block tiles the host's don't) — can
+    // block the frame for tens of seconds. Both machines froze ~96-99s on the
+    // same walk: the client inside the registration/re-path, the host waiting
+    // for its turn end. A failed path is handled everywhere (walk doesn't
+    // register / walk ends); a frozen game is not.
+    uint32_t pathStartTick = getTicks();
+
     bool isCritter = false;
     int critterType = 0;
     if (objectTypeFromPid(object->pid) == OBJ_TYPE_CRITTER) {
@@ -1848,6 +1859,12 @@ int pathfinderFindPath(Object* object, int from, int to, unsigned char* rotation
     PathNode temp;
 
     while (1) {
+        if (getTicksSince(pathStartTick) > 200) {
+            // Search budget exhausted — give up instead of freezing a frame
+            // for minutes (see the comment at the top of this function).
+            return 0;
+        }
+
         int v63 = -1;
 
         PathNode* prev = nullptr;

@@ -356,6 +356,11 @@ void wmDiscoveryApplyFull(const uint8_t* subtileBits, int tileCount,
 // Client: apply incremental changes (area marks tagged with
 // WM_DISCOVERY_AREA_CHANGE_TILE) to the local worldmap.
 void wmDiscoveryApplyChanges(const WmDiscoveryChange* changes, int count);
+// Client: rebuild the town-list/label list from the (now synced) area states.
+// The list is built once at worldmap init from the machine's own save, so a
+// client whose save knows no locations stays empty until this is called after
+// a discovery snapshot arrives.
+void wmDiscoveryRebuildLabels();
 
 // --- Co-op: encounter state (host -> client mirror) ---
 // The encounter selection (wmRndEncounterPick) only runs on the host; the

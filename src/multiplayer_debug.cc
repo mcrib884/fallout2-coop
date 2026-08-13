@@ -20,6 +20,7 @@
 #include "interface.h"
 #include "item.h"
 #include "kb.h"
+#include "map.h"
 #include "mouse.h"
 #include "multiplayer.h"
 #include "multiplayer_menu.h"
@@ -33,6 +34,7 @@
 #include "proto.h"
 #include "skill.h"
 #include "sfall_script_hooks.h"
+#include "scripts.h"
 #include "stat.h"
 #include "trait.h"
 #include "svga.h"
@@ -42,6 +44,20 @@
 #include "window_manager_private.h"
 
 namespace fallout {
+
+// Co-op: pump the game behind the debug modals (same pattern as the chat
+// modal). The world, animations, script requests and pending transitions
+// keep running, so combat turns and NPC animations do not freeze while the
+// settings/cheats menus are up, and the camera can still be dragged.
+static void dbgPumpGameBehindModal()
+{
+    tickersExecute();
+    scriptsHandleRequests();
+    mapHandleTransition();
+    MpTick();
+    MpDrawPlayerIndicators();
+    gameMouseCameraDragTick();
+}
 
 namespace {
 
@@ -418,8 +434,9 @@ void dbgCheatModal()
                 (kDbgCheatWindowWidth - fontGetStringWidth(blocked)) / 2, 183, COLOR_WHITE);
         }
         windowRefresh(win);
+        windowRefreshAll(&_scr_size);
         renderPresent();
-        MpTick();
+        dbgPumpGameBehindModal();
         mouseShowCursor();
 
         int keyCode = inputGetInput();
@@ -696,13 +713,14 @@ int dbgSubmenuModal(int win, const SubmenuCallbacks* cb, int current)
         // inputGetInput the visible frame is always the previous iteration's
         // (static menus hide the lag; a live info line falls one action
         // behind — clicking Next shows the old stat until the next click).
+        windowRefreshAll(&_scr_size);
         renderPresent();
 
         // Keep the session alive behind the modal: the profile sync, deferred
         // drains and host detect all run from MpTick, which the main loop
         // cannot reach while this modal blocks it. Same pattern as the vote
         // modal. No-ops when not in a session.
-        MpTick();
+        dbgPumpGameBehindModal();
         mouseShowCursor();
         int keyCode = inputGetInput();
         switch (keyCode) {
@@ -869,7 +887,7 @@ static void dbgPerkListShow()
         sharedFpsLimiter.mark();
         // Keep the session alive behind the modal (same pattern as every
         // other debug modal).
-        MpTick();
+        dbgPumpGameBehindModal();
         mouseShowCursor();
         int keyCode = inputGetInput();
         switch (keyCode) {
@@ -908,6 +926,7 @@ static void dbgPerkListShow()
             }
             break;
         }
+        windowRefreshAll(&_scr_size);
         renderPresent();
         sharedFpsLimiter.throttle();
     }
@@ -997,7 +1016,7 @@ static void dbgTraitListShow()
     bool keepGoing = true;
     while (keepGoing) {
         sharedFpsLimiter.mark();
-        MpTick();
+        dbgPumpGameBehindModal();
         mouseShowCursor();
         int keyCode = inputGetInput();
         switch (keyCode) {
@@ -1031,6 +1050,7 @@ static void dbgTraitListShow()
             }
             break;
         }
+        windowRefreshAll(&_scr_size);
         renderPresent();
         sharedFpsLimiter.throttle();
     }
@@ -1156,7 +1176,7 @@ static void dbgItemBrowserShow()
     bool keepGoing = true;
     while (keepGoing) {
         sharedFpsLimiter.mark();
-        MpTick();
+        dbgPumpGameBehindModal();
         mouseShowCursor();
         int keyCode = inputGetInput();
         switch (keyCode) {
@@ -1203,6 +1223,7 @@ static void dbgItemBrowserShow()
             }
             break;
         }
+        windowRefreshAll(&_scr_size);
         renderPresent();
         sharedFpsLimiter.throttle();
     }
@@ -1242,11 +1263,12 @@ static void dbgNameEditorShow()
     bool keepGoing = true;
     while (keepGoing) {
         sharedFpsLimiter.mark();
-        MpTick();
+        dbgPumpGameBehindModal();
         mouseShowCursor();
         windowFill(win, 8, 40, 304, 20, COLOR_BLACK);
         windowDrawText(win, nameBuf, 0, 16, 42, COLOR_WHITE);
         windowRefresh(win);
+        windowRefreshAll(&_scr_size);
         renderPresent();
         int keyCode = inputGetInput();
         if (keyCode >= 32 && keyCode <= 126) {
@@ -1352,7 +1374,7 @@ static void dbgColorPickerShow()
     bool keepGoing = true;
     while (keepGoing) {
         sharedFpsLimiter.mark();
-        MpTick();
+        dbgPumpGameBehindModal();
         mouseShowCursor();
 
         // 1. Calculate live palette color from R, G, B
@@ -1421,6 +1443,7 @@ static void dbgColorPickerShow()
         windowDrawRect(win, bThumbX, 173, bThumbX + 15, 173 + 11, COLOR_WHITE);
 
         windowRefresh(win);
+        windowRefreshAll(&_scr_size);
         renderPresent();
 
         // 6. Direct Mouse Dragging / Clicking on RGB Tracks
@@ -1694,7 +1717,7 @@ static void dbgCheatsMenuShow()
             // deferred drains and host detect all run from MpTick, which the
             // main loop cannot reach while this modal blocks it. Same pattern
             // as the vote modal. No-ops when not in a session.
-            MpTick();
+            dbgPumpGameBehindModal();
             mouseShowCursor();
             int keyCode = inputGetInput();
             switch (keyCode) {
@@ -1731,7 +1754,8 @@ static void dbgCheatsMenuShow()
                 break;
             }
 
-            renderPresent();
+            windowRefreshAll(&_scr_size);
+        renderPresent();
             sharedFpsLimiter.throttle();
         }
 
@@ -2051,7 +2075,7 @@ void MpDebugMenuShow()
             // deferred drains and host detect all run from MpTick, which the
             // main loop cannot reach while this modal blocks it. Same pattern
             // as the vote modal. No-ops when not in a session.
-            MpTick();
+            dbgPumpGameBehindModal();
             mouseShowCursor();
             int keyCode = inputGetInput();
             switch (keyCode) {
@@ -2115,7 +2139,8 @@ void MpDebugMenuShow()
                 }
             }
 
-            renderPresent();
+            windowRefreshAll(&_scr_size);
+        renderPresent();
             sharedFpsLimiter.throttle();
         }
 
@@ -2656,7 +2681,7 @@ void MpDebugModelPickerShow()
 
         // Keep the session alive behind the modal (profile sync runs from
         // MpTick, so a picked skin propagates even while the picker is open).
-        MpTick();
+        dbgPumpGameBehindModal();
         mouseShowCursor();
 
         int keyCode = inputGetInput();
@@ -2722,6 +2747,7 @@ void MpDebugModelPickerShow()
             break;
         }
 
+        windowRefreshAll(&_scr_size);
         renderPresent();
         sharedFpsLimiter.throttle();
     }

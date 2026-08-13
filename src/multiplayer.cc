@@ -1303,6 +1303,32 @@ static void mpClientTryFinishMapSync()
 
     mpClientApplyMapMetadata();
 
+    // Worldmap travel spawn: the host respawns every player around its own
+    // tile (MpFinishHostMapChange). Mirror that placement for the local dude
+    // so both players materialize at the same entrance area instead of the
+    // map file's default entering tile (which can be anywhere in the map).
+    if (gDude != nullptr && gMpSession.clientMapMetadataValid) {
+        const NetMapSyncPayload* spawnMeta = &gMpSession.clientMapMetadata;
+        int spawnTile = hexGridTileIsValid(spawnMeta->enteringTile)
+            ? spawnMeta->enteringTile
+            : gDude->tile;
+        int spawnElev = elevationIsValid(spawnMeta->enteringElevation)
+            ? spawnMeta->enteringElevation
+            : gDude->elevation;
+        int spawnRotation = spawnMeta->enteringRotation >= 0
+            ? spawnMeta->enteringRotation
+            : ROTATION_NE;
+        int playerTile = mpFindPlayerSpawnTile(
+            mpRandomSpawnAnchor(spawnTile, spawnElev), spawnElev);
+        if (hexGridTileIsValid(playerTile)) {
+            MpLog(MP_LOG_SYNC, "client spawn placed tile=%d elev=%d (host entering %d/%d)",
+                playerTile, spawnElev, spawnTile, spawnElev);
+            objectSetLocation(gDude, playerTile, spawnElev, nullptr);
+            objectSetRotation(gDude, static_cast<Rotation>(spawnRotation), nullptr);
+            mpShowClientPlayer(gDude);
+        }
+    }
+
     // Phantom pruning: the client's map/save copies of objects the host no
     // longer has (enemies killed or removed before the sync, opened doors,
     // despawned items) were never covered by the full sync and would linger
@@ -3117,26 +3143,6 @@ void MpRenderPlayerLabels()
     // Diagnostic: why labels do not draw. Time-windowed sampling — at most
     // one line per 1.5s per site — so the skip reason during NORMAL PLAY is
     // captured (the earlier one-shot budget was consumed by the load screen).
-    static uint32_t sMpTagLogTick = 0;
-    auto mpTagCanLog = []() -> bool {
-        uint32_t nowTicks = getTicks();
-        if (nowTicks - sMpTagLogTick >= 1500) {
-            sMpTagLogTick = nowTicks;
-            return true;
-        }
-        return false;
-    };
-    if (mpTagCanLog()) {
-        int connectedCount = 0;
-        for (int index = 0; index < NET_MAX_PLAYERS; index++) {
-            if (gMpSession.players[index].isConnected) {
-                connectedCount++;
-            }
-        }
-        MpLog(MP_LOG_UI, "pass state mpActive=%d connected=%d localNetId=%u surf=%dx%d",
-            gMpActive ? 1 : 0, connectedCount, gMpSession.localNetId,
-            gSdlSurface->w, gSdlSurface->h);
-    }
     // Dirty-rect engine: restore each previous label's clean original pixels into
     // both gSdlSurface and gSdlTextureSurface so moving or disappearing tags don't
     // smear, tear, or overwrite HUD/UI windows with raw ground tiles.
@@ -3181,12 +3187,6 @@ void MpRenderPlayerLabels()
         if (!p->isConnected || critter == nullptr
             || (critter->flags & OBJECT_HIDDEN) != 0
             || !tileIsValid(critter->tile)) {
-            if (mpTagCanLog()) {
-                MpLog(MP_LOG_UI, "skip player netId=%u connected=%d local=%d obj=%p hidden=%d tileValid=%d",
-                    p->netId, p->isConnected ? 1 : 0, p->isLocal ? 1 : 0, (void*)critter,
-                    critter != nullptr ? ((critter->flags & OBJECT_HIDDEN) != 0) : -1,
-                    critter != nullptr ? tileIsValid(critter->tile) : -1);
-            }
             continue;
         }
         int sx;
@@ -3241,11 +3241,6 @@ void MpRenderPlayerLabels()
 
         if (labelRect.w <= 0 || labelRect.h <= 0
             || windowIntersectsUiOrModal(labelRect.x, labelRect.y, labelRect.w, labelRect.h, gIsoWindow)) {
-            if (mpTagCanLog()) {
-                MpLog(MP_LOG_UI, "skip label netId=%u name='%s' rect=%d,%d %dx%d uiIntersect=%d",
-                    p->netId, name, labelRect.x, labelRect.y, labelRect.w, labelRect.h,
-                    windowIntersectsUiOrModal(labelRect.x, labelRect.y, labelRect.w, labelRect.h, gIsoWindow) ? 1 : 0);
-            }
             continue;
         }
 
@@ -3268,27 +3263,6 @@ void MpRenderPlayerLabels()
         fontDrawText2D(backBuffer, clampedX, clampedY, name, nameW, labelColor);
 
         int blitRc = SDL_BlitSurface(gSdlSurface, &labelRect, gSdlTextureSurface, &labelRect);
-
-        // Periodic draw proof: once every 5s, scan the label region and log
-        // how many pixels of the label color actually landed.
-        static uint32_t sMpTagDrawLogTick = 0;
-        if (getTicks() - sMpTagDrawLogTick >= 5000) {
-            sMpTagDrawLogTick = getTicks();
-            int srcColorPx = 0;
-            int src0 = 0;
-            for (int scanY = labelRect.y; scanY < labelRect.y + labelRect.h; scanY++) {
-                const unsigned char* row = (const unsigned char*)gSdlSurface->pixels
-                    + (size_t)scanY * gSdlSurface->pitch;
-                for (int scanX = labelRect.x; scanX < labelRect.x + labelRect.w; scanX++) {
-                    unsigned char b = row[scanX];
-                    if (b == (unsigned char)labelColor) srcColorPx++;
-                    else if (b == 0) src0++;
-                }
-            }
-            MpLog(MP_LOG_UI, "name tag draw surface=%p %dx%d name='%s' x=%d y=%d color=%d blit=%d srcColorPx=%d src0=%d",
-                (void*)gSdlSurface, gSdlSurface->w, gSdlSurface->h,
-                name, clampedX, clampedY, labelColor, blitRc, srcColorPx, src0);
-        }
     }
 }
 
@@ -3735,9 +3709,21 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                     // requesting player, who renders it in their monitor.
                     // The awareness HP block is skipped for non-gDude critters.
                     gMpInspectRelayNetId = p->netId;
+                    MpLog(MP_LOG_UI, "inspect relay netId=%u pid=0x%X sid=%d",
+                        p->netId, target->pid, target->sid);
                     if (objectExamineFunc(p->obj, target, mpInspectRelayLine) == -1) {
                         objectLookAtFunc(p->obj, target, mpInspectRelayLine);
                     }
+                    gMpInspectRelayNetId = 0;
+                    break;
+                case NET_PLAYER_ACTION_LOOK:
+                    // Co-op: hover look-at — the client's critters have no
+                    // runtime scripts, so the host runs the look-at script
+                    // (or the vanilla name line) and relays it back.
+                    gMpInspectRelayNetId = p->netId;
+                    MpLog(MP_LOG_UI, "look relay netId=%u pid=0x%X sid=%d",
+                        p->netId, target->pid, target->sid);
+                    objectLookAtFunc(p->obj, target, mpInspectRelayLine);
                     gMpInspectRelayNetId = 0;
                     break;
                 case NET_PLAYER_ACTION_TALK:
@@ -4083,8 +4069,16 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                             p->netId, p->debugCheatFlags);
                     } else {
                         p->debugCheatFlags = 0;
-                        MpLogAlways(MP_LOG_NET, "cheat flags rejected (client cheats disabled) netId=%u flags=0x%X",
-                            p->netId, (uint32_t)cmd->arg1);
+                        // The client heartbeats its cheat flags once per
+                        // second; log the rejection at a quiet cadence (the
+                        // debug menu's toggle is what actually matters).
+                        static uint32_t gMpCheatRejectLogTick = 0;
+                        uint32_t nowTicks = getTicks();
+                        if (nowTicks - gMpCheatRejectLogTick >= 10000) {
+                            gMpCheatRejectLogTick = nowTicks;
+                            MpLogAlways(MP_LOG_NET, "cheat flags rejected (client cheats disabled) netId=%u flags=0x%X",
+                                p->netId, (uint32_t)cmd->arg1);
+                        }
                     }
                     break;
                 default:
@@ -5546,6 +5540,13 @@ void MpBroadcastMapFullSync(ENetPeer* toPeer)
         packetHeader.length = (uint16_t)(sizeof(chunk) + count * sizeof(NetMapFullSyncObjectPayload));
         size_t total = sizeof(packetHeader) + packetHeader.length;
         if (total > sizeof(buf)) {
+            // Must never happen — MP_FULL_SYNC_MAX_OBJECTS_PER_PACKET is
+            // derived from NET_MAX_PACKET_SIZE and the payload size. If it
+            // ever fires, the sync is being dropped wholesale and the client
+            // black-screens in CLIENT_SYNCING; log it loudly instead of
+            // returning silently.
+            MpLogAlways(MP_LOG_SYNC, "full sync chunk OVERFLOW total=%zu max=%zu chunk=%u/%u objects=%d",
+                total, sizeof(buf), chunkIndex, chunkCount, count);
             return;
         }
         memcpy(buf, &packetHeader, sizeof(packetHeader));
@@ -6114,14 +6115,12 @@ static Object* mpApplyObjectStateInternal(const NetMapFullSyncObjectPayload* sta
             obj != nullptr ? obj->pid : 0);
     }
 
-    const char* mpDiagMode = "registered";
     if (obj == nullptr && player == nullptr && allowMapMatch && hexGridTileIsValid(state->tile)
         && elevationIsValid(state->elevation)) {
         Object* match = objectFindFirstAtLocation(state->elevation, state->tile);
         while (match != nullptr) {
             if (match->pid == state->pid) {
                 obj = match;
-                mpDiagMode = "matched";
                 break;
             }
             match = objectFindNextAtLocation();
@@ -6140,7 +6139,6 @@ static Object* mpApplyObjectStateInternal(const NetMapFullSyncObjectPayload* sta
                 if (probe != gDude && MpGetObjNetId(probe) == 0
                     && probe->pid == state->pid) {
                     obj = probe;
-                    mpDiagMode = "matched-any";
                     break;
                 }
                 probe = objectFindNext();
@@ -6153,44 +6151,9 @@ static Object* mpApplyObjectStateInternal(const NetMapFullSyncObjectPayload* sta
     // previous object) — duplicate netIds lose the earlier object.
     if (obj == nullptr) {
         obj = mpCreateClientObject(state);
-        mpDiagMode = "created";
     }
     if (obj == nullptr) {
         return nullptr;
-    }
-
-    // Co-op diagnostic (throttled): watch critter state applies so the
-    // encounter stream is verifiable end to end (host first-broadcast ->
-    // client apply). Fires at most once per 500ms per netId.
-    if (player == nullptr && objectTypeFromFid(state->fid) == OBJ_TYPE_CRITTER) {
-        static struct { uint32_t netId; uint32_t ms; uint32_t key; } last[32] = {};
-        uint32_t nowMs = getTicks();
-        uint32_t key = state->fid ^ (state->tile << 7) ^ (state->flags << 15) ^ (state->hp << 3);
-        int found = -1;
-        int freeSlot = -1;
-        for (int d = 0; d < 32; d++) {
-            if (last[d].netId == state->netId) {
-                found = d;
-                break;
-            }
-            if (freeSlot < 0 && last[d].netId == 0) {
-                freeSlot = d;
-            }
-        }
-        if (found >= 0) {
-            if (nowMs - last[found].ms > 500 || key != last[found].key) {
-                last[found].ms = nowMs;
-                last[found].key = key;
-                MpLog(MP_LOG_SYNC, "client apply netId=%u pid=0x%X tile=%d fid=0x%X flags=0x%X hp=%d team=%d mode=%s",
-                    state->netId, state->pid, state->tile, state->fid, state->flags, state->hp, state->combatTeam, mpDiagMode);
-            }
-        } else if (freeSlot >= 0) {
-            last[freeSlot].netId = state->netId;
-            last[freeSlot].ms = nowMs;
-            last[freeSlot].key = key;
-            MpLog(MP_LOG_SYNC, "client apply netId=%u pid=0x%X tile=%d fid=0x%X flags=0x%X hp=%d mode=%s (first)",
-                state->netId, state->pid, state->tile, state->fid, state->flags, state->hp, mpDiagMode);
-        }
     }
 
     // Keep the local player's critter pid even if a state arrives with a
@@ -6323,20 +6286,6 @@ void MpApplyPlayerState(const NetPlayerStateUpdatePayload* s)
         // walk silently. The snap reads smooth at the broadcast cadence and
         // can never freeze or stutter — the combat-speed boost for remote
         // avatars is a host-side walk concern only.
-        // Ground-height diagnostic (throttled): local-player transform snap.
-        // Proves whether the idle dude is being pulled by stale host offsets.
-        if (isLocalPlayer && (obj->tile != s->tile || obj->x != s->x || obj->y != s->y
-            || obj->fid != s->fid || obj->frame != s->frame || obj->elevation != s->elevation)) {
-            static uint32_t gMpLocalSnapLogTick = 0;
-            uint32_t nowTicks2 = getTicks();
-            if (nowTicks2 - gMpLocalSnapLogTick > 500) {
-                gMpLocalSnapLogTick = nowTicks2;
-                MpLog(MP_LOG_SYNC, "local snap obj: tile=%d x=%d y=%d fid=0x%X frame=%d elev=%d busy=%d -> s: tile=%d x=%d y=%d fid=0x%X frame=%d elev=%d",
-                    obj->tile, obj->x, obj->y, obj->fid, obj->frame, obj->elevation,
-                    localMovementIsActive ? 1 : 0,
-                    s->tile, s->x, s->y, s->fid, s->frame, s->elevation);
-            }
-        }
         mpApplyObjectTransform(obj, s->tile, s->x, s->y, s->rotation, s->fid, s->frame, s->elevation, 0, false);
         p->hasLastState = true;
         // The avatar reached the clicked destination: the intent's outcome is

@@ -92,6 +92,12 @@ bool MpDialogHostIsParticipant();
 // host keeps playing normally behind the client's dialogue.
 bool MpDialogDirectorMode();
 
+// Co-op: set by partyMemberAdd when recruitment is blocked (a client's
+// dialogue without the host). The director-choice executor uses it to roll
+// back the speaker script's local-var side effects so the recruit option is
+// not exhausted forever on the host. -1 = no block pending.
+extern int gMpPartyAddBlockedPid;
+
 // Host-side feedback float over `obj`, relayed to every client (same style as
 // the dialogue floats). Used for blocked actions such as talking to a
 // companion while it is in the party.

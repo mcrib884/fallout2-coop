@@ -1287,17 +1287,6 @@ bool windowIntersectsUiOrModal(int x, int y, int w, int h, int excludeWindow)
         }
         if (x <= window->rect.right && right >= window->rect.left
             && y <= window->rect.bottom && bottom >= window->rect.top) {
-            // Diagnostic (throttled): name the window that swallows the
-            // nametag labels so a missing label can be traced to its gate.
-            static uint32_t sLastIntersectLogTick = 0;
-            uint32_t nowTicks = getTicks();
-            if (nowTicks - sLastIntersectLogTick > 2000) {
-                sLastIntersectLogTick = nowTicks;
-                debugFilePrint("WINDOW: intersect query=%d,%d %dx%d hit index=%d id=%d rect=%d,%d-%d,%d flags=0x%X hidden=%d",
-                    x, y, w, h, index, window->id, window->rect.left, window->rect.top,
-                    window->rect.right, window->rect.bottom, window->flags,
-                    (window->flags & WINDOW_HIDDEN) != 0 ? 1 : 0);
-            }
             return true;
         }
     }

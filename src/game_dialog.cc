@@ -2400,12 +2400,39 @@ static int mpDialogDirectorProcessChoice(int optionIndex)
         dialogOptionEntry->proc, (void*)gDialogReplyProgram,
         gDialogReplyProgram != nullptr ? (gDialogReplyProgram->exited ? 1 : 0) : -1,
         gDialogReplyProgram != nullptr ? gDialogReplyProgram->flags : 0u);
+    // Co-op: recruitment side effects (option-gating local vars on the
+    // speaker's script) must be rolled back when the recruit was blocked — a
+    // client's dialogue without the host must not exhaust the recruit option
+    // and softlock the host's own recruitment later (the Smiley case).
+    static int lvSnapshot[256];
+    int lvSnapshotCount = 0;
+    int lvSnapshotOffset = -1;
+    if (gGameDialogSpeaker != nullptr) {
+        Script* lvScript = nullptr;
+        if (scriptGetScript(gGameDialogSpeaker->sid, &lvScript) != -1
+            && lvScript->localVarsCount > 0 && lvScript->localVarsOffset >= 0
+            && lvScript->localVarsCount <= 256) {
+            lvSnapshotCount = lvScript->localVarsCount;
+            lvSnapshotOffset = lvScript->localVarsOffset;
+            memcpy(lvSnapshot, gMapLocalVars + lvSnapshotOffset,
+                sizeof(int) * lvSnapshotCount);
+        }
+    }
     if (dialogOptionEntry->proc != 0 && gDialogReplyProgram != nullptr) {
         // The talk program may carry stale death flags (a previous dialogue's
         // exit_proc, or an exit that raced the parked session). The director
         // session owns this program now — clear them so the reply proc runs.
         gDialogReplyProgram->flags &= ~(PROGRAM_FLAG_EXITED | PROGRAM_FLAG_STOPPED | PROGRAM_FLAG_FATAL_ERROR);
         programExecuteProcedure(gDialogReplyProgram, dialogOptionEntry->proc);
+    }
+    if (gMpPartyAddBlockedPid != -1) {
+        MpLog(MP_LOG_DIALOG, "party add blocked during director choice pid=0x%X — restoring speaker LVs count=%d",
+            gMpPartyAddBlockedPid, lvSnapshotCount);
+        if (lvSnapshotCount > 0 && lvSnapshotOffset >= 0) {
+            memcpy(gMapLocalVars + lvSnapshotOffset, lvSnapshot,
+                sizeof(int) * lvSnapshotCount);
+        }
+        gMpPartyAddBlockedPid = -1;
     }
     MpLog(MP_LOG_DIALOG, "director choice done before=%u after=%u flags=0x%X postEntries=%d postReplyList=%d ip=%d",
         nodeSeqBefore, MpDialogHostNodeSeq(),

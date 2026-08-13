@@ -385,6 +385,10 @@ int partyMemberAdd(Object* object)
         MpLogAlways(MP_LOG_DIALOG,
             "party add blocked (client dialogue, host absent) pid=0x%X",
             object != nullptr ? object->pid : 0);
+        // Note the block so the director-choice executor can roll back the
+        // speaker script's local-var side effects — otherwise the recruit
+        // option's condition stays spent and the host can never recruit.
+        gMpPartyAddBlockedPid = object != nullptr ? object->pid : -1;
         return -1;
     }
 

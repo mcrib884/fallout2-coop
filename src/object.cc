@@ -191,6 +191,53 @@ static int _obj_last_elev = -1;
 // 0x51977C obj_last_is_empty
 static bool _obj_last_is_empty = true;
 
+// Co-op: per-player roof-hole tracking (index = player netId - 1). The
+// vanilla engine tracks a single last-mover square; co-op must punch and
+// restore roof-clear circles at EVERY player's position so one player under a
+// roof clears it for everyone. Slot 0 doubles as the vanilla slot when no
+// session is active (mpRoofSlotFor returns nullptr for non-player critters in
+// a session, keeping their synced transforms hole-free).
+struct MpRoofSlot {
+    bool used;
+    int x;
+    int y;
+    int elev;
+    bool isEmpty;
+};
+static MpRoofSlot gMpRoofSlots[NET_MAX_PLAYERS];
+
+static MpRoofSlot* mpRoofSlotFor(Object* obj)
+{
+    if (!gMpActive) {
+        return &gMpRoofSlots[0];
+    }
+    if (obj == gDude) {
+        int netId = gMpSession.localNetId;
+        int index = (netId >= 1 && netId <= NET_MAX_PLAYERS) ? netId - 1 : 0;
+        gMpRoofSlots[index].used = true;
+        return &gMpRoofSlots[index];
+    }
+    for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+        if (gMpSession.players[index].isConnected && gMpSession.players[index].obj == obj) {
+            gMpRoofSlots[index].used = true;
+            return &gMpRoofSlots[index];
+        }
+    }
+    return nullptr;
+}
+
+static bool mpRoofSquareCovered(int x, int y, int elev, Object* mover)
+{
+    for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+        MpRoofSlot* slot = &gMpRoofSlots[index];
+        if (slot->used && slot->x == x && slot->y == y && slot->elev == elev
+            && gMpSession.players[index].obj != mover) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // 0x519780 wallBlendTable
 unsigned char* _wallBlendTable = nullptr;
 
@@ -1591,30 +1638,34 @@ int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
         // NOTE: Uninline.
         obj_set_seen(tile);
 
-        // Co-op: the roof-clear circle must follow the LOCAL player only.
-        // Synced remote critters and mirrored objects move through this same
-        // function — their transforms would drag the transparency circle to
-        // their tiles (on the client that reads as circles placed in the
-        // wrong places) and corrupt the last-roof tracking globals. Vanilla
-        // singleplayer keeps its original last-mover behavior.
-        if (obj == gDude || !gMpActive) {
+        // Co-op: the roof-clear circle must be punched at EVERY player's
+        // position, not just the local dude's — when one player stands under
+        // a roof, everyone's screen removes that roof. The engine's tracking
+        // globals are single-slot, so co-op keeps per-player slots (index =
+        // netId - 1). Vanilla singleplayer keeps its original last-mover
+        // behavior; synced critters that are not players punch nothing.
+        MpRoofSlot* roofSlot = mpRoofSlotFor(obj);
+        if (roofSlot != nullptr) {
             int roofX = tile % 200 / 2;
             int roofY = tile / 200 / 2;
-            if (roofX != _obj_last_roof_x || roofY != _obj_last_roof_y || elevation != _obj_last_elev) {
+            if (roofX != roofSlot->x || roofY != roofSlot->y || elevation != roofSlot->elev) {
                 int currentSquare = _square[elevation]->field_0[roofX + 100 * roofY];
                 int currentSquareFid = buildFid(OBJ_TYPE_TILE, (currentSquare >> 16) & 0xFFF);
                 // CE: Add additional checks for -1 to prevent array lookup at index -101.
-                int previousSquare = _obj_last_roof_x != -1 && _obj_last_roof_y != -1
-                    ? _square[elevation]->field_0[_obj_last_roof_x + 100 * _obj_last_roof_y]
+                int previousSquare = roofSlot->x != -1 && roofSlot->y != -1
+                    ? _square[elevation]->field_0[roofSlot->x + 100 * roofSlot->y]
                     : 0;
                 bool isEmpty = buildFid(OBJ_TYPE_TILE, 1) == currentSquareFid;
 
-                if (isEmpty != _obj_last_is_empty || (((currentSquare >> 16) & 0xF000) >> 12) != (((previousSquare >> 16) & 0xF000) >> 12)) {
-                    if (!_obj_last_is_empty) {
-                        tile_fill_roof(_obj_last_roof_x, _obj_last_roof_y, elevation, true);
+                if (isEmpty != roofSlot->isEmpty || (((currentSquare >> 16) & 0xF000) >> 12) != (((previousSquare >> 16) & 0xF000) >> 12)) {
+                    // Restore/punch only when no OTHER player is standing on
+                    // the affected square — two players under one roof must
+                    // not fight over the hole.
+                    if (!roofSlot->isEmpty && !mpRoofSquareCovered(roofSlot->x, roofSlot->y, elevation, obj)) {
+                        tile_fill_roof(roofSlot->x, roofSlot->y, elevation, true);
                     }
 
-                    if (!isEmpty) {
+                    if (!isEmpty && !mpRoofSquareCovered(roofX, roofY, elevation, obj)) {
                         tile_fill_roof(roofX, roofY, elevation, false);
                     }
 
@@ -1623,10 +1674,10 @@ int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
                     }
                 }
 
-                _obj_last_roof_x = roofX;
-                _obj_last_roof_y = roofY;
-                _obj_last_elev = elevation;
-                _obj_last_is_empty = isEmpty;
+                roofSlot->x = roofX;
+                roofSlot->y = roofY;
+                roofSlot->elev = elevation;
+                roofSlot->isEmpty = isEmpty;
             }
         }
 
@@ -1649,11 +1700,22 @@ int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
 
         if (elevation != oldElevation) {
             // SFALL: Remove text floaters after moving to another elevation.
-            textObjectsReset();
+            // Co-op: only the LOCAL player's elevation change may switch the
+            // view — synced remote avatars ride this same function, and their
+            // states (e.g. the host's dude still on the upper floor while the
+            // client took the ladder down) were stomping the client's view
+            // elevation and camera every broadcast. Vanilla keeps its
+            // original behavior.
+            if (obj == gDude || !gMpActive) {
+                textObjectsReset();
 
-            mapSetElevation(elevation);
-            tileSetCenter(tile, TILE_SET_CENTER_REFRESH_WINDOW | TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS);
+                mapSetElevation(elevation);
+                tileSetCenter(tile, TILE_SET_CENTER_REFRESH_WINDOW | TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS);
+            }
             if (isInCombat()) {
+                // Co-op: ungated on purpose — a player leaving the floor via
+                // a ladder mid-combat must end combat on BOTH sides (the
+                // client's mirror waits on the host's COMBAT_ENDED).
                 _game_user_wants_to_quit = GAME_QUIT_REQUEST_END_COMBAT;
             }
         }
@@ -1687,6 +1749,28 @@ int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
 // 0x48A9A0 obj_reset_roof
 int _obj_reset_roof()
 {
+    if (gMpActive) {
+        // Co-op: restore the hole at every tracked player's square and reset
+        // the slots (the map just loaded — the previous map's holes must not
+        // carry over).
+        for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+            MpRoofSlot* slot = &gMpRoofSlots[index];
+            if (slot->used && slot->x != -1 && slot->y != -1) {
+                int fid = buildFid(OBJ_TYPE_TILE,
+                    (_square[slot->elev]->field_0[slot->x + 100 * slot->y] >> 16) & 0xFFF);
+                if (fid != buildFid(OBJ_TYPE_TILE, 1)) {
+                    tile_fill_roof(slot->x, slot->y, slot->elev, 1);
+                }
+            }
+            slot->used = false;
+            slot->x = -1;
+            slot->y = -1;
+            slot->elev = 0;
+            slot->isEmpty = false;
+        }
+        return 0;
+    }
+
     int fid = buildFid(OBJ_TYPE_TILE, (_square[gDude->elevation]->field_0[_obj_last_roof_x + 100 * _obj_last_roof_y] >> 16) & 0xFFF);
     if (fid != buildFid(OBJ_TYPE_TILE, 1)) {
         tile_fill_roof(_obj_last_roof_x, _obj_last_roof_y, gDude->elevation, 1);

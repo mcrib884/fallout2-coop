@@ -1100,8 +1100,6 @@ void _GNW95_process_message()
                     }
                 }
                 _GNW95_process_key(&keyboardData);
-            } else if (gMpActive && e.type == SDL_KEYDOWN) {
-                MpLog(MP_LOG_INPUT, "(keyboard disabled) scan=%d", keyboardData.key);
             }
             break;
         }

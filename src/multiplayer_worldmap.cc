@@ -296,10 +296,16 @@ void MpWorldmapBroadcastState(bool force)
     // Discovery deltas ride the same cadence (the walk marks subtiles right
     // before this broadcast in the worldmap loop).
     mpWorldmapSendDiscoveryChanges();
-    MpLog(MP_LOG_WORLDMAP, "host state pos=%d,%d dest=%d,%d walk=%d car=%d fuel=%d area=%d",
-        payload.worldPosX, payload.worldPosY,
-        payload.walkDestinationX, payload.walkDestinationY,
-        payload.isWalking, payload.isInCar, payload.carFuel, payload.currentAreaId);
+    // State heartbeat at a quiet cadence (the broadcast itself runs every
+    // ~50ms; a log per packet would dwarf everything else in the session).
+    static uint32_t sLastHostStateLogTick = 0;
+    if (now - sLastHostStateLogTick >= 1000) {
+        sLastHostStateLogTick = now;
+        MpLog(MP_LOG_WORLDMAP, "host state pos=%d,%d dest=%d,%d walk=%d car=%d fuel=%d area=%d",
+            payload.worldPosX, payload.worldPosY,
+            payload.walkDestinationX, payload.walkDestinationY,
+            payload.isWalking, payload.isInCar, payload.carFuel, payload.currentAreaId);
+    }
 }
 
 void MpWorldmapSendStateToPeer(ENetPeer* peer)
@@ -370,13 +376,20 @@ void MpWorldmapOnState(const NetWorldmapStatePayload* payload)
     } else if (payload->carFuel < currentFuel) {
         wmCarUseGas(currentFuel - payload->carFuel);
     }
-    // If the mirror is up, redraw the worldmap surface this frame.
+    // The mirror repaints the worldmap surface this frame.
     gMpWorldmapDirty = true;
-    MpLog(MP_LOG_WORLDMAP, "client state pos=%d,%d dest=%d,%d walk=%d car=%d fuel=%d area=%d enc=%d,%d,%d",
-        payload->worldPosX, payload->worldPosY,
-        payload->walkDestinationX, payload->walkDestinationY,
-        payload->isWalking, payload->isInCar, payload->carFuel, payload->currentAreaId,
-        payload->encounterMapId, payload->encounterTableId, payload->encounterEntryId);
+    // State heartbeat at a quiet cadence (the broadcast itself runs every
+    // ~50ms; a log per packet would dwarf everything else in the session).
+    static uint32_t sLastClientStateLogTick = 0;
+    uint32_t nowTicks = getTicks();
+    if (nowTicks - sLastClientStateLogTick >= 1000) {
+        sLastClientStateLogTick = nowTicks;
+        MpLog(MP_LOG_WORLDMAP, "client state pos=%d,%d dest=%d,%d walk=%d car=%d fuel=%d area=%d enc=%d,%d,%d",
+            payload->worldPosX, payload->worldPosY,
+            payload->walkDestinationX, payload->walkDestinationY,
+            payload->isWalking, payload->isInCar, payload->carFuel, payload->currentAreaId,
+            payload->encounterMapId, payload->encounterTableId, payload->encounterEntryId);
+    }
 }
 
 void MpWorldmapOnDiscovery(const void* data, size_t len)
@@ -409,6 +422,7 @@ void MpWorldmapOnDiscovery(const void* data, size_t len)
             areaState[i] = areaPairs[i * 2 + 1];
         }
         wmDiscoveryApplyFull(body, header->count, areaVisited, areaState, areaCount);
+        wmDiscoveryRebuildLabels();
         MpLog(MP_LOG_WORLDMAP, "client discovery full tiles=%u areas=%d", header->count, areaCount);
     } else if (header->mode == 2) {
         // Incremental: count * 5 bytes (u16 tile, u8 subX, u8 subY, u8 state).
@@ -431,6 +445,7 @@ void MpWorldmapOnDiscovery(const void* data, size_t len)
             changes[i].state = *p++;
         }
         wmDiscoveryApplyChanges(changes, count);
+        wmDiscoveryRebuildLabels();
         MpLog(MP_LOG_WORLDMAP, "client discovery changes=%d", count);
     } else {
         MpLogAlways(MP_LOG_WORLDMAP, "client discovery bad mode=%u", header->mode);

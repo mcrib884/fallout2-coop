@@ -722,59 +722,11 @@ int _gmouse_is_scrolling()
     return isScrolling;
 }
 
-// Co-op diagnostics for the "invisible cursor on the client" bug. Dumps the
-// full cursor state so the log shows exactly which flag or fid leaves nothing
-// on screen. Fires (throttled) whenever a co-op client is in the anomaly
-// state: gmouse enabled but the 3D cursor objects hidden — the field cursor
-// is invisible while input still works. MP_LOG_UI-gated via MpLog.
-static void mpCursorDebugDump(const char* why)
-{
-    if (!gMpActive || !gMpIsClient || !_gmouse_enabled) {
-        return;
-    }
-    bool hexHidden = (gGameMouseHexCursor->flags & OBJECT_HIDDEN) != 0;
-    bool bounceHidden = (gGameMouseBouncingCursor->flags & OBJECT_HIDDEN) != 0;
-    if (!hexHidden && !bounceHidden) {
-        return;
-    }
-    int atPoint = -1;
-    int mouseX;
-    int mouseY;
-    mouseGetPosition(&mouseX, &mouseY);
-    atPoint = windowGetAtPoint(mouseX, mouseY);
-    MpLog(MP_LOG_UI, "cursor anomaly [%s]: cursor=%d mode=%d gmouseEnabled=%d uiDisabled=%d hexHidden=%d hexFid=0x%X hexTile=%d hexElev=%d bounceHidden=%d atPointWin=%d isoWin=%d elev=%d",
-        why,
-        gGameMouseCursor,
-        gGameMouseMode,
-        _gmouse_enabled ? 1 : 0,
-        gameUiIsDisabled() ? 1 : 0,
-        hexHidden ? 1 : 0,
-        gGameMouseHexCursor->fid,
-        gGameMouseHexCursor->tile,
-        gGameMouseHexCursor->elevation,
-        bounceHidden ? 1 : 0,
-        atPoint,
-        gIsoWindow,
-        gElevation);
-}
-
 // 0x44B684 gmouse_bk_process
 void gameMouseRefresh()
 {
     if (!gGameMouseInitialized) {
         return;
-    }
-
-    // Co-op diagnostics: periodic cursor-state dump (1s) while a co-op client
-    // is in the invisible-cursor anomaly state, so the stuck steady state is
-    // captured no matter how it got there.
-    if (gMpActive && gMpIsClient) {
-        static unsigned int gMpCursorLastDumpTick = 0;
-        unsigned int now = getTicks();
-        if (gMpCursorLastDumpTick == 0 || getTicksBetween(now, gMpCursorLastDumpTick) >= 1000) {
-            gMpCursorLastDumpTick = now;
-            mpCursorDebugDump("tick");
-        }
     }
 
     int mouseX;
@@ -1036,7 +988,18 @@ void gameMouseRefresh()
 
                     if (pointedObject != gGameMousePointedObject) {
                         gGameMousePointedObject = pointedObject;
-                        objectLookAt(gDude, gGameMousePointedObject);
+                        if (gMpActive && gMpIsClient
+                            && objectTypeFromFid(pointedObject->fid) == OBJ_TYPE_CRITTER
+                            && MpGetObjNetId(pointedObject) != 0) {
+                            // Co-op: the client's critter copies carry no
+                            // runtime scripts, so vanilla look-at would print
+                            // a generic name line. The host runs the
+                            // authoritative look-at script and relays the
+                            // text back to this player's monitor.
+                            gameMouseSendPlayerAction(NET_PLAYER_ACTION_LOOK, pointedObject);
+                        } else {
+                            objectLookAt(gDude, gGameMousePointedObject);
+                        }
                     }
                 }
             } else if (gGameMouseMode == GAME_MOUSE_MODE_CROSSHAIR) {
@@ -1052,7 +1015,22 @@ void gameMouseRefresh()
                     bool pointedObjectIsCritter = objectTypeFromFid(pointedObject->fid) == OBJ_TYPE_CRITTER;
 
                     if (settings.preferences.combat_looks) {
-                        if (objectExamine(gDude, pointedObject) == -1) {
+                        if (gMpActive && gMpIsClient) {
+                            // Co-op: relay the examine to the host like the
+                            // arrow-mode inspect; the vanilla per-frame loop
+                            // would spam packets, so send once per pointed
+                            // target change.
+                            static Object* gMpLastCombatLookTarget = nullptr;
+                            if (pointedObject != gMpLastCombatLookTarget) {
+                                gMpLastCombatLookTarget = pointedObject;
+                                if (objectTypeFromFid(pointedObject->fid) == OBJ_TYPE_CRITTER
+                                    && MpGetObjNetId(pointedObject) != 0) {
+                                    gameMouseSendPlayerAction(NET_PLAYER_ACTION_INSPECT, pointedObject);
+                                } else if (objectExamine(gDude, pointedObject) == -1) {
+                                    objectLookAt(gDude, pointedObject);
+                                }
+                            }
+                        } else if (objectExamine(gDude, pointedObject) == -1) {
                             objectLookAt(gDude, pointedObject);
                         }
                     }
@@ -1833,8 +1811,6 @@ int gameMouseSetCursor(int cursor)
         return -1;
     }
 
-    int mpCursorPrevForLog = gGameMouseCursor;
-
     if (cursor != MOUSE_CURSOR_ARROW && cursor == gGameMouseCursor && (gGameMouseCursor < 25 || gGameMouseCursor >= 27)) {
         return -1;
     }
@@ -1843,7 +1819,6 @@ int gameMouseSetCursor(int cursor)
     int fid = buildFid(OBJ_TYPE_INTERFACE, gGameMouseCursorFrmIds[cursor]);
     Art* mouseCursorFrm = artLock(fid, &mouseCursorFrmHandle);
     if (mouseCursorFrm == nullptr) {
-        mpCursorDebugDump("setCursorArtFail");
         return -1;
     }
 
@@ -1895,10 +1870,6 @@ int gameMouseSetCursor(int cursor)
 
     gGameMouseCursor = cursor;
     gGameMouseCursorFrmHandle = mouseCursorFrmHandle;
-
-    if (cursor != mpCursorPrevForLog) {
-        mpCursorDebugDump("setCursor");
-    }
 
     return 0;
 }
@@ -1980,8 +1951,6 @@ void gameMouseSetMode(int mode)
     gGameMouseMode = mode;
     _gmouse_3d_hover_test = false;
     _gmouse_3d_last_move_time = getTicks();
-
-    mpCursorDebugDump("setMode");
 
     tileWindowRefreshRect(&rect, gElevation);
 
@@ -2104,8 +2073,6 @@ void gameMouseObjectsShow()
         return;
     }
 
-    mpCursorDebugDump("objectsShow");
-
     int refreshFlags = 0;
 
     Rect rect1;
@@ -2169,8 +2136,6 @@ void gameMouseObjectsHide()
     if (!gGameMouseInitialized) {
         return;
     }
-
-    mpCursorDebugDump("objectsHide");
 
     int refreshFlags = 0;
 

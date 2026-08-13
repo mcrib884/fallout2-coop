@@ -22,7 +22,14 @@ typedef enum MultiplayerState {
 #define MP_OBJ_ID_TABLE_SIZE 65536
 #define MP_NETID_TO_OBJ_INITIAL_CAPACITY 4096
 #define MP_OBJ_NETID_BASE 1000
-#define MP_FULL_SYNC_MAX_OBJECTS_PER_PACKET 60
+// Full-sync object chunks must fit NET_MAX_PACKET_SIZE. Derived at compile
+// time from the actual payload sizes so a struct growth can never silently
+// break the sync again: the old fixed 60 objects/packet exceeded the 4096
+// byte limit once NetMapFullSyncObjectPayload grew (script index), and the
+// sender's size guard dropped the ENTIRE full sync, leaving the client
+// black-screened in CLIENT_SYNCING forever.
+#define MP_FULL_SYNC_MAX_OBJECTS_PER_PACKET \
+    ((NET_MAX_PACKET_SIZE - (int)sizeof(NetPacketHeader) - (int)sizeof(NetMapFullSyncChunkHeader)) / (int)sizeof(NetMapFullSyncObjectPayload))
 #define MP_MAP_TILE_VALUES_PER_PACKET 1000
 // Max time a client may sit in CLIENT_SYNCING (initial join or map change)
 // before giving up. Custom-model uploads can take a while on slow links.

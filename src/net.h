@@ -257,6 +257,7 @@ enum NetPlayerActionType {
     // item's pid (the INACTIVE one, so the host can find it in the avatar's
     // inventory), tile = the fuse seconds the client selected.
     NET_PLAYER_ACTION_USE_ITEM = 13,
+    NET_PLAYER_ACTION_LOOK = 14, // hover look-at (mirrors vanilla look_at feedback)
 };
 
 typedef struct NetPlayerActionPayload {

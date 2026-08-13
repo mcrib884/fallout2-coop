@@ -3368,6 +3368,16 @@ void wmWorldMap()
 
 // 0x4BFE10 wmWorldMapFunc
 // Co-op: non-static so the client's read-only mirror can run the same loop.
+// Co-op client mirror: camera-follow tracker. The mirror never runs the
+// walking block (host-authoritative), so the vanilla per-step camera scroll
+// (wmPartyWalkingStep -> wmInterfaceScrollPixel) never fires there. These
+// track the last applied host state so the mirror can reproduce the host's
+// camera motion: snap onto the party at walk start, then track the same
+// pixel deltas (identical clamping at the world edges).
+static bool gMpWmFollowWasWalking = false;
+static int gMpWmFollowLastX = 0;
+static int gMpWmFollowLastY = 0;
+
 int wmWorldMapFunc(int a1)
 {
     ScopedGameMode gm(GameMode::kWorldmap);
@@ -3384,6 +3394,14 @@ int wmWorldMapFunc(int a1)
 
     wmFadeIn();
     touch_set_touchscreen_mode(false);
+
+    if (gMpWorldmapReadOnly) {
+        // Fresh mirror session: start the follow tracker idle so the first
+        // walking STATE packet snaps the camera onto the party.
+        gMpWmFollowWasWalking = false;
+        gMpWmFollowLastX = wmGenData.worldPosX;
+        gMpWmFollowLastY = wmGenData.worldPosY;
+    }
 
     wmMatchWorldPosToArea(wmGenData.worldPosX, wmGenData.worldPosY, &(wmGenData.currentAreaId));
 
@@ -3742,10 +3760,32 @@ int wmWorldMapFunc(int a1)
         }
 
         // Co-op client mirror: repaint the worldmap surface when the host's
-        // STATE packet changed party position/destination/car state.
+        // STATE packet changed party position/destination/car state, and
+        // follow the party while it walks (the walking block is host-side, so
+        // the vanilla per-step camera scroll never runs here). The mirror
+        // snaps onto the party at walk start (like the host's center-on-walk-
+        // start) and then tracks it via the same pixel deltas the host's
+        // camera accumulates, keeping both views in lockstep.
         if (gMpWorldmapReadOnly && gMpWorldmapDirty) {
             gMpWorldmapDirty = false;
-            wmInterfaceRefresh();
+            if (wmGenData.isWalking) {
+                if (!gMpWmFollowWasWalking) {
+                    wmInterfaceCenterOnParty();
+                } else {
+                    int dx = wmGenData.worldPosX - gMpWmFollowLastX;
+                    int dy = wmGenData.worldPosY - gMpWmFollowLastY;
+                    if (dx != 0 || dy != 0) {
+                        wmInterfaceScrollPixel(abs(dx), abs(dy), dx, dy, nullptr, true);
+                    } else {
+                        wmInterfaceRefresh();
+                    }
+                }
+            } else {
+                wmInterfaceRefresh();
+            }
+            gMpWmFollowWasWalking = wmGenData.isWalking;
+            gMpWmFollowLastX = wmGenData.worldPosX;
+            gMpWmFollowLastY = wmGenData.worldPosY;
         }
 
         // Co-op: the host left the worldmap (EXIT received on the mirror, or
@@ -5533,17 +5573,34 @@ static void wmMouseBkProc()
     int y;
     mouseGetPosition(&x, &y);
 
+    // Co-op: windowed-mode guard — once the cursor leaves the game window,
+    // SDL stops reporting motion and the engine's last position stays where
+    // it was (often a screen edge), so the edge-scroll would keep sliding
+    // the map forever. Only scroll while the cursor is actually over the
+    // window; otherwise drop the scroll cursor back to the arrow.
+    if (gSdlWindow != nullptr
+        && (SDL_GetWindowFlags(gSdlWindow) & SDL_WINDOW_MOUSE_FOCUS) == 0) {
+        if (gameMouseGetCursor() != MOUSE_CURSOR_ARROW) {
+            gameMouseSetCursor(MOUSE_CURSOR_ARROW);
+        }
+        return;
+    }
+
     int dx = 0;
-    if (x == screenGetWidth() - 1) {
+    // Edge-scroll band: the same 12px collider the in-game camera uses
+    // (game_mouse.cc scrollMargin). Vanilla only fired on the exact 1px
+    // edge; a comfortable band around the border scrolls the map.
+    const int scrollMargin = 12;
+    if (x >= screenGetWidth() - scrollMargin) {
         dx = 1;
-    } else if (x == 0) {
+    } else if (x <= scrollMargin) {
         dx = -1;
     }
 
     int dy = 0;
-    if (y == screenGetHeight() - 1) {
+    if (y >= screenGetHeight() - scrollMargin) {
         dy = 1;
-    } else if (y == 0) {
+    } else if (y <= scrollMargin) {
         dy = -1;
     }
 

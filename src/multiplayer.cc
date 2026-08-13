@@ -2878,9 +2878,12 @@ void MpTick()
         }
         MpLog(MP_LOG_WORLDMAP, "client encounter setup map=%d table=%d entry=%d",
             encMap, encTable, encEntry);
-        if (wmSetupRandomEncounter() == -1) {
-            debugPrint("\nError: couldn't set up random encounter after deferred client map enter!");
-        }
+        // NOTE: the client deliberately does NOT call wmSetupRandomEncounter
+        // here. The host owns the spawn; the critters arrive via the object
+        // states queued during sync and drained at the PLAYING flip (plus
+        // create-on-update for any late arrivals). A local spawn would add a
+        // second, unregistered copy at client-RNG positions — the client
+        // would see the host's enemies PLUS its own.
     }
 
     if (gMpIsHost) {

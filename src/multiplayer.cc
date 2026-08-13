@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <vector>
 #include <unordered_map>
+#include <utility>
 #include <unordered_set>
 #include <algorithm>
 
@@ -1378,6 +1379,9 @@ static void mpClientTryFinishMapSync()
     // first broadcasts for host-spawned objects) apply now that the session
     // is PLAYING.
     mpClientDrainObjStates();
+    // The client's save may carry pre-session addictions — report them so the
+    // host's per-player overlay is correct for this player's dialogue.
+    MpSendAddictionSnapshot();
     mpJoinBlackoutHide();
 }
 
@@ -1602,6 +1606,7 @@ static bool mpBuildObjectState(Object* obj, NetMapFullSyncObjectPayload* state)
     state->rotation = obj->rotation;
     state->elevation = obj->elevation;
     state->flags = obj->flags;
+    state->scriptIndex = obj->scriptIndex;
     if (objectTypeFromFid(obj->fid) == OBJ_TYPE_CRITTER) {
         state->hp = obj->data.critter.hp;
         state->ap = obj->data.critter.combat.ap;
@@ -1612,6 +1617,18 @@ static bool mpBuildObjectState(Object* obj, NetMapFullSyncObjectPayload* state)
         state->combatResults = obj->data.critter.combat.results;
     }
     return true;
+}
+
+// Co-op: relays host-side examine/look-at text lines to the requesting remote
+// player (objectExamineFunc/objectLookAtFunc call the callback up to 3 times,
+// once per ammo/description line).
+static uint32_t gMpInspectRelayNetId = 0;
+static void mpInspectRelayLine(const char* text)
+{
+    if (text == nullptr || gMpInspectRelayNetId == 0) {
+        return;
+    }
+    MpCombatSendMonitorMessageToPlayer(gMpInspectRelayNetId, text);
 }
 
 static int mpHostFindObjectRecord(uint32_t netId)
@@ -3261,6 +3278,124 @@ void MpRenderPlayerLabels()
 // persist the host's quests into the client's slot.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Per-player addictions.
+// ---------------------------------------------------------------------------
+// Drug addictions are per-player, not quest state: the host keeps an overlay
+// per player (fed by NET_PKT_ADDICTION_CHANGE from each client, plus the
+// join snapshot) and dialogue scripts for a client read the overlay through
+// the initiator-aware accessors instead of the shared quest gvars. The
+// host's own addiction lives in the shared gvars as vanilla.
+static std::vector<int32_t> gMpAddictionGvarList;
+static bool gMpAddictionListBuilt = false;
+static std::vector<std::pair<int32_t, int32_t>> gMpAddictionOverlay[NET_MAX_PLAYERS];
+
+static void mpAddictionEnsureList()
+{
+    if (gMpAddictionListBuilt) {
+        return;
+    }
+    gMpAddictionListBuilt = true;
+    const int count = mpDrugGetAddictionGvarCount();
+    for (int index = 0; index < count; index++) {
+        int32_t gvar = mpDrugGetAddictionGvarByIndex(index);
+        if (gvar >= 0) {
+            gMpAddictionGvarList.push_back(gvar);
+        }
+    }
+}
+
+bool MpAddictionIsTracked(int32_t gvar)
+{
+    mpAddictionEnsureList();
+    for (int32_t tracked : gMpAddictionGvarList) {
+        if (tracked == gvar) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int mpAddictionOverlayFind(int playerIndex, int32_t gvar)
+{
+    auto& entries = gMpAddictionOverlay[playerIndex];
+    for (size_t i = 0; i < entries.size(); i++) {
+        if (entries[i].first == gvar) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+void MpSendAddictionChange(int32_t gvar, int32_t value)
+{
+    if (!gMpActive || !gMpIsClient || gMpSession.hostPeer == nullptr || gvar < 0) {
+        return;
+    }
+    NetAddictionChangePayload payload;
+    payload.gvar = gvar;
+    payload.value = value;
+    NetSendPacket(gMpSession.hostPeer, NET_CHANNEL_RELIABLE,
+        NET_PKT_ADDICTION_CHANGE, &payload, sizeof(payload));
+}
+
+// Client -> host: report the client's current addiction set (its save may
+// carry addictions from before the session). Sent once when the client
+// finishes joining (state flips to PLAYING).
+void MpSendAddictionSnapshot()
+{
+    if (!gMpActive || !gMpIsClient || gGameGlobalVars == nullptr || gGameGlobalVarsLength <= 0) {
+        return;
+    }
+    const int count = mpDrugGetAddictionGvarCount();
+    for (int index = 0; index < count; index++) {
+        int32_t gvar = mpDrugGetAddictionGvarByIndex(index);
+        if (gvar < 0 || gvar >= gGameGlobalVarsLength) {
+            continue;
+        }
+        MpSendAddictionChange(gvar, gGameGlobalVars[gvar]);
+    }
+}
+
+// Host-side read for dialogue scripts: while a client's dialogue is active,
+// addiction gvars resolve against that client's overlay; otherwise (no
+// dialogue, scripted dialogue, or the host's own dialogue) the shared gvar.
+int32_t MpAddictionGetForDialogue(int32_t gvar)
+{
+    if (!gMpActive || !gMpIsHost || gvar < 0 || gvar >= gGameGlobalVarsLength) {
+        return gvar >= 0 && gvar < gGameGlobalVarsLength ? gGameGlobalVars[gvar] : 0;
+    }
+    uint8_t initiator = MpDialogActiveInitiatorNetId();
+    if (initiator >= 1 && initiator <= NET_MAX_PLAYERS && initiator != gMpSession.localNetId) {
+        int slot = mpAddictionOverlayFind(initiator - 1, gvar);
+        if (slot >= 0) {
+            return gMpAddictionOverlay[initiator - 1][slot].second;
+        }
+    }
+    return gGameGlobalVars[gvar];
+}
+
+// Host-side write for dialogue scripts: a client's dialogue writes its own
+// overlay; the host's own dialogue writes the shared gvar (vanilla path).
+void MpAddictionSetForDialogue(int32_t gvar, int32_t value)
+{
+    if (!gMpActive || !gMpIsHost) {
+        return;
+    }
+    uint8_t initiator = MpDialogActiveInitiatorNetId();
+    if (initiator >= 1 && initiator <= NET_MAX_PLAYERS && initiator != gMpSession.localNetId) {
+        int playerIndex = initiator - 1;
+        int slot = mpAddictionOverlayFind(playerIndex, gvar);
+        if (slot >= 0) {
+            gMpAddictionOverlay[playerIndex][slot].second = value;
+        } else {
+            gMpAddictionOverlay[playerIndex].emplace_back(gvar, value);
+        }
+        return;
+    }
+    gameSetGlobalVar((GameGlobalVar)gvar, value);
+}
+
 static void mpGvarOnChange(const NetGvarChangePayload* payload)
 {
     if (!gMpIsClient || !gMpActive || payload == nullptr) {
@@ -3268,6 +3403,13 @@ static void mpGvarOnChange(const NetGvarChangePayload* payload)
     }
     if (payload->index < 0 || payload->index >= gGameGlobalVarsLength) {
         MpLog(MP_LOG_SCRIPT, "gvar change out of range idx=%d len=%d", payload->index, gGameGlobalVarsLength);
+        return;
+    }
+    // Addictions are per-player — the host never broadcasts them through the
+    // quest relay (the client keeps its own local value). Defensive skip.
+    if (MpAddictionIsTracked(payload->index)) {
+        MpLog(MP_LOG_SCRIPT, "gvar change skipped (per-player addiction) idx=%d val=%d",
+            payload->index, payload->value);
         return;
     }
     gGameGlobalVars[payload->index] = payload->value;
@@ -3554,11 +3696,29 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
 
                 switch (action->action) {
                 case NET_PLAYER_ACTION_INSPECT:
-                    if (objectExamine(p->obj, target) == -1) {
-                        objectLookAt(p->obj, target);
+                    // Co-op: run the examine on the host (authoritative script
+                    // and scripted names) and relay every text line to the
+                    // requesting player, who renders it in their monitor.
+                    // The awareness HP block is skipped for non-gDude critters.
+                    gMpInspectRelayNetId = p->netId;
+                    if (objectExamineFunc(p->obj, target, mpInspectRelayLine) == -1) {
+                        objectLookAtFunc(p->obj, target, mpInspectRelayLine);
                     }
+                    gMpInspectRelayNetId = 0;
                     break;
                 case NET_PLAYER_ACTION_TALK:
+                    // Co-op: clients must not interact with companions while
+                    // they are in the party — no talking, no recruiting, no
+                    // item switching (the trade screen only opens through the
+                    // dialogue). Non-party NPCs keep full dialogue.
+                    if (objectIsPartyMember(target)) {
+                        MpLogAlways(MP_LOG_DIALOG,
+                            "talk rejected (party member) netId=%u pid=0x%X",
+                            p->netId, target->pid);
+                        MpDialogFloat(target, "That companion won't talk to you.",
+                            101, COLOR_WHITE, COLOR_BLACK);
+                        break;
+                    }
                     // Co-op: a talk targeting an NPC with an active session
                     // joins it; otherwise record the pending initiator so the
                     // dialogue session starts with the right player.
@@ -3822,6 +3982,32 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                     return;
                 }
                 MpChatHostOnMessage(in->senderNetId, in->text);
+                break;
+            }
+            case NET_PKT_ADDICTION_CHANGE: {
+                if (payloadLen != sizeof(NetAddictionChangePayload)) {
+                    MpLogAlways(MP_LOG_SCRIPT, "host reject addiction bad length=%zu", payloadLen);
+                    return;
+                }
+                MultiplayerPlayer* p = mpPlayerFindByPeer(peer);
+                if (p == nullptr || !p->isHandshaken || p->obj == nullptr) {
+                    return;
+                }
+                const NetAddictionChangePayload* addiction = (const NetAddictionChangePayload*)payload;
+                if (!MpAddictionIsTracked(addiction->gvar)) {
+                    MpLogAlways(MP_LOG_SCRIPT, "addiction change ignored (untracked gvar=%d) player=%u",
+                        addiction->gvar, p->netId);
+                    return;
+                }
+                int playerIndex = p->netId - 1;
+                int slot = mpAddictionOverlayFind(playerIndex, addiction->gvar);
+                if (slot >= 0) {
+                    gMpAddictionOverlay[playerIndex][slot].second = addiction->value;
+                } else {
+                    gMpAddictionOverlay[playerIndex].emplace_back(addiction->gvar, addiction->value);
+                }
+                MpLog(MP_LOG_SCRIPT, "addiction overlay player=%u gvar=%d val=%d",
+                    p->netId, addiction->gvar, addiction->value);
                 break;
             }
             case NET_PKT_PLAYER_CMD: {
@@ -5977,6 +6163,10 @@ static Object* mpApplyObjectStateInternal(const NetMapFullSyncObjectPayload* sta
     if (player == nullptr || !player->isLocal || objectTypeFromPid(state->pid) == OBJ_TYPE_CRITTER) {
         obj->pid = state->pid;
     }
+    // Co-op: carry the host's script index so scripted names (critterGetName)
+    // and examine/description scripts resolve locally — map-file critters are
+    // recreated scriptless on the client, which otherwise shows proto names.
+    obj->scriptIndex = state->scriptIndex;
     MpRegisterObjNetId(obj, state->netId);
     if (player != nullptr) {
         player->obj = obj;

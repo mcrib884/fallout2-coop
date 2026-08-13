@@ -1337,7 +1337,10 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                             gameMouseSendPlayerAction(NET_PLAYER_ACTION_ROTATE, targetObj);
                         } else if (_obj_action_can_talk_to(targetObj)) {
                             if (isInCombat()) {
-                                if (gameMouseSendPlayerAction(NET_PLAYER_ACTION_INSPECT, targetObj)) {
+                                // Co-op: the host relays the authoritative
+                                // examine text; only fall back to the local
+                                // generic examine when the send failed.
+                                if (!gameMouseSendPlayerAction(NET_PLAYER_ACTION_INSPECT, targetObj)) {
                                     if (objectExamine(gDude, targetObj) == -1) {
                                         objectLookAt(gDude, targetObj);
                                     }
@@ -1352,14 +1355,14 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                     case OBJ_TYPE_SCENERY:
                         if (_obj_action_can_use(targetObj)) {
                             gameMouseSendPlayerAction(NET_PLAYER_ACTION_TOUCH, targetObj);
-                        } else if (gameMouseSendPlayerAction(NET_PLAYER_ACTION_INSPECT, targetObj)) {
+                        } else if (!gameMouseSendPlayerAction(NET_PLAYER_ACTION_INSPECT, targetObj)) {
                             if (objectExamine(gDude, targetObj) == -1) {
                                 objectLookAt(gDude, targetObj);
                             }
                         }
                         break;
                     case OBJ_TYPE_WALL:
-                        if (gameMouseSendPlayerAction(NET_PLAYER_ACTION_INSPECT, targetObj)) {
+                        if (!gameMouseSendPlayerAction(NET_PLAYER_ACTION_INSPECT, targetObj)) {
                             if (objectExamine(gDude, targetObj) == -1) {
                                 objectLookAt(gDude, targetObj);
                             }
@@ -1653,7 +1656,8 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                             inventoryOpenUseItemOn(targetObj);
                             break;
                         case GAME_MOUSE_ACTION_MENU_ITEM_LOOK:
-                            if (gameMouseSendPlayerAction(NET_PLAYER_ACTION_INSPECT, targetObj)) {
+                            // Co-op: host relays the authoritative examine text.
+                            if (!gameMouseSendPlayerAction(NET_PLAYER_ACTION_INSPECT, targetObj)) {
                                 if (objectExamine(gDude, targetObj) == -1) {
                                     objectLookAt(gDude, targetObj);
                                 }

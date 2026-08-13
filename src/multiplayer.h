@@ -147,6 +147,15 @@ void MpPumpNetwork();
 
 // input (client -> host)
 void MpSendPlayerAction(uint8_t action, uint32_t targetNetId, int32_t tile, int32_t elevation, uint8_t skill = 0xFF);
+// Per-player addictions: chem use sets the local gvar (shared quest relay is
+// skipped for these) — a client reports its own write to the host, which
+// keeps a per-player overlay; dialogue scripts for a client read the overlay
+// through the initiator-aware accessors instead of the shared gvars.
+void MpSendAddictionChange(int32_t gvar, int32_t value);
+void MpSendAddictionSnapshot();
+bool MpAddictionIsTracked(int32_t gvar);
+int32_t MpAddictionGetForDialogue(int32_t gvar);
+void MpAddictionSetForDialogue(int32_t gvar, int32_t value);
 // True while the host is inside a remote player's action handler (see
 // multiplayer.cc gMpRemoteActionNetId). Lets feedback relay and the elevator
 // guard attribute script-side effects to a remote player's action.

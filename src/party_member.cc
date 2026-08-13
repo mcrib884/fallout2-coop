@@ -20,6 +20,9 @@
 #include "map.h"
 #include "memory.h"
 #include "message.h"
+#include "multiplayer.h"
+#include "multiplayer_dialog.h"
+#include "multiplayer_log.h"
 #include "object.h"
 #include "proto.h"
 #include "proto_instance.h"
@@ -369,6 +372,19 @@ static void partyMemberDescriptionInit(PartyMemberDescription* partyMemberDescri
 int partyMemberAdd(Object* object)
 {
     if (gPartyMembersLength >= gPartyMemberDescriptionsLength + 20) {
+        return -1;
+    }
+
+    // Co-op: recruitment must stay inert while a client-initiated dialogue
+    // runs without the host as a participant. All option procs execute on the
+    // host, so without this gate a client's recruit option would silently add
+    // companions to the host's party. When the host is present in the dialogue
+    // (hostParticipant, director mode off) and in non-dialogue script paths
+    // (quest events), recruitment works exactly as vanilla.
+    if (gMpActive && gMpIsHost && MpDialogDirectorMode()) {
+        MpLogAlways(MP_LOG_DIALOG,
+            "party add blocked (client dialogue, host absent) pid=0x%X",
+            object != nullptr ? object->pid : 0);
         return -1;
     }
 

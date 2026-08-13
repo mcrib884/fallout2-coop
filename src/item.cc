@@ -3233,6 +3233,22 @@ static int drugGetAddictionGvarByPid(int drugPid)
     return -1;
 }
 
+// Co-op: expose the drug addiction gvar list so the host can keep addictions
+// per-player (a client's dialogue reads its own overlay, not the shared
+// quest gvars).
+int mpDrugGetAddictionGvarCount()
+{
+    return ADDICTION_COUNT;
+}
+
+int mpDrugGetAddictionGvarByIndex(int index)
+{
+    if (index < 0 || index >= ADDICTION_COUNT) {
+        return -1;
+    }
+    return gDrugDescriptions[index].gvar;
+}
+
 // NOTE: Inlined.
 //
 // 0x47A5E8
@@ -3240,7 +3256,13 @@ static void dudeSetAddiction(int drugPid)
 {
     int gvar = drugGetAddictionGvarByPid(drugPid);
     if (gvar != -1) {
-        gGameGlobalVars[gvar] = 1;
+        // Co-op: route through gameSetGlobalVar so clients get the addiction
+        // live (direct writes never reach them until a rejoin). Addictions
+        // are per-player — a client reports its own write to the host.
+        gameSetGlobalVar((GameGlobalVar)gvar, 1);
+        if (gMpActive && gMpIsClient) {
+            MpSendAddictionChange(gvar, 1);
+        }
     }
 
     dudeEnableState(DUDE_STATE_ADDICTED);
@@ -3253,7 +3275,11 @@ static void dudeClearAddiction(int drugPid)
 {
     int gvar = drugGetAddictionGvarByPid(drugPid);
     if (gvar != -1) {
-        gGameGlobalVars[gvar] = 0;
+        // Co-op: route through gameSetGlobalVar so clients get the cure live.
+        gameSetGlobalVar((GameGlobalVar)gvar, 0);
+        if (gMpActive && gMpIsClient) {
+            MpSendAddictionChange(gvar, 0);
+        }
     }
 
     if (!dudeIsAddicted(-1)) {

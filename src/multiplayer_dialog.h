@@ -50,6 +50,11 @@ void MpDialogClearPendingInitiator();
 // True while the host has an active mp dialogue session (script paused at
 // dialog_go). Used to gate world-tick processing and effect routing.
 bool MpDialogHostActive();
+// The player whose dialogue is (or is about to be) active on the host, or 0
+// when there is no player-initiated dialogue. Scripted conversations return 0;
+// the host's own dialogue returns the host's netId. Per-player state
+// (addictions) resolves against this player's overlay.
+uint8_t MpDialogActiveInitiatorNetId();
 // A remote/host player tried to talk to `speaker` while a session is already
 // running on that NPC: join the session instead of re-entering the talk
 // script. Returns true when the join happened (caller must skip actionTalk).
@@ -86,6 +91,11 @@ bool MpDialogHostIsParticipant();
 // modal in this mode — the session is driven from MpTick instead, so the
 // host keeps playing normally behind the client's dialogue.
 bool MpDialogDirectorMode();
+
+// Host-side feedback float over `obj`, relayed to every client (same style as
+// the dialogue floats). Used for blocked actions such as talking to a
+// companion while it is in the party.
+void MpDialogFloat(Object* obj, const char* text, int font, int color, int outline);
 
 // Avatar of the player who initiated the pending dialogue (host-side).
 // nullptr when no pending initiator, not host, or the player is missing.

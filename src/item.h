@@ -153,6 +153,10 @@ int itemGetTotalCaps(Object* obj);
 int itemCapsAdjust(Object* obj, int amount);
 int itemGetMoney(Object* obj);
 int itemSetMoney(Object* obj, int amount);
+// Co-op: the drug addiction gvar list (host keeps addictions per-player via
+// this list instead of sharing them as quest gvars).
+int mpDrugGetAddictionGvarCount();
+int mpDrugGetAddictionGvarByIndex(int index);
 
 bool booksGetInfo(int bookPid, int* messageIdPtr, Skill* skillPtr);
 bool explosionEmitsLight();

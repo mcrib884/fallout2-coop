@@ -1095,8 +1095,10 @@ int gameSetGlobalVar(GameGlobalVar var, int value)
 
     // Co-op: every gvar write is quest state. Relay it so clients keep their
     // mirror of the host's quests live (their saves then persist it); the
-    // join snapshot (NET_PKT_GVAR_SNAPSHOT) seeds the mirror.
-    if (gMpActive && gMpIsHost) {
+    // join snapshot (NET_PKT_GVAR_SNAPSHOT) seeds the mirror. Addictions are
+    // per-player (host overlay + NET_PKT_ADDICTION_CHANGE) — never broadcast.
+    if (gMpActive && gMpIsHost && !MpAddictionIsTracked(var)) {
+        MpLog(MP_LOG_SCRIPT, "gvar bcast idx=%d val=%d", var, value);
         NetGvarChangePayload payload;
         payload.index = var;
         payload.value = value;

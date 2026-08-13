@@ -17,6 +17,7 @@
 #include <string.h>
 #include <string>
 
+#include "art.h"
 #include "combat.h"
 #include "color.h"
 #include "critter.h"
@@ -174,6 +175,34 @@ static void mpDialogFloat(Object* obj, const char* text, int font, int color, in
         return; // nothing was created — no stacking to do
     }
 
+    // The nametag line sits at sy - artH - fontH - 2 above the tile origin
+    // (same clearance the chat floats use): if the new float's bottom edge
+    // lands below the nametag's top, shift this critter's live floats up so
+    // the dialogue line starts above the name instead of colliding with it.
+    int tileScreenX;
+    int tileScreenY;
+    if (tileToScreenXY(obj->tile, &tileScreenX, &tileScreenY) == 0) {
+        tileScreenY += obj->y;
+        int artW = 0;
+        int artH = 0;
+        CacheEntry* handle = nullptr;
+        Art* art = artLock(obj->fid, &handle);
+        if (art != nullptr) {
+            artGetSize(art, obj->frame, obj->rotation, &artW, &artH);
+            artUnlock(handle);
+        }
+        int oldFont = fontGetCurrent();
+        fontSetCurrent(font);
+        int fontH = fontGetLineHeight();
+        fontSetCurrent(oldFont);
+
+        int nametagTop = tileScreenY - artH - fontH - 2;
+        int liftDy = (nametagTop - 2) - rect.bottom;
+        if (liftDy < 0) {
+            textObjectsShiftVertically(obj, liftDy);
+        }
+    }
+
     tileWindowRefreshRect(&rect, obj->elevation);
     if (gMpIsHost) {
         uint32_t netId = MpGetObjNetId(obj);
@@ -192,6 +221,13 @@ static void mpDialogFloat(Object* obj, const char* text, int font, int color, in
                 netId, font, color, outline, capped);
         }
     }
+}
+
+// Public wrapper: host-side feedback floats (e.g. blocked actions) rendered
+// over the target and relayed to every client through the float channel.
+void MpDialogFloat(Object* obj, const char* text, int font, int color, int outline)
+{
+    mpDialogFloat(obj, text, font, color, outline);
 }
 
 struct MpDialogClientState {
@@ -760,6 +796,21 @@ bool MpDialogDirectorMode()
     // started this dialogue — the host will be a director.
     return gMpDialog.pendingInitiator != 0
         && gMpDialog.pendingInitiator != gMpSession.localNetId;
+}
+
+// The player whose dialogue is (or is about to be) active on the host, or 0
+// when there is no player-initiated dialogue. Scripted conversations have no
+// initiator; the host's own dialogue returns the host's netId. Per-player
+// state (e.g. addictions) resolves against this player's overlay.
+uint8_t MpDialogActiveInitiatorNetId()
+{
+    if (!gMpActive || !gMpIsHost) {
+        return 0;
+    }
+    if (gMpDialog.initiatorNetId != 0) {
+        return gMpDialog.initiatorNetId;
+    }
+    return gMpDialog.pendingInitiator;
 }
 
 uint32_t MpDialogHostNodeSeq()

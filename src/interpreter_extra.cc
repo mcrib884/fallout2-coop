@@ -1281,7 +1281,13 @@ static void opGetGlobalVar(Program* program)
         if (ptr != nullptr) {
             programStackPushPointer(program, ptr);
         } else {
-            programStackPushInteger(program, gameGetGlobalVar(variable));
+            int value = gameGetGlobalVar(variable);
+            // Co-op: addictions are per-player — a client's dialogue reads
+            // its own overlay, not the host's shared gvar.
+            if (gMpActive && gMpIsHost && MpAddictionIsTracked(static_cast<int32_t>(variable))) {
+                value = MpAddictionGetForDialogue(static_cast<int32_t>(variable));
+            }
+            programStackPushInteger(program, value);
         }
     } else {
         scriptError("\nScript Error: %s: op_global_var: no global vars found!", program->name);
@@ -1300,10 +1306,22 @@ static void opSetGlobalVar(Program* program)
     if (gGameGlobalVarsLength != 0) {
         if (value.opcode == VALUE_TYPE_PTR) {
             gameSetGlobalPointer(variable, value.pointerValue);
-            gameSetGlobalVar(variable, 0);
+            // Co-op: addictions are per-player — a client's dialogue writes
+            // its own overlay, not the host's shared gvar.
+            if (gMpActive && gMpIsHost && MpAddictionIsTracked(static_cast<int32_t>(variable))) {
+                MpAddictionSetForDialogue(static_cast<int32_t>(variable), 0);
+            } else {
+                gameSetGlobalVar(variable, 0);
+            }
         } else {
             gameSetGlobalPointer(variable, nullptr);
-            gameSetGlobalVar(variable, value.integerValue);
+            // Co-op: addictions are per-player — a client's dialogue writes
+            // its own overlay, not the host's shared gvar.
+            if (gMpActive && gMpIsHost && MpAddictionIsTracked(static_cast<int32_t>(variable))) {
+                MpAddictionSetForDialogue(static_cast<int32_t>(variable), value.integerValue);
+            } else {
+                gameSetGlobalVar(variable, value.integerValue);
+            }
         }
     } else {
         scriptError("\nScript Error: %s: op_set_global_var: no global vars found!", program->name);
@@ -2314,11 +2332,14 @@ static void opLoadMap(Program* program)
     int mapIndex = -1;
 
     if (mapName != nullptr) {
-        gGameGlobalVars[GVAR_LOAD_MAP_INDEX] = param;
+        // Co-op: route through gameSetGlobalVar so the client's deferred
+        // map-enter script sees the host's load_map value (direct writes
+        // never leave the host).
+        gameSetGlobalVar(GVAR_LOAD_MAP_INDEX, param);
         mapIndex = wmMapMatchNameToIdx(mapName);
     } else {
         if (mapIndexOrName.integerValue >= 0) {
-            gGameGlobalVars[GVAR_LOAD_MAP_INDEX] = param;
+            gameSetGlobalVar(GVAR_LOAD_MAP_INDEX, param);
             mapIndex = mapIndexOrName.integerValue;
         }
     }

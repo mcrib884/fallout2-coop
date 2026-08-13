@@ -97,6 +97,7 @@ enum NetPacketType {
     NET_PKT_WORLDMAP_EXIT = 65,   // host -> clients: host left the worldmap (no map load follows)
     NET_PKT_WALK_INTERRUPTED = 66, // host -> client: the avatar's walk was stopped short of its target (trap/script interrupt)
     NET_PKT_WORLDMAP_DISCOVERY = 67, // host -> clients: discovered worldmap subtiles/areas (full snapshot or incremental)
+    NET_PKT_ADDICTION_CHANGE = 68,  // client -> host: one per-player drug addiction write
 };
 
 enum NetUnreliablePacketType {
@@ -426,6 +427,7 @@ typedef struct NetMapFullSyncObjectPayload {
     int32_t combatTeam;
     int32_t combatManeuver;
     int32_t combatResults;
+    int32_t scriptIndex; // host's script list index; fixes scripted names/examine on the client
 } NetMapFullSyncObjectPayload;
 
 // Per-player debug menu commands (client -> host). The menu edits the
@@ -750,6 +752,14 @@ typedef struct NetGvarChangePayload {
     int32_t index;
     int32_t value;
 } NetGvarChangePayload;
+
+// Client -> host: one per-player drug addiction write. Addictions are NOT
+// quest state — each player's addiction gvars live in a host-side overlay,
+// and dialogue scripts for that player read the overlay (initiator-aware).
+typedef struct NetAddictionChangePayload {
+    int32_t gvar;
+    int32_t value;
+} NetAddictionChangePayload;
 
 // Worldmap travel (co-op): the host drives the vanilla worldmap and clients
 // mirror it read-only. ENTER carries the screen mode so the client renders

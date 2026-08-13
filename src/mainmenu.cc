@@ -14,6 +14,7 @@
 #include "input.h"
 #include "kb.h"
 #include "mouse.h"
+#include "multiplayer.h"
 #include "palette.h"
 #include "platform_compat.h"
 #include "preferences.h"
@@ -22,6 +23,7 @@
 #include "text_font.h"
 #include "version.h"
 #include "window_manager.h"
+#include "window_manager_private.h"
 
 #include "platform/git_version.h"
 
@@ -642,6 +644,14 @@ int mainMenuWindowHandleEvents()
         if (gMainMenuExitRequested) {
             gMainMenuExitRequested = false;
             _game_user_wants_to_quit = GAME_QUIT_REQUEST_EXIT;
+        }
+
+        // A rejected join (wrong password / server full / version mismatch)
+        // lands here after the game unloads; show it for the timed-message
+        // window (~3s) so the player sees why the join failed.
+        const char* kickNotice = MpTakeKickNotice();
+        if (kickNotice != nullptr) {
+            win_timed_msg(kickNotice, COLOR_RED);
         }
 
         sharedFpsLimiter.mark();

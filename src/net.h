@@ -98,6 +98,7 @@ enum NetPacketType {
     NET_PKT_WALK_INTERRUPTED = 66, // host -> client: the avatar's walk was stopped short of its target (trap/script interrupt)
     NET_PKT_WORLDMAP_DISCOVERY = 67, // host -> clients: discovered worldmap subtiles/areas (full snapshot or incremental)
     NET_PKT_ADDICTION_CHANGE = 68,  // client -> host: one per-player drug addiction write
+    NET_PKT_TELEPORT_TO = 69,       // client -> host: teleport me to the given player's critter
 };
 
 enum NetUnreliablePacketType {
@@ -171,6 +172,21 @@ typedef struct NetHelloPayload {
     uint32_t passwordHash;
     char peerName[NET_PEER_NAME_LENGTH];
 } NetHelloPayload;
+
+// Why the host rejected a joining client. Sent as the NET_PKT_KICK payload so
+// the client can show a specific reason instead of a generic "kicked" - a
+// wrong password must read as a wrong password, not as a server refusal.
+typedef struct NetKickPayload {
+    uint8_t reason; // NetKickReason
+} NetKickPayload;
+
+// Kick reasons carried by NetKickPayload.
+enum NetKickReason {
+    NET_KICK_REASON_GENERIC = 0,        // no specific reason given
+    NET_KICK_REASON_SERVER_FULL = 1,    // host at max players
+    NET_KICK_REASON_VERSION_MISMATCH = 2,
+    NET_KICK_REASON_PASSWORD_MISMATCH = 3,
+};
 
 typedef struct NetMapSyncPayload {
     int32_t mapId;
@@ -766,6 +782,19 @@ typedef struct NetAddictionChangePayload {
     int32_t gvar;
     int32_t value;
 } NetAddictionChangePayload;
+
+// Client -> host: teleport the requesting player's critter to the critter
+// of the player with the given netId. The host resolves the target's current
+// tile/elevation authoritatively and snaps the requester there. The host
+// replies with the SAME packet type (targetNetId = requester, tile/elevation
+// filled) so the requester's client snaps its local dude and centers the
+// camera deterministically — the player-state channel is unreliable and may
+// lag behind.
+typedef struct NetTeleportToPayload {
+    uint8_t targetNetId;
+    int32_t tile;       // host -> client response: resolved destination
+    int32_t elevation;  // host -> client response: resolved destination
+} NetTeleportToPayload;
 
 // Worldmap travel (co-op): the host drives the vanilla worldmap and clients
 // mirror it read-only. ENTER carries the screen mode so the client renders

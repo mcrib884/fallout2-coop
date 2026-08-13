@@ -63,8 +63,13 @@ void lanDrawHostRows(int win, const NetLanHostInfo* hosts, int count, int select
         }
         const NetLanHostInfo* host = &hosts[index];
         char line[96];
+        bool full = host->maxPlayers > 0 && host->currentPlayers >= host->maxPlayers;
         if (host->versionHash != NetGetVersionHash()) {
             snprintf(line, sizeof(line), "%s %s:%u %u/%u <other build>",
+                host->name, host->address, host->port,
+                host->currentPlayers, host->maxPlayers);
+        } else if (full) {
+            snprintf(line, sizeof(line), "%s %s:%u %u/%u <full>",
                 host->name, host->address, host->port,
                 host->currentPlayers, host->maxPlayers);
         } else {
@@ -141,6 +146,10 @@ int MpLanBrowserShow(int x, int y)
 
     NetLanHostInfo hosts[NET_LAN_MAX_HOSTS];
     int hostCount = 0;
+    // Transient status override (e.g. "that game is full") shown for ~2s
+    // after a refused join; cleared by the next scan.
+    char statusOverride[96] = "";
+    uint32_t statusOverrideTick = 0;
     // Last-seen tick per host. A poll only sees the replies queued in the
     // socket buffer at that instant — the probe burst — so replacing the
     // list every frame would wipe hosts back to "Scanning..." a few frames
@@ -252,6 +261,21 @@ int MpLanBrowserShow(int x, int y)
         case LAN_BTN_JOIN:
         case KEY_RETURN:
             if (selected >= 0 && selected < hostCount) {
+                if (hosts[selected].maxPlayers > 0
+                    && hosts[selected].currentPlayers >= hosts[selected].maxPlayers) {
+                    // The host is at capacity - the server would kick us
+                    // immediately, so refuse at the list and say why.
+                    MpLog(MP_LOG_UI, "lan browser join refused (host full) '%s' %s:%u %u/%u",
+                        hosts[selected].name, hosts[selected].address, hosts[selected].port,
+                        hosts[selected].currentPlayers, hosts[selected].maxPlayers);
+                    strncpy(statusOverride, "That game is full (max players reached)",
+                        sizeof(statusOverride) - 1);
+                    statusOverride[sizeof(statusOverride) - 1] = '\0';
+                    statusOverrideTick = getTicks();
+                    lanDrawHostRows(win, hosts, hostCount, selected);
+                    windowRefresh(win);
+                    break;
+                }
                 keepGoing = false;
                 rc = -1; // join pending below
             }
@@ -276,7 +300,10 @@ int MpLanBrowserShow(int x, int y)
 
         // Status line under the list.
         char status[96];
-        if (hostCount == 0) {
+        if (statusOverride[0] != '\0' && getTicksSince(statusOverrideTick) < 2000) {
+            strncpy(status, statusOverride, sizeof(status) - 1);
+            status[sizeof(status) - 1] = '\0';
+        } else if (hostCount == 0) {
             strncpy(status, "Scanning for hosts...", sizeof(status) - 1);
             status[sizeof(status) - 1] = '\0';
         } else {
@@ -302,7 +329,7 @@ int MpLanBrowserShow(int x, int y)
             host->name, host->address, host->port);
         char password[64] = "";
         if (host->passwordRequired) {
-            _win_get_str_masked(password, 63, "Password (optional)", winX + 40, winY + 120);
+            _win_get_str_masked(password, 32, "Password (optional)", winX + 40, winY + 120);
         }
         // Same join path as address joining: in-game joins back the session
         // with the hidden co-op save, main-menu joins ask for a character or

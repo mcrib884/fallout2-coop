@@ -110,6 +110,23 @@ static int gMpClientMapEnteringTile = -1;
 static int gMpClientMapEnteringElevation = -1;
 static int gMpClientMapEnteringRotation = -1;
 
+// Join-rejection notice for the main menu: set by the client KICK handler
+// with a human-readable reason (wrong password / server full / version
+// mismatch), taken once by the main-menu loop via MpTakeKickNotice().
+static char gMpKickNotice[160] = "";
+
+const char* MpTakeKickNotice()
+{
+    if (gMpKickNotice[0] == '\0') {
+        return nullptr;
+    }
+    static char notice[sizeof(gMpKickNotice)];
+    strncpy(notice, gMpKickNotice, sizeof(notice) - 1);
+    notice[sizeof(notice) - 1] = '\0';
+    gMpKickNotice[0] = '\0';
+    return notice;
+}
+
 // The client's map-entrance snapshot (see the statics above). Used by the
 // save redirect so a client save never carries a co-op session position.
 void MpGetClientMapEnteringPosition(int* tile, int* elevation, int* rotation)
@@ -1748,7 +1765,11 @@ static Object* mpHostFindObjectByNetId(uint32_t netId)
 // Find first free slot and return its (1-based) netId; 0 if none free.
 static uint8_t mpAllocPlayerSlot(ENetPeer* peer)
 {
-    for (int i = 0; i < NET_MAX_PLAYERS; i++) {
+    // The host's configured max (F11 > Max Players) caps the session, not
+    // just the engine's hard limit. A browser showing 1/1 must not be
+    // joinable, and a direct connection must be kicked when full.
+    int maxPlayers = gMpSession.maxPlayers > 0 ? gMpSession.maxPlayers : NET_MAX_PLAYERS;
+    for (int i = 0; i < maxPlayers; i++) {
         if (!gMpSession.players[i].isConnected) {
             return (uint8_t)(i + 1);
         }
@@ -2277,7 +2298,6 @@ static void mpHostRemovePlayer(MultiplayerPlayer* player)
         NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE,
             NET_PKT_PLAYER_LEFT, &left, sizeof(left));
     }
-    mpRefreshLanReply();
 
     if (player->obj != nullptr) {
         gMpHostObjNetIds.erase(player->obj);
@@ -2293,6 +2313,12 @@ static void mpHostRemovePlayer(MultiplayerPlayer* player)
     if (wasHandshaken && gMpSession.numPlayers > 1) {
         gMpSession.numPlayers--;
     }
+    // Refresh AFTER the slot is freed: the reply must advertise the real
+    // player count. Previously this ran before the memset, so a kicked
+    // client (e.g. wrong password, never handshaken) left the template at
+    // players=2/2 forever - no later event ever refreshed it, and the
+    // browser blocked every subsequent join with "<full>".
+    mpRefreshLanReply();
 }
 
 static void mpBroadcastProfileToClients(uint8_t netId, uint32_t objNetId,
@@ -3469,8 +3495,12 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
         case 1: { // connect
             uint8_t netId = mpAllocPlayerSlot(peer);
             if (netId == 0) {
-                // Server is full — kick immediately.
-                NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_KICK, nullptr, 0);
+                // Server is full - kick immediately.
+                MpLogAlways(MP_LOG_NET, "connection rejected (server full, maxPlayers=%d)",
+                    gMpSession.maxPlayers);
+                NetKickPayload kick;
+                kick.reason = NET_KICK_REASON_SERVER_FULL;
+                NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_KICK, &kick, sizeof(kick));
                 NetPeerDisconnect(peer);
                 return;
             }
@@ -3522,7 +3552,9 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                     hello->peerName, hello->versionHash, NetGetVersionHash());
                 if (hello->versionHash != NetGetVersionHash()) {
                     MpLogAlways(MP_LOG_HANDSHAKE, "hello version mismatch kick peer=%p", (void*)peer);
-                    NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_KICK, nullptr, 0);
+                    NetKickPayload kick;
+                    kick.reason = NET_KICK_REASON_VERSION_MISMATCH;
+                    NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_KICK, &kick, sizeof(kick));
                     NetPeerDisconnect(peer);
                     return;
                 }
@@ -3533,7 +3565,9 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                 if (gMpHostPasswordHash != 0
                     && hello->passwordHash != gMpHostPasswordHash) {
                     MpLogAlways(MP_LOG_HANDSHAKE, "hello password mismatch kick peer=%p", (void*)peer);
-                    NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_KICK, nullptr, 0);
+                    NetKickPayload kick;
+                    kick.reason = NET_KICK_REASON_PASSWORD_MISMATCH;
+                    NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_KICK, &kick, sizeof(kick));
                     NetPeerDisconnect(peer);
                     return;
                 }
@@ -4059,6 +4093,19 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                     p->netId, addiction->gvar, addiction->value);
                 break;
             }
+            case NET_PKT_TELEPORT_TO: {
+                if (payloadLen != sizeof(NetTeleportToPayload)) {
+                    MpLogAlways(MP_LOG_UI, "host reject teleport bad length=%zu", payloadLen);
+                    return;
+                }
+                MultiplayerPlayer* p = mpPlayerFindByPeer(peer);
+                if (p == nullptr || !p->isHandshaken || p->obj == nullptr) {
+                    return;
+                }
+                const NetTeleportToPayload* teleport = (const NetTeleportToPayload*)payload;
+                MpHostTeleportPlayer(p->netId, teleport->targetNetId);
+                break;
+            }
             case NET_PKT_PLAYER_CMD: {
                 if (payloadLen != sizeof(NetPlayerCmdPayload)) {
                     return;
@@ -4552,6 +4599,33 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             MpOnMapElevationChange((const NetMapElevationPayload*)payload);
             break;
         }
+        case NET_PKT_TELEPORT_TO: {
+            // Host -> client response to a teleport request: snap the local
+            // dude to the resolved destination and center the camera (the
+            // same handling as a map elevation change, minus the rotation).
+            if (payloadLen != sizeof(NetTeleportToPayload)) {
+                return;
+            }
+            const NetTeleportToPayload* t = (const NetTeleportToPayload*)payload;
+            if (t->targetNetId != gMpSession.localNetId) {
+                return;
+            }
+            if (!hexGridTileIsValid(t->tile) || !elevationIsValid(t->elevation)) {
+                MpLogAlways(MP_LOG_UI, "teleport ack invalid tile=%d elev=%d", t->tile, t->elevation);
+                return;
+            }
+            MpLog(MP_LOG_UI, "teleport applied tile=%d elev=%d", t->tile, t->elevation);
+            if (gDude != nullptr) {
+                gMpSuppressExitGridCheck = true;
+                objectSetLocation(gDude, t->tile, t->elevation, nullptr);
+                gMpSuppressExitGridCheck = false;
+                mapSetElevation(t->elevation);
+                objUpdateRoofsForTile(gDude->tile, gDude->elevation);
+                tileSetCenter(gDude->tile,
+                    TILE_SET_CENTER_REFRESH_WINDOW | TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS);
+            }
+            break;
+        }
         case NET_PKT_ITEM_REMOVE: {
             if (payloadLen != sizeof(NetItemRemovePayload)) {
                 return;
@@ -4582,7 +4656,30 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             break;
         }
         case NET_PKT_KICK: {
-            win_timed_msg("Kicked by host", COLOR_RED);
+            // The host sends the reason (NetKickPayload) so the player sees
+            // WHY they were rejected - a wrong password must not read as a
+            // generic kick. Stored as a notice: the game unloads to the main
+            // menu right after, and the menu shows it for a few seconds.
+            const char* message = "Kicked by host";
+            if (payloadLen >= sizeof(NetKickPayload)) {
+                switch (((const NetKickPayload*)payload)->reason) {
+                case NET_KICK_REASON_SERVER_FULL:
+                    message = "Server is full";
+                    break;
+                case NET_KICK_REASON_VERSION_MISMATCH:
+                    message = "Version mismatch - cannot join";
+                    break;
+                case NET_KICK_REASON_PASSWORD_MISMATCH:
+                    message = "Wrong password";
+                    break;
+                default:
+                    break;
+                }
+            }
+            MpLog(MP_LOG_LIFECYCLE, "client kicked: %s", message);
+            strncpy(gMpKickNotice, message, sizeof(gMpKickNotice) - 1);
+            gMpKickNotice[sizeof(gMpKickNotice) - 1] = '\0';
+            win_timed_msg(message, COLOR_RED);
             mpRequestClientDisconnect(false);
             _game_user_wants_to_quit = GAME_QUIT_REQUEST_MAIN_MENU;
             break;
@@ -4759,6 +4856,75 @@ void MpSendPlayerAction(uint8_t action, uint32_t targetNetId, int32_t tile, int3
     p.tile = tile;
     p.elevation = elevation;
     NetSendPacket(gMpSession.hostPeer, NET_CHANNEL_RELIABLE, NET_PKT_PLAYER_ACTION, &p, sizeof(p));
+}
+
+// Host-side teleport: move the critter of [requesterNetId] onto the critter
+// of [targetNetId] and broadcast the result. The requester's client snaps
+// via the state broadcast; additionally a reliable ack is sent to the
+// requester's peer (when one exists) so its camera centers deterministically.
+void MpHostTeleportPlayer(uint8_t requesterNetId, uint8_t targetNetId)
+{
+    if (!gMpIsHost || !gMpActive || requesterNetId == 0 || requesterNetId > NET_MAX_PLAYERS
+        || targetNetId == 0 || targetNetId > NET_MAX_PLAYERS) {
+        return;
+    }
+    MultiplayerPlayer* requester = &gMpSession.players[requesterNetId - 1];
+    MultiplayerPlayer* target = &gMpSession.players[targetNetId - 1];
+    if (!requester->isConnected || !target->isConnected || requester->obj == nullptr
+        || target->obj == nullptr || requester == target) {
+        MpLogAlways(MP_LOG_UI, "teleport rejected requester=%u target=%u",
+            requesterNetId, targetNetId);
+        return;
+    }
+    if (!hexGridTileIsValid(target->obj->tile) || !elevationIsValid(target->obj->elevation)) {
+        MpLogAlways(MP_LOG_UI, "teleport rejected (bad target pos) target=%u tile=%d elev=%d",
+            targetNetId, target->obj->tile, target->obj->elevation);
+        return;
+    }
+    MpLog(MP_LOG_UI, "teleport player=%u to player=%u tile=%d elev=%d",
+        requesterNetId, targetNetId, target->obj->tile, target->obj->elevation);
+    reg_anim_clear(requester->obj);
+    gMpSuppressExitGridCheck = true;
+    objectSetLocation(requester->obj, target->obj->tile, target->obj->elevation, nullptr);
+    objectSetRotation(requester->obj, target->obj->rotation, nullptr);
+    gMpSuppressExitGridCheck = false;
+    requester->lastSafeTile = target->obj->tile;
+    requester->lastSafeElevation = target->obj->elevation;
+    requester->lastSafeRotation = target->obj->rotation;
+    MpBroadcastPlayerStates();
+    // Reliable ack with the resolved destination so the requester's client
+    // snaps + centers the camera even if the unreliable state broadcast lags.
+    if (requester->peer != nullptr) {
+        NetTeleportToPayload ack;
+        ack.targetNetId = requesterNetId;
+        ack.tile = target->obj->tile;
+        ack.elevation = target->obj->elevation;
+        NetSendPacket(requester->peer, NET_CHANNEL_RELIABLE,
+            NET_PKT_TELEPORT_TO, &ack, sizeof(ack));
+    }
+}
+
+// Teleport the local critter to the given player's critter. The host resolves
+// the target's authoritative tile/elevation and snaps the requester there;
+// the player-state broadcast carries the result back.
+void MpSendTeleportTo(uint8_t targetNetId)
+{
+    if (!gMpIsClient || gMpSession.hostPeer == nullptr || targetNetId == 0
+        || targetNetId > NET_MAX_PLAYERS) {
+        return;
+    }
+    if (targetNetId == gMpSession.localNetId) {
+        return;
+    }
+    if (gMpSession.state != MP_STATE_CLIENT_PLAYING) {
+        MpLog(MP_LOG_UI, "teleport dropped state=%d target=%u",
+            gMpSession.state, targetNetId);
+        return;
+    }
+    NetTeleportToPayload p;
+    p.targetNetId = targetNetId;
+    NetSendPacket(gMpSession.hostPeer, NET_CHANNEL_RELIABLE, NET_PKT_TELEPORT_TO, &p, sizeof(p));
+    MpLog(MP_LOG_UI, "teleport request sent target=%u", targetNetId);
 }
 
 // ---------------------------------------------------------------------------

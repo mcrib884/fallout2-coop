@@ -579,6 +579,14 @@ static int winGetStrCore(char* dest, int length, const char* title, int x, int y
     if (windowWidth < 160) {
         windowWidth = 160;
     }
+    // The width is derived from the monospaced char width * length, which can
+    // exceed the screen (e.g. a 63-char password at x=60). windowCreate fails
+    // when width > screen width, which silently kills the prompt - clamp so
+    // the dialog always opens (long entries just scroll out of view).
+    int screenWidth = rectGetWidth(&_scr_size);
+    if (windowWidth > screenWidth - 8) {
+        windowWidth = screenWidth - 8;
+    }
 
     int windowHeight = 5 * fontGetLineHeight() + 16;
 

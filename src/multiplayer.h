@@ -173,8 +173,20 @@ void MpTick();
 // Network pump (ENet service + packet dispatch) for the blocking combat loops.
 void MpPumpNetwork();
 
+// A join-time rejection (wrong password, server full, version mismatch) sets a
+// notice that the main menu shows for a few seconds; the menu loop takes it
+// and clears it. The KICK arrives while the game is loaded, so win_timed_msg
+// alone would die with the game unload before the menu appears.
+const char* MpTakeKickNotice();
+
 // input (client -> host)
 void MpSendPlayerAction(uint8_t action, uint32_t targetNetId, int32_t tile, int32_t elevation, uint8_t skill = 0xFF);
+// Teleport the local critter to the given player's critter (client -> host).
+void MpSendTeleportTo(uint8_t targetNetId);
+// Host-side teleport: move the critter of [requesterNetId] onto the critter
+// of [targetNetId] and broadcast. Used by the F11 player list (host clicks
+// its own entry) and by the NET_PKT_TELEPORT_TO handler.
+void MpHostTeleportPlayer(uint8_t requesterNetId, uint8_t targetNetId);
 // Per-player addictions: chem use sets the local gvar (shared quest relay is
 // skipped for these) — a client reports its own write to the host, which
 // keeps a per-player overlay; dialogue scripts for a client read the overlay

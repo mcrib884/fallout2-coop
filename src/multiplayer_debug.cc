@@ -125,6 +125,7 @@ constexpr int DBG_BTN_HOST_GAME = 763;
 constexpr int DBG_BTN_JOIN = 764;
 constexpr int DBG_BTN_LEAVE = 765;
 constexpr int DBG_BTN_LAN_BROWSER = 766;
+constexpr int DBG_BTN_PLAYERS = 767;
 // Set when the user pressed Reset Cursor: the cheats menu must NOT restore
 // the pre-menu hidden cursor state on close, or the reset would be undone.
 static bool gMpCursorResetRequested = false;
@@ -1061,25 +1062,50 @@ static void dbgTraitListShow()
 }
 
 // Kill Hostile: one-shot action — executes once and self-clears. Kills every
-// living critter on the map that is hostile to the local player's team (the
-// same predicate the end-combat check uses), excluding the co-op players.
+// living critter on the map that is hostile to the local player's side,
+// excluding the co-op players.
+//
+// "Hostile" is NOT the bare team test: the vanilla end-combat check applies
+// `team != dude team` only to COMBATANTS. Scanning the whole map with it
+// kills every neutral NPC whose team differs from the dude's — which
+// happens routinely, because the session profile sets the dude's team from
+// the saved character (a faction membership makes it non-zero). A critter is
+// hostile only when it is actually fighting the player's side (in combat on
+// the opposing team) or has hit the player/a teammate.
 static int dbgKillHostiles()
 {
     int executed = 0;
+    bool inCombat = isInCombat();
+    int dudeTeam = gDude->data.critter.combat.team;
     Object* probe = objectFindFirst();
     while (probe != nullptr) {
         if (objectTypeFromFid(probe->fid) == OBJ_TYPE_CRITTER
             && probe != gDude
             && !MpIsCoopPlayerCritter(probe)
             && critterGetStat(probe, STAT_CURRENT_HIT_POINTS) > 0
-            && (probe->data.critter.combat.results & DAM_DEAD) == 0
-            && probe->data.critter.combat.team != gDude->data.critter.combat.team) {
-            critterKill(probe, ANIM_INVALID, true);
-            executed++;
+            && (probe->data.critter.combat.results & DAM_DEAD) == 0) {
+            int probeTeam = probe->data.critter.combat.team;
+            Object* whoHitMe = probe->data.critter.combat.whoHitMe;
+            bool hostile = false;
+            if (inCombat) {
+                // Opposing team among the combatants — the vanilla hostile
+                // test, restricted to an actual fight.
+                hostile = probeTeam != dudeTeam;
+            }
+            // Even outside combat, a critter that has attacked the player or
+            // a teammate is hostile.
+            if (!hostile && whoHitMe != nullptr
+                && (whoHitMe == gDude || whoHitMe->data.critter.combat.team == dudeTeam)) {
+                hostile = true;
+            }
+            if (hostile) {
+                critterKill(probe, ANIM_INVALID, true);
+                executed++;
+            }
         }
         probe = objectFindNext();
     }
-    MpLog(MP_LOG_UI, "kill hostile executed=%d", executed);
+    MpLog(MP_LOG_UI, "kill hostile executed=%d inCombat=%d team=%d", executed, inCombat ? 1 : 0, dudeTeam);
     return executed;
 }
 
@@ -1987,11 +2013,16 @@ static int dbgBuildSettingsWindow(const DbgSettingsStatus* st)
     _win_register_text_button(win, 30, 55, -1, -1, -1, DBG_BTN_CLOSE, "Close", 0);
 
     if (gMpActive) {
-        // --- In session: leave action + live session status ---
-        _win_register_text_button(win, 30, 85, -1, -1, -1, DBG_BTN_LEAVE, "Leave Session", 0);
-        windowDrawText(win, st->state, 0, 30, 120, COLOR_WHITE);
-        windowDrawText(win, st->players, 0, 30, 145, COLOR_WHITE);
-        windowDrawText(win, st->ping, 0, 30, 170, COLOR_WHITE);
+        // --- In session: stop hosting / leave action + live session status.
+        // The HOST stops hosting in place — his game keeps running as a
+        // single-player session (no quit to menu); the CLIENT leaves the
+        // session and returns to the main menu. ---
+        _win_register_text_button(win, 30, 85, -1, -1, -1, DBG_BTN_LEAVE,
+            gMpIsHost ? "Stop Hosting" : "Leave Session", 0);
+        _win_register_text_button(win, 30, 110, -1, -1, -1, DBG_BTN_PLAYERS, "Players...", 0);
+        windowDrawText(win, st->state, 0, 30, 145, COLOR_WHITE);
+        windowDrawText(win, st->players, 0, 30, 170, COLOR_WHITE);
+        windowDrawText(win, st->ping, 0, 30, 195, COLOR_WHITE);
     } else {
         // --- Idle: host options (labels carry the current values), the
         // host/join actions, and the session status lines ---
@@ -2045,6 +2076,215 @@ static int dbgBuildSettingsWindow(const DbgSettingsStatus* st)
     return win;
 }
 
+// Player list side panel: lists the connected co-op players. Double-clicking
+// a row (or selecting it and pressing Enter) teleports the LOCAL player to
+// that player — the host moves the critter directly, a client sends
+// NET_PKT_TELEPORT_TO and the host resolves it. The panel sits on the LEFT
+// side of the F11 window (the LAN browser mirrors it on the right); the F11
+// window is slid right for the duration and restored on close. Same modal
+// technique as the multiplayer menus. Returns when closed.
+static void dbgPlayerListShow(int f11Win)
+{
+    constexpr int kPanelWidth = 150;
+    constexpr int kPanelHeight = 300;
+    constexpr int kListX = 8;
+    constexpr int kListY = 30;
+    constexpr int kRowHeight = 24;
+    constexpr int kMaxVisibleRows = 10;
+    constexpr uint32_t kDoubleClickMs = 350;
+
+    int panelX = 8;
+    int panelY = 0;
+    int restoreX = 0;
+    bool moved = false;
+    if (windowGetWindow(f11Win) != nullptr) {
+        panelY = windowGetWindow(f11Win)->rect.top;
+        restoreX = windowGetWindow(f11Win)->rect.left;
+        if (restoreX != kPanelWidth + 16) {
+            windowMove(f11Win, kPanelWidth + 16, panelY);
+            moved = true;
+        }
+    }
+
+    int win = windowCreate(panelX, panelY, kPanelWidth, kPanelHeight,
+        COLOR_BLACK, WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
+    if (win == -1) {
+        if (moved) {
+            windowMove(f11Win, restoreX, panelY);
+        }
+        return;
+    }
+    windowDrawBorder(win);
+    const char* title = "PLAYERS";
+    int titleX = (kPanelWidth - fontGetStringWidth(title)) / 2;
+    windowDrawText(win, title, 0, titleX, 6, COLOR_WHITE);
+    windowRefresh(win);
+
+    int selected = -1;
+    bool prevLeftButton = false;
+    uint32_t lastClickTick = 0;
+    int lastClickRow = -1;
+
+    int rc = 0;
+    bool keepGoing = true;
+    while (keepGoing) {
+        sharedFpsLimiter.mark();
+        dbgPumpGameBehindModal();
+        mouseShowCursor();
+
+        // Rows = connected players (skip the host's empty slots). The local
+        // player is marked so teleporting to yourself is obviously a no-op.
+        int count = 0;
+        for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+            MultiplayerPlayer* p = &gMpSession.players[index];
+            if (!p->isConnected || p->obj == nullptr) {
+                continue;
+            }
+            if (count >= kMaxVisibleRows) {
+                break;
+            }
+            int rowY = kListY + count * kRowHeight;
+            char line[96];
+            if (p->isLocal) {
+                snprintf(line, sizeof(line), "%s (you)", p->name);
+            } else {
+                snprintf(line, sizeof(line), "%s", p->name);
+            }
+            while (line[0] != '\0' && fontGetStringWidth(line) > kPanelWidth - kListX - 16) {
+                line[strlen(line) - 1] = '\0';
+            }
+            windowFill(win, kListX, rowY, kPanelWidth - kListX - 10, kRowHeight, COLOR_BLACK);
+            windowDrawText(win, line, 0, kListX + 3, rowY + (kRowHeight - fontGetLineHeight()) / 2,
+                count == selected ? COLOR_LIGHT_GREY : COLOR_WHITE);
+            count++;
+        }
+        // Clear the tail rows when fewer players than visible rows.
+        for (int index = count; index < kMaxVisibleRows; index++) {
+            int rowY = kListY + index * kRowHeight;
+            windowFill(win, kListX, rowY, kPanelWidth - kListX - 10, kRowHeight, COLOR_BLACK);
+        }
+        windowRefresh(win);
+
+        // Row click / double-click via raw mouse state (the modal consumes
+        // the normal event stream; same poll the LAN browser uses).
+        int mouseX;
+        int mouseY;
+        int mouseButtons;
+        _mouse_get_raw_state(&mouseX, &mouseY, &mouseButtons);
+        bool leftButton = (mouseButtons & MOUSE_STATE_LEFT_BUTTON_DOWN) != 0;
+        if (leftButton && !prevLeftButton) {
+            int localX = mouseX - panelX;
+            int localY = mouseY - panelY;
+            if (localX >= kListX && localY >= kListY) {
+                int row = (localY - kListY) / kRowHeight;
+                if (row >= 0 && row < count) {
+                    selected = row;
+                    uint32_t now = getTicks();
+                    if (row == lastClickRow && getTicksSince(lastClickTick) <= kDoubleClickMs) {
+                        // Double-click on the same row: teleport to it.
+                        int playerIndex = 0;
+                        int seen = 0;
+                        for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+                            MultiplayerPlayer* p = &gMpSession.players[index];
+                            if (p->isConnected && p->obj != nullptr) {
+                                if (seen == row) {
+                                    playerIndex = index;
+                                    break;
+                                }
+                                seen++;
+                            }
+                        }
+                        MultiplayerPlayer* p = &gMpSession.players[playerIndex];
+                        if (!p->isLocal) {
+                            MpLog(MP_LOG_UI, "player list teleport to netId=%u name='%s'",
+                                p->netId, p->name);
+                            if (gMpIsHost) {
+                                MpHostTeleportPlayer(gMpSession.localNetId, p->netId);
+                            } else {
+                                MpSendTeleportTo(p->netId);
+                            }
+                            rc = 0;
+                            keepGoing = false;
+                        }
+                        lastClickRow = -1;
+                    } else {
+                        lastClickTick = now;
+                        lastClickRow = row;
+                    }
+                }
+            }
+        }
+        prevLeftButton = leftButton;
+
+        int keyCode = inputGetInput();
+        switch (keyCode) {
+        case KEY_ESCAPE:
+            rc = 0;
+            keepGoing = false;
+            break;
+        case KEY_RETURN:
+            // Enter teleports the selected row (keyboard fallback for the
+            // double-click).
+            if (selected >= 0 && selected < count) {
+                int playerIndex = 0;
+                int seen = 0;
+                for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+                    MultiplayerPlayer* p = &gMpSession.players[index];
+                    if (p->isConnected && p->obj != nullptr) {
+                        if (seen == selected) {
+                            playerIndex = index;
+                            break;
+                        }
+                        seen++;
+                    }
+                }
+                MultiplayerPlayer* p = &gMpSession.players[playerIndex];
+                if (!p->isLocal) {
+                    MpLog(MP_LOG_UI, "player list teleport (Enter) netId=%u name='%s'",
+                        p->netId, p->name);
+                    if (gMpIsHost) {
+                        MpHostTeleportPlayer(gMpSession.localNetId, p->netId);
+                    } else {
+                        MpSendTeleportTo(p->netId);
+                    }
+                    rc = 0;
+                    keepGoing = false;
+                }
+            }
+            break;
+        case KEY_ARROW_UP:
+            if (count > 0) {
+                selected = (selected <= 0) ? count - 1 : selected - 1;
+            }
+            break;
+        case KEY_ARROW_DOWN:
+            if (count > 0) {
+                selected = (selected + 1 >= count) ? 0 : selected + 1;
+            }
+            break;
+        default:
+            break;
+        }
+
+        // Hint line under the list.
+        windowFill(win, kListX, kListY + kMaxVisibleRows * kRowHeight,
+            kPanelWidth - kListX - 10, 16, COLOR_BLACK);
+        windowDrawText(win, "double-click = teleport", 0, kListX + 3,
+            kListY + kMaxVisibleRows * kRowHeight + 1, COLOR_WHITE);
+        windowRefresh(win);
+
+        windowRefreshAll(&_scr_size);
+        renderPresent();
+        sharedFpsLimiter.throttle();
+    }
+
+    windowDestroy(win);
+    if (moved) {
+        windowMove(f11Win, restoreX, panelY);
+    }
+    MpLog(MP_LOG_UI, "player list closed rc=%d", rc);
+}
+
 void MpDebugMenuShow()
 {
     MpLog(MP_LOG_UI, "menu show begin");
@@ -2096,6 +2336,7 @@ void MpDebugMenuShow()
             case DBG_BTN_HOST_GAME:
             case DBG_BTN_JOIN:
             case DBG_BTN_LEAVE:
+            case DBG_BTN_PLAYERS:
                 rc = keyCode;
                 break;
             case DBG_BTN_LAN_BROWSER: {
@@ -2164,7 +2405,7 @@ void MpDebugMenuShow()
                     || strcmp(fresh.players, st.players) != 0
                     || strcmp(fresh.ping, st.ping) != 0) {
                     st = fresh;
-                    int statusY = wasInSession ? 120 : 240;
+                    int statusY = wasInSession ? 145 : 240;
                     dbgDrawSettingsLine(win, 30, statusY, st.state);
                     dbgDrawSettingsLine(win, 30, statusY + 25, st.players);
                     if (wasInSession) {
@@ -2236,7 +2477,7 @@ void MpDebugMenuShow()
             }
             break;
         case DBG_BTN_HOST_PASS:
-            if (_win_get_str_masked(gDbgHostPassword, 63, "Password (optional)", 60, 60) != -1) {
+            if (_win_get_str_masked(gDbgHostPassword, 32, "Password (optional)", 60, 60) != -1) {
                 windowDestroy(win);
                 dbgFillSettingsStatus(&st);
                 win = dbgBuildSettingsWindow(&st);
@@ -2276,21 +2517,29 @@ void MpDebugMenuShow()
                 keepGoing = false;
             }
             break;
+        case DBG_BTN_PLAYERS:
+            // Player list side panel on the LEFT (the LAN browser mirrors it
+            // on the right); the panel slides the F11 window right for the
+            // duration and restores it on close.
+            dbgPlayerListShow(win);
+            break;
         case DBG_BTN_LEAVE:
-            if (win_yes_no("Leave the co-op session?", 80, 80, COLOR_WHITE) != 0) {
-                MpLog(MP_LOG_UI, "leave session requested");
+            if (win_yes_no(gMpIsHost ? "Stop hosting?" : "Leave the co-op session?", 80, 80, COLOR_WHITE) != 0) {
                 if (gMpIsHost) {
-                    MpLog(MP_LOG_UI, "leave host stop begin");
+                    MpLog(MP_LOG_UI, "stop hosting begin");
                     MpHostStop();
-                    MpLog(MP_LOG_UI, "leave host stop done");
+                    MpLog(MP_LOG_UI, "stop hosting done");
+                    // The host stays in his game — the session ends, the
+                    // world keeps running single-player. The window rebuilds
+                    // to the idle layout via the gMpActive change below.
                 } else if (gMpIsClient) {
                     MpLog(MP_LOG_UI, "leave client disconnect begin");
                     MpClientDisconnect();
                     MpLog(MP_LOG_UI, "leave client disconnect done");
+                    MpLog(MP_LOG_UI, "leave quit request set");
+                    _game_user_wants_to_quit = GAME_QUIT_REQUEST_MAIN_MENU;
+                    keepGoing = false;
                 }
-                MpLog(MP_LOG_UI, "leave quit request set");
-                _game_user_wants_to_quit = GAME_QUIT_REQUEST_MAIN_MENU;
-                keepGoing = false;
             }
             break;
         }

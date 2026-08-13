@@ -340,7 +340,7 @@ int MpJoinFlowShow()
 
     // Optional session password — masked entry, hashed for the handshake.
     char passwordBuffer[64] = "";
-    if (_win_get_str_masked(passwordBuffer, 63, "Password (optional)", ipX, ipY) != 0) {
+    if (_win_get_str_masked(passwordBuffer, 32, "Password (optional)", ipX, ipY) != 0) {
         return 0;
     }
 

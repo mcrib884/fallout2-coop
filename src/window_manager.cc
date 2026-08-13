@@ -1005,6 +1005,25 @@ void _win_clip(Window* currentWindow, RectListNode** rectListNodePtr, unsigned c
     }
 }
 
+// Co-op: reposition an existing window (rect + refresh both regions). Used
+// to slide the F11 window out of the way of the LAN browser side panel.
+void windowMove(int win, int x, int y)
+{
+    Window* window = windowGetWindow(win);
+    if (window == nullptr) {
+        return;
+    }
+    Rect oldRect = window->rect;
+    int width = window->rect.right - window->rect.left;
+    int height = window->rect.bottom - window->rect.top;
+    window->rect.left = x;
+    window->rect.top = y;
+    window->rect.right = x + width;
+    window->rect.bottom = y + height;
+    windowRefreshAll(&oldRect);
+    windowRefreshAll(&window->rect);
+}
+
 // 0x4D765C
 void win_drag(int win)
 {

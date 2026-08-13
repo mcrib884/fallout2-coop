@@ -817,6 +817,40 @@ typedef struct NetWorldmapDiscoveryPayload {
     uint16_t count;
     uint16_t reserved;
 } NetWorldmapDiscoveryPayload;
+
+// LAN discovery (raw UDP, separate from the ENet session socket). The host
+// listens on a FIXED discovery port and answers probes with its session
+// facts; a browser broadcasts a probe on the same port and collects replies.
+#define NET_LAN_DISCOVERY_PORT 7778
+#define NET_LAN_MAGIC 0x4F324346u // 'F2CO' — first 4 bytes of every probe/reply
+#define NET_LAN_MAX_HOSTS 16
+
+typedef struct NetLanProbe {
+    uint32_t magic;
+    uint32_t versionHash;
+    uint32_t reserved;
+} NetLanProbe;
+
+typedef struct NetLanReply {
+    uint32_t magic;
+    uint32_t versionHash;
+    char hostName[NET_PEER_NAME_LENGTH];
+    uint16_t hostPort;          // the ENet session port (NetHostCreate)
+    uint16_t maxPlayers;
+    uint16_t currentPlayers;
+    uint8_t passwordRequired;   // 1 when the session has a password
+    uint8_t reserved;
+} NetLanReply;
+
+typedef struct NetLanHostInfo {
+    char address[64];           // dotted quad of the replying host
+    uint16_t port;
+    char name[NET_PEER_NAME_LENGTH];
+    uint16_t maxPlayers;
+    uint16_t currentPlayers;
+    bool passwordRequired;
+    uint32_t versionHash;
+} NetLanHostInfo;
 #pragma pack(pop)
 
 // --- Transport API ---
@@ -852,6 +886,20 @@ uint16_t NetGetConnectedPort();
 // Round-trip time in ms. Client (hostPeer set): ping to the host. Host
 // (hostPeer null): average ping of all connected peers, 0 when idle.
 uint32_t NetGetPingMs(ENetHost* host, ENetPeer* hostPeer);
+
+// LAN discovery. The host side answers probes on NET_LAN_DISCOVERY_PORT with
+// the advertised session info; pass an empty hostName to close the listener.
+void NetLanSetReplyInfo(const char* hostName, uint16_t hostPort,
+    uint16_t maxPlayers, uint16_t currentPlayers, bool passwordRequired);
+// Browser side: open/close the discovery socket (call from the browser UI).
+bool NetLanBrowserStart();
+void NetLanBrowserStop();
+// Send a probe to the LAN broadcast and loopback (so a host on the same
+// machine is found too). Non-blocking — call NetLanBrowserPoll afterwards.
+void NetLanBrowserScan();
+// Drain pending replies into hosts[capacity] (deduplicated by address+port,
+// version-mismatched hosts included so the UI can flag them); returns count.
+int NetLanBrowserPoll(NetLanHostInfo* hosts, int capacity);
 
 // Helper that appends a NetPacketHeader in front of a payload and sends it
 // on the given peer/channel. payload may be NULL if payloadLength == 0.

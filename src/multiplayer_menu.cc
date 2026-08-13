@@ -12,6 +12,7 @@
 #include "loadsave.h"
 #include "mouse.h"
 #include "multiplayer.h"
+#include "multiplayer_lan.h"
 #include "net.h"
 #include "svga.h"
 #include "text_font.h"
@@ -31,6 +32,7 @@ constexpr int MP_BTN_NEW_GAME = 503;
 constexpr int MP_BTN_LOAD_SAVE = 504;
 constexpr int MP_BTN_CREATE_CHARACTER = 505;
 constexpr int MP_BTN_LOAD_CHARACTER = 506;
+constexpr int MP_BTN_LAN_BROWSER = 507;
 
 // Centered position for a window of the given (width, height).
 void mpCenteredPos(int width, int height, int* outX, int* outY)
@@ -66,6 +68,7 @@ int mpRunModalLoop()
         case MP_BTN_LOAD_SAVE:
         case MP_BTN_CREATE_CHARACTER:
         case MP_BTN_LOAD_CHARACTER:
+        case MP_BTN_LAN_BROWSER:
             rc = keyCode;
             break;
         default:
@@ -115,10 +118,31 @@ int MpMenuShow()
         _win_register_text_button(win, 40, 30, -1, -1, -1, MP_BTN_HOST, "Host", 0);
         _win_register_text_button(win, 40, 55, -1, -1, -1, MP_BTN_JOIN, "Join", 0);
         _win_register_text_button(win, 40, 80, -1, -1, -1, MP_BTN_CANCEL, "Cancel", 0);
+        _win_register_text_button(win, 40, 105, -1, -1, -1, MP_BTN_LAN_BROWSER, "LAN Browser", 0);
 
         windowRefresh(win);
 
         int choice = mpRunModalLoop();
+
+        if (choice == MP_BTN_LAN_BROWSER) {
+            // The browser is a SIDE panel: keep this dialog on screen next to
+            // it (it is created after, on top, so it blocks these buttons for
+            // the duration — _win_check_all_buttons stops at the first modal).
+            int lanX = screenGetWidth() - kLanBrowserWidth - 8;
+            if (lanX < 0) {
+                lanX = 0;
+            }
+            if (MpLanBrowserShow(lanX, winY) != 0) {
+                rc = 1;
+                keepGoing = false;
+                windowDestroy(win);
+                break;
+            }
+            // Browser cancelled: rebuild the dialog.
+            windowDestroy(win);
+            continue;
+        }
+
         windowDestroy(win);
 
         switch (choice) {
@@ -217,6 +241,76 @@ int MpHostFlowShow()
     }
 }
 
+// === MpJoinInitiate ===
+// Shared join path used by BOTH the address join (MpJoinFlowShow) and the
+// LAN browser (MpLanBrowserShow) so a session always starts from a save or a
+// fresh character, never from whatever game state happens to be loaded.
+//
+// Returns 1 when a join was started (either connected directly or queued via
+// the pending-client globals), 0 on cancel or failure.
+int MpJoinInitiate(const char* address, uint16_t port, const char* password)
+{
+    // Joining from an already-loaded game: per the co-op framework, never
+    // use the in-memory character directly — back the session with a save
+    // first. The current game is saved into the reserved hidden co-op slot
+    // and reloaded from it, so the session always builds from a save and the
+    // player's own slots are never touched.
+    if (gGameLoaded) {
+        // The session's base save is the hidden co-op slot; client saves
+        // during the session land there too.
+        gMpSessionSlot = lsgGetCoopSaveSlot();
+        int saveRc = lsgQuickSaveGameCoop();
+        MpLog(MP_LOG_UI, "in-game join coop save rc=%d sessionSlot=%d", saveRc, gMpSessionSlot);
+        if (saveRc != 1) {
+            win_timed_msg("Could not back up your game before joining", COLOR_RED);
+            return 0;
+        }
+        if (lsgLoadGameCoop() != 0) {
+            win_timed_msg("Could not reload your backed-up game", COLOR_RED);
+            return 0;
+        }
+        return MpClientConnect(address, port, password) == 0 ? 1 : 0;
+    }
+
+    constexpr int kWindowWidth = 320;
+    constexpr int kWindowHeight = 150;
+    int winX, winY;
+    mpCenteredPos(kWindowWidth, kWindowHeight, &winX, &winY);
+
+    int win = windowCreate(winX, winY, kWindowWidth, kWindowHeight,
+        COLOR_BLACK, WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
+    if (win == -1) {
+        return 0;
+    }
+
+    windowDrawBorder(win);
+    const char* title = "JOIN CO-OP CHARACTER";
+    int titleX = (kWindowWidth - fontGetStringWidth(title)) / 2;
+    windowDrawText(win, title, 0, titleX, 6, COLOR_WHITE);
+    _win_register_text_button(win, 40, 30, -1, -1, -1,
+        MP_BTN_CREATE_CHARACTER, "Create New Character", 0);
+    _win_register_text_button(win, 40, 55, -1, -1, -1,
+        MP_BTN_LOAD_CHARACTER, "Load Character", 0);
+    _win_register_text_button(win, 40, 80, -1, -1, -1,
+        MP_BTN_CANCEL, "Cancel", 0);
+    windowRefresh(win);
+
+    int choice = mpRunModalLoop();
+    windowDestroy(win);
+    if (choice != MP_BTN_CREATE_CHARACTER && choice != MP_BTN_LOAD_CHARACTER) {
+        return 0;
+    }
+
+    strncpy(gMpPendingClientAddress, address, sizeof(gMpPendingClientAddress) - 1);
+    gMpPendingClientAddress[sizeof(gMpPendingClientAddress) - 1] = '\0';
+    gMpPendingClientPort = port;
+    strncpy(gMpPendingClientPassword, password, sizeof(gMpPendingClientPassword) - 1);
+    gMpPendingClientPassword[sizeof(gMpPendingClientPassword) - 1] = '\0';
+    gMpPendingClientStartAfterLoad = choice == MP_BTN_CREATE_CHARACTER ? 1 : 2;
+
+    return 1;
+}
+
 // === MpJoinFlowShow ===
 int MpJoinFlowShow()
 {
@@ -250,65 +344,7 @@ int MpJoinFlowShow()
         return 0;
     }
 
-    // Joining from an already-loaded game: per the co-op framework, never
-    // use the in-memory character directly — back the session with a save
-    // first. The current game is saved into the reserved hidden co-op slot
-    // and reloaded from it, so the session always builds from a save and the
-    // player's own slots are never touched.
-    if (gGameLoaded) {
-        // The session's base save is the hidden co-op slot; client saves
-        // during the session land there too.
-        gMpSessionSlot = lsgGetCoopSaveSlot();
-        int saveRc = lsgQuickSaveGameCoop();
-        MpLog(MP_LOG_UI, "in-game join coop save rc=%d sessionSlot=%d", saveRc, gMpSessionSlot);
-        if (saveRc != 1) {
-            win_timed_msg("Could not back up your game before joining", COLOR_RED);
-            return 0;
-        }
-        if (lsgLoadGameCoop() != 0) {
-            win_timed_msg("Could not reload your backed-up game", COLOR_RED);
-            return 0;
-        }
-        return MpClientConnect(ipBuffer, (uint16_t)port, passwordBuffer) == 0 ? 1 : 0;
-    }
-
-    constexpr int kWindowWidth = 320;
-    constexpr int kWindowHeight = 150;
-    int winX, winY;
-    mpCenteredPos(kWindowWidth, kWindowHeight, &winX, &winY);
-
-    int win = windowCreate(winX, winY, kWindowWidth, kWindowHeight,
-        COLOR_BLACK, WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
-    if (win == -1) {
-        return 0;
-    }
-
-    windowDrawBorder(win);
-    const char* title = "JOIN CO-OP CHARACTER";
-    int titleX = (kWindowWidth - fontGetStringWidth(title)) / 2;
-    windowDrawText(win, title, 0, titleX, 6, COLOR_WHITE);
-    _win_register_text_button(win, 40, 30, -1, -1, -1,
-        MP_BTN_CREATE_CHARACTER, "Create New Character", 0);
-    _win_register_text_button(win, 40, 55, -1, -1, -1,
-        MP_BTN_LOAD_CHARACTER, "Load Character", 0);
-    _win_register_text_button(win, 40, 80, -1, -1, -1,
-        MP_BTN_CANCEL, "Cancel", 0);
-    windowRefresh(win);
-
-    int choice = mpRunModalLoop();
-    windowDestroy(win);
-    if (choice != MP_BTN_CREATE_CHARACTER && choice != MP_BTN_LOAD_CHARACTER) {
-        return 0;
-    }
-
-    strncpy(gMpPendingClientAddress, ipBuffer, sizeof(gMpPendingClientAddress) - 1);
-    gMpPendingClientAddress[sizeof(gMpPendingClientAddress) - 1] = '\0';
-    gMpPendingClientPort = port;
-    strncpy(gMpPendingClientPassword, passwordBuffer, sizeof(gMpPendingClientPassword) - 1);
-    gMpPendingClientPassword[sizeof(gMpPendingClientPassword) - 1] = '\0';
-    gMpPendingClientStartAfterLoad = choice == MP_BTN_CREATE_CHARACTER ? 1 : 2;
-
-    return 1;
+    return MpJoinInitiate(ipBuffer, (uint16_t)port, passwordBuffer);
 }
 
 } // namespace fallout

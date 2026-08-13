@@ -1,5 +1,10 @@
 #include "net.h"
 
+// Windows sockets first — ENet pulls winsock2 in on its own, but the raw
+// discovery socket below needs the types declared before anything else.
+#ifdef _WIN32
+#include <winsock2.h>
+#endif
 #include <enet/enet.h>
 #include <string.h>
 #include <stdio.h>
@@ -17,6 +22,251 @@ namespace fallout {
 static uint16_t gNetBoundPort = NET_DEFAULT_PORT;
 static char gNetConnectedAddress[64] = "";
 static uint16_t gNetConnectedPort = 0;
+
+// ---------------------------------------------------------------------------
+// LAN discovery (raw UDP on NET_LAN_DISCOVERY_PORT, separate from the ENet
+// session socket). The host answers probes with its session facts; the
+// browser broadcasts a probe and collects replies.
+// ---------------------------------------------------------------------------
+
+// NOTE: the handles are stored as int on BOTH platforms. Windows SOCKET is
+// an unsigned 64-bit type, so comparing it with < 0 / >= 0 is always false
+// and INVALID_SOCKET would pass every "valid" check — the browser socket was
+// never created. Windows socket handles fit in 32 bits and INVALID_SOCKET
+// truncates to -1, so int semantics work everywhere.
+static int gNetLanListener = -1;
+static int gNetLanBrowserSocket = -1;
+
+// The advertised session template (filled by NetLanSetReplyInfo; the player
+// count is refreshed by multiplayer.cc via the same call).
+static NetLanReply gNetLanReplyTemplate = {};
+
+static bool netLanSocketSetNonBlocking(int socketHandle)
+{
+#ifdef _WIN32
+    u_long mode = 1;
+    return ioctlsocket((SOCKET)socketHandle, FIONBIO, &mode) == 0;
+#else
+    int flags = fcntl(socketHandle, F_GETFL, 0);
+    return flags != -1 && fcntl(socketHandle, F_SETFL, flags | O_NONBLOCK) == 0;
+#endif
+}
+
+// Bind a UDP socket to INADDR_ANY:port in non-blocking mode. Returns the
+// socket handle or -1.
+static int netLanCreateBoundSocket(uint16_t port)
+{
+#ifdef _WIN32
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET) {
+        return -1;
+    }
+#else
+    int s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s < 0) {
+        return -1;
+    }
+#endif
+    int enable = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&enable, sizeof(enable));
+
+    sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(port);
+    if (bind(s, (const sockaddr*)&addr, sizeof(addr)) != 0) {
+#ifdef _WIN32
+        closesocket(s);
+#else
+        close(s);
+#endif
+        return -1;
+    }
+    if (!netLanSocketSetNonBlocking(s)) {
+#ifdef _WIN32
+        closesocket(s);
+#else
+        close(s);
+#endif
+        return -1;
+    }
+    return s;
+}
+
+static void netLanCloseSocket(int socketHandle)
+{
+    if (socketHandle < 0) {
+        return;
+    }
+#ifdef _WIN32
+    closesocket((SOCKET)socketHandle);
+#else
+    close(socketHandle);
+#endif
+}
+
+void NetLanSetReplyInfo(const char* hostName, uint16_t hostPort,
+    uint16_t maxPlayers, uint16_t currentPlayers, bool passwordRequired)
+{
+    netLanCloseSocket(gNetLanListener);
+    gNetLanListener = -1;
+
+    if (hostName == nullptr || hostName[0] == '\0') {
+        MpLog(MP_LOG_NET, "lan reply listener closed");
+        return;
+    }
+
+    gNetLanReplyTemplate.magic = NET_LAN_MAGIC;
+    gNetLanReplyTemplate.versionHash = NetGetVersionHash();
+    strncpy(gNetLanReplyTemplate.hostName, hostName,
+        sizeof(gNetLanReplyTemplate.hostName) - 1);
+    gNetLanReplyTemplate.hostName[sizeof(gNetLanReplyTemplate.hostName) - 1] = '\0';
+    gNetLanReplyTemplate.hostPort = hostPort;
+    gNetLanReplyTemplate.maxPlayers = maxPlayers;
+    gNetLanReplyTemplate.currentPlayers = currentPlayers;
+    gNetLanReplyTemplate.passwordRequired = passwordRequired ? 1 : 0;
+
+    gNetLanListener = netLanCreateBoundSocket(NET_LAN_DISCOVERY_PORT);
+    if (gNetLanListener < 0) {
+        MpLogAlways(MP_LOG_NET, "lan reply listener bind failed port=%u", NET_LAN_DISCOVERY_PORT);
+        return;
+    }
+    MpLog(MP_LOG_NET, "lan reply listener open name='%s' port=%u players=%u/%u pass=%d",
+        hostName, hostPort, currentPlayers, maxPlayers, passwordRequired ? 1 : 0);
+}
+
+// Answer any probe with a valid magic on the discovery port (the browser
+// judges version compatibility itself so a mismatched build can be flagged).
+static void netLanListenerDrain()
+{
+    if (gNetLanListener < 0) {
+        return;
+    }
+    NetLanProbe probe;
+    sockaddr_in from = {};
+    int fromLen = sizeof(from);
+    for (;;) {
+        int received = recvfrom(gNetLanListener, (char*)&probe, sizeof(probe), 0,
+            (sockaddr*)&from, &fromLen);
+        if (received < 0) {
+            break; // EWOULDBLOCK / EAGAIN — nothing pending
+        }
+        if (received != (int)sizeof(probe) || probe.magic != NET_LAN_MAGIC) {
+            continue;
+        }
+        NetLanReply reply = gNetLanReplyTemplate;
+        reply.magic = NET_LAN_MAGIC;
+        reply.versionHash = NetGetVersionHash();
+        reply.hostPort = gNetBoundPort != 0 ? gNetBoundPort : reply.hostPort;
+        if (sendto(gNetLanListener, (const char*)&reply, sizeof(reply), 0,
+                (const sockaddr*)&from, sizeof(from)) < 0) {
+            // Transient error (e.g. ICMP port unreachable from a browser that
+            // closed) — keep listening.
+            break;
+        }
+    }
+}
+
+bool NetLanBrowserStart()
+{
+    if (gNetLanBrowserSocket >= 0) {
+        return true;
+    }
+    gNetLanBrowserSocket = netLanCreateBoundSocket(0); // ephemeral local port
+    if (gNetLanBrowserSocket < 0) {
+        MpLogAlways(MP_LOG_NET, "lan browser socket open failed");
+        return false;
+    }
+    int enable = 1;
+    setsockopt(gNetLanBrowserSocket, SOL_SOCKET, SO_BROADCAST,
+        (const char*)&enable, sizeof(enable));
+    MpLog(MP_LOG_NET, "lan browser socket open");
+    return true;
+}
+
+void NetLanBrowserStop()
+{
+    netLanCloseSocket(gNetLanBrowserSocket);
+    gNetLanBrowserSocket = -1;
+    MpLog(MP_LOG_NET, "lan browser socket closed");
+}
+
+void NetLanBrowserScan()
+{
+    if (gNetLanBrowserSocket < 0) {
+        return;
+    }
+    NetLanProbe probe = {};
+    probe.magic = NET_LAN_MAGIC;
+    probe.versionHash = NetGetVersionHash();
+
+    sockaddr_in target = {};
+    target.sin_family = AF_INET;
+    target.sin_port = htons(NET_LAN_DISCOVERY_PORT);
+
+    // Broadcast covers the LAN; the loopback probe finds a host running on
+    // this same machine (common for local co-op testing).
+    target.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+    sendto(gNetLanBrowserSocket, (const char*)&probe, sizeof(probe), 0,
+        (const sockaddr*)&target, sizeof(target));
+    target.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sendto(gNetLanBrowserSocket, (const char*)&probe, sizeof(probe), 0,
+        (const sockaddr*)&target, sizeof(target));
+}
+
+int NetLanBrowserPoll(NetLanHostInfo* hosts, int capacity)
+{
+    if (gNetLanBrowserSocket < 0 || hosts == nullptr || capacity <= 0) {
+        return 0;
+    }
+    uint32_t ownVersion = NetGetVersionHash();
+    NetLanReply reply;
+    sockaddr_in from = {};
+    int fromLen = sizeof(from);
+    int count = 0;
+    for (;;) {
+        int received = recvfrom(gNetLanBrowserSocket, (char*)&reply, sizeof(reply), 0,
+            (sockaddr*)&from, &fromLen);
+        if (received < 0) {
+            break;
+        }
+        if (received != (int)sizeof(reply) || reply.magic != NET_LAN_MAGIC) {
+            continue;
+        }
+        // Deduplicate by address+port (repeated probes/answers).
+        bool duplicate = false;
+        for (int i = 0; i < count; i++) {
+            if (hosts[i].port == reply.hostPort
+                && strcmp(hosts[i].address, inet_ntoa(from.sin_addr)) == 0) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) {
+            continue;
+        }
+        if (count >= capacity) {
+            break;
+        }
+        NetLanHostInfo* host = &hosts[count];
+        strncpy(host->address, inet_ntoa(from.sin_addr), sizeof(host->address) - 1);
+        host->address[sizeof(host->address) - 1] = '\0';
+        host->port = reply.hostPort;
+        strncpy(host->name, reply.hostName, sizeof(host->name) - 1);
+        host->name[sizeof(host->name) - 1] = '\0';
+        host->maxPlayers = reply.maxPlayers;
+        host->currentPlayers = reply.currentPlayers;
+        host->passwordRequired = reply.passwordRequired != 0;
+        host->versionHash = reply.versionHash;
+        count++;
+        MpLog(MP_LOG_NET, "lan host found '%s' %s:%u players=%u/%u pass=%d version=%s",
+            host->name, host->address, host->port,
+            host->currentPlayers, host->maxPlayers,
+            host->passwordRequired ? 1 : 0,
+            host->versionHash == ownVersion ? "match" : "MISMATCH");
+    }
+    return count;
+}
 
 // ---------------------------------------------------------------------------
 // Global init / shutdown
@@ -157,6 +407,10 @@ void NetHostService(ENetHost* host, NetEventCallback callback, void* userData)
         return;
     }
 
+    // Co-op LAN discovery: answer any pending probe on the fixed discovery
+    // port. Runs on the host's existing service cadence (non-blocking).
+    netLanListenerDrain();
+
     ENetEvent event;
     while (enet_host_service(host, &event, 0) > 0) {
         switch (event.type) {
@@ -197,7 +451,13 @@ uint32_t NetGetVersionHash()
         hash ^= (uint32_t)(unsigned char)(*p);
         hash *= 0x01000193u;
     }
-    MpLog(MP_LOG_NET, "version hash=%08X src='%s'", hash, buf);
+    // The hash is constant per build; log it once so it stops spamming every
+    // LAN poll frame.
+    static uint32_t sLastLoggedVersionHash = 0;
+    if (hash != sLastLoggedVersionHash) {
+        sLastLoggedVersionHash = hash;
+        MpLog(MP_LOG_NET, "version hash=%08X src='%s'", hash, buf);
+    }
     return hash;
 }
 

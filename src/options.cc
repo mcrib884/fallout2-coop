@@ -203,6 +203,7 @@ int showOptions()
                 MpDebugMenuShow();
                 windowRefresh(optionsWindow);
                 break;
+                break;
             case KEY_PLUS:
             case KEY_EQUAL:
                 brightnessIncrease();

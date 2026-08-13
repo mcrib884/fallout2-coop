@@ -23,6 +23,7 @@
 #include "map.h"
 #include "mouse.h"
 #include "multiplayer.h"
+#include "multiplayer_lan.h"
 #include "multiplayer_menu.h"
 #include "multiplayer_perf.h"
 #include "multiplayer_profile.h"
@@ -123,6 +124,7 @@ constexpr int DBG_BTN_HOST_PORT = 762;
 constexpr int DBG_BTN_HOST_GAME = 763;
 constexpr int DBG_BTN_JOIN = 764;
 constexpr int DBG_BTN_LEAVE = 765;
+constexpr int DBG_BTN_LAN_BROWSER = 766;
 // Set when the user pressed Reset Cursor: the cheats menu must NOT restore
 // the pre-menu hidden cursor state on close, or the reset would be undone.
 static bool gMpCursorResetRequested = false;
@@ -2005,9 +2007,9 @@ static int dbgBuildSettingsWindow(const DbgSettingsStatus* st)
         _win_register_text_button(win, 30, 135, -1, -1, -1, DBG_BTN_HOST_PORT, portLabel, 0);
         _win_register_text_button(win, 30, 160, -1, -1, -1, DBG_BTN_HOST_GAME, "Host Game", 0);
         _win_register_text_button(win, 30, 185, -1, -1, -1, DBG_BTN_JOIN, "Join...", 0);
-        windowDrawText(win, st->state, 0, 30, 215, COLOR_WHITE);
-        windowDrawText(win, st->players, 0, 30, 240, COLOR_WHITE);
-        windowDrawText(win, st->ping, 0, 30, 265, COLOR_WHITE);
+        _win_register_text_button(win, 30, 210, -1, -1, -1, DBG_BTN_LAN_BROWSER, "LAN Browser", 0);
+        windowDrawText(win, st->state, 0, 30, 240, COLOR_WHITE);
+        windowDrawText(win, st->players, 0, 30, 265, COLOR_WHITE);
     }
 
     // --- Settings column (right side): the perf meter is a per-machine
@@ -2096,6 +2098,36 @@ void MpDebugMenuShow()
             case DBG_BTN_LEAVE:
                 rc = keyCode;
                 break;
+            case DBG_BTN_LAN_BROWSER: {
+                // Side panel beside THIS window: the browser opens at the
+                // screen's right edge. The F11 window is moved to x=0 for the
+                // duration so the panel (x=460..632) never covers it, then
+                // restored on close. The browser is created after, on top,
+                // so it blocks this menu's buttons while open.
+                int lanX = screenGetWidth() - kLanBrowserWidth - 8;
+                if (lanX < 0) {
+                    lanX = 0;
+                }
+                int lanY = 0;
+                int restoreX = 0;
+                bool moved = false;
+                if (windowGetWindow(win) != nullptr) {
+                    lanY = windowGetWindow(win)->rect.top;
+                    restoreX = windowGetWindow(win)->rect.left;
+                    if (restoreX != 0) {
+                        windowMove(win, 0, lanY);
+                        moved = true;
+                    }
+                }
+                int lanRc = MpLanBrowserShow(lanX, lanY);
+                if (moved) {
+                    windowMove(win, restoreX, lanY);
+                }
+                if (lanRc != 0) {
+                    keepGoing = false;
+                }
+                break;
+            }
             case DBG_BTN_PERF_METER:
                 MpPerfSetEnabled(!MpPerfIsEnabled());
                 // Redraw the toggle status line (the button label is static).
@@ -2132,10 +2164,12 @@ void MpDebugMenuShow()
                     || strcmp(fresh.players, st.players) != 0
                     || strcmp(fresh.ping, st.ping) != 0) {
                     st = fresh;
-                    int statusY = wasInSession ? 120 : 215;
+                    int statusY = wasInSession ? 120 : 240;
                     dbgDrawSettingsLine(win, 30, statusY, st.state);
                     dbgDrawSettingsLine(win, 30, statusY + 25, st.players);
-                    dbgDrawSettingsLine(win, 30, statusY + 50, st.ping);
+                    if (wasInSession) {
+                        dbgDrawSettingsLine(win, 30, statusY + 50, st.ping);
+                    }
                 }
             }
 
@@ -2246,10 +2280,15 @@ void MpDebugMenuShow()
             if (win_yes_no("Leave the co-op session?", 80, 80, COLOR_WHITE) != 0) {
                 MpLog(MP_LOG_UI, "leave session requested");
                 if (gMpIsHost) {
+                    MpLog(MP_LOG_UI, "leave host stop begin");
                     MpHostStop();
+                    MpLog(MP_LOG_UI, "leave host stop done");
                 } else if (gMpIsClient) {
+                    MpLog(MP_LOG_UI, "leave client disconnect begin");
                     MpClientDisconnect();
+                    MpLog(MP_LOG_UI, "leave client disconnect done");
                 }
+                MpLog(MP_LOG_UI, "leave quit request set");
                 _game_user_wants_to_quit = GAME_QUIT_REQUEST_MAIN_MENU;
                 keepGoing = false;
             }
@@ -2257,8 +2296,10 @@ void MpDebugMenuShow()
         }
     }
 
+    MpLog(MP_LOG_UI, "f11 modal loop exit");
     if (win != -1) {
         windowDestroy(win);
+        MpLog(MP_LOG_UI, "f11 window destroyed");
     }
     if (cursorWasHidden) {
         mouseHideCursor();

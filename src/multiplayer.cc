@@ -200,6 +200,7 @@ static void mpDebugSnapshotPreSyncWalls();
 static void mpDebugReportMissingWalls();
 static MultiplayerPlayer* mpPlayerFindByPeer(ENetPeer* peer);
 static int mpFindPlayerSpawnTile(int preferredTile, int elevation);
+static void mpRefreshLanReply();
 static void mpBuildMapSyncPayload(NetMapSyncPayload* payload);
 static bool mpSendProfile(ENetPeer* peer, uint8_t netId, uint32_t objNetId,
     const MpPlayerProfile& profile, bool includeModel, uint8_t receiverNetId = 0,
@@ -765,6 +766,7 @@ static void mpHostAcceptProfile(MultiplayerPlayer* player, ENetPeer* peer,
     }
 
     MpBroadcastMapFullSync(peer);
+    mpRefreshLanReply();
 
     // A client that joins while the host is traveling never saw the
     // WORLDMAP_ENTER broadcast (it predates the connection). Ship the current
@@ -1965,7 +1967,31 @@ int MpHostStart(int32_t mapId)
     win_timed_msg(hostMsg, COLOR_GREEN);
     MpLog(MP_LOG_LIFECYCLE, "MpHostStart success port=%u maxPlayers=%d password=%u",
         gMpHostPort, gMpHostMaxPlayers, gMpHostPasswordHash);
+    mpRefreshLanReply();
     return 0;
+}
+
+// Co-op: refresh the LAN discovery advertisement (player count changes as
+// players join/leave; the host name and port are static while hosting).
+static void mpRefreshLanReply()
+{
+    if (!gMpIsHost || !gMpActive) {
+        return;
+    }
+    int current = 0;
+    for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+        if (gMpSession.players[index].isConnected) {
+            current++;
+        }
+    }
+    const char* name = "";
+    int localIndex = gMpSession.localNetId - 1;
+    if (localIndex >= 0 && localIndex < NET_MAX_PLAYERS
+        && gMpSession.players[localIndex].name[0] != '\0') {
+        name = gMpSession.players[localIndex].name;
+    }
+    NetLanSetReplyInfo(name, NetGetBoundPort(), (uint16_t)gMpSession.maxPlayers,
+        (uint16_t)current, gMpHostPasswordHash != 0);
 }
 
 int MpHostCurrentGame()
@@ -2005,6 +2031,8 @@ int MpHostStop()
     NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE, NET_PKT_DISCONNECT, nullptr, 0);
     NetHostDestroy(gMpSession.enetHost);
     MpVoteReset();
+    // Stop advertising on the LAN discovery port.
+    NetLanSetReplyInfo("", 0, 0, 0, false);
 
     // Free spawned critters for clients (host owns them).
     for (int i = 1; i < NET_MAX_PLAYERS; i++) {
@@ -2249,6 +2277,7 @@ static void mpHostRemovePlayer(MultiplayerPlayer* player)
         NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE,
             NET_PKT_PLAYER_LEFT, &left, sizeof(left));
     }
+    mpRefreshLanReply();
 
     if (player->obj != nullptr) {
         gMpHostObjNetIds.erase(player->obj);
@@ -4559,6 +4588,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             break;
         }
         case NET_PKT_DISCONNECT: {
+            MpLog(MP_LOG_LIFECYCLE, "client received host disconnect");
             win_timed_msg("Host disconnected", COLOR_RED);
             mpRequestClientDisconnect(false);
             _game_user_wants_to_quit = GAME_QUIT_REQUEST_MAIN_MENU;

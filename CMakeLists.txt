@@ -226,6 +226,8 @@ set(FALLOUT_ENGINE_SOURCES
     "src/multiplayer_dialog.h"
     "src/multiplayer_loot.cc"
     "src/multiplayer_loot.h"
+    "src/multiplayer_lan.cc"
+    "src/multiplayer_lan.h"
     "src/multiplayer_perf.cc"
     "src/multiplayer_perf.h"
     "src/multiplayer_chat.cc"

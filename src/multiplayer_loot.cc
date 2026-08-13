@@ -551,6 +551,35 @@ struct MpLootClientState {
 
 static MpLootClientState gLootClient = {};
 
+// Destroys every item in obj's inventory, unlinking each item's REAL
+// object-list node first. Destroying a container/critter instead frees its
+// inventory via _obj_inven_free, which removes items through a temporary
+// node and leaves their real head-list nodes (tile == -1, items are created
+// via objectCreateWithPid) dangling — the next _obj_remove_all walks freed
+// memory and crashes. Mirrors mpProfileDestroyObjectItems. Children first
+// (their slots are nulled as we go) so the parent teardown sees empty slots.
+static void mpLootDestroyInventoryItems(Object* obj)
+{
+    if (obj == nullptr) {
+        return;
+    }
+    Inventory* inv = &obj->data.inventory;
+    for (int index = 0; index < inv->length; index++) {
+        Object* item = inv->items[index].item;
+        if (item == nullptr) {
+            continue;
+        }
+        mpLootDestroyInventoryItems(item);
+        item->flags &= ~OBJECT_NO_REMOVE;
+        objectDestroy(item, nullptr);
+        inv->items[index].item = nullptr;
+    }
+    // Items are gone; zero the length so a later _obj_inven_free (which
+    // dereferences inventory->items[index].item without a null check) skips
+    // the loop and only frees the items array once.
+    inv->length = 0;
+}
+
 static void mpLootClientMirrorClear(Object* mirror)
 {
     if (mirror == nullptr || mirror->data.inventory.length == 0) {
@@ -561,6 +590,7 @@ static void mpLootClientMirrorClear(Object* mirror)
         return;
     }
     itemMoveAll(mirror, scratch);
+    mpLootDestroyInventoryItems(scratch);
     objectDestroy(scratch, nullptr);
 }
 
@@ -612,6 +642,11 @@ static void mpLootClientApplyDudeDeltas(const NetLootItem* deltas, int count)
             }
         }
     }
+    // The removed items must be unlinked from the head list before the
+    // scratch container's own teardown frees them — objectDestroy(scratch)
+    // alone would leave dangling head-list nodes (see
+    // mpLootDestroyInventoryItems).
+    mpLootDestroyInventoryItems(scratch);
     objectDestroy(scratch, nullptr);
 }
 

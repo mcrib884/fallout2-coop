@@ -17,6 +17,7 @@
 #include "message.h"
 #include "mouse.h"
 #include "multiplayer.h"
+#include "multiplayer_debug.h"
 #include "multiplayer_menu.h"
 #include "preferences.h"
 #include "scripts.h"
@@ -194,7 +195,12 @@ int showOptions()
                 break;
             case OPTIONS_MENU_BUTTON_MULTIPLAYER:
                 soundPlayFile("ib1p1xx1");
-                MpMenuShow();
+                // Co-op: the ESC menu's Multiplayer entry opens the F11
+                // CO-OP SETTINGS menu — host options (port, max players,
+                // password), Host Game / Join / Leave Session, and the live
+                // session status. The main menu keeps its direct
+                // Host/Join dialog (main.cc MAIN_MENU_MULTIPLAYER).
+                MpDebugMenuShow();
                 windowRefresh(optionsWindow);
                 break;
             case KEY_PLUS:

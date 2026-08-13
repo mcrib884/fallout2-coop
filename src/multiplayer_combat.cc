@@ -323,6 +323,12 @@ void MpCombatOnStarted()
     // here or every client's dialogue modal stays open and defers all combat
     // packets (stuck convo, dead buttons).
     MpDialogHostAbortCombat();
+    // Any in-flight walk is aborted by the combat start (the avatar's walk
+    // anim is cleared). Drop the walk-end tracking so the scan can't fire a
+    // stale WALK_INTERRUPTED after combat when the avatar sits off-target.
+    for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+        gMpSession.players[index].walkInFlight = false;
+    }
     gMpCombat.inCombat = true;
     gMpCombat.whoseTurn = 0;
     gMpCombat.waitingForTurnEnd = 0;

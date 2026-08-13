@@ -11,6 +11,13 @@
 
 namespace fallout {
 
+// Last-bound host port (NetHostCreate) and last-connect client endpoint
+// (NetClientConnect), so the UI can show "Hosting on port X" / "Joined
+// a.b.c.d:port" without touching ENet types.
+static uint16_t gNetBoundPort = NET_DEFAULT_PORT;
+static char gNetConnectedAddress[64] = "";
+static uint16_t gNetConnectedPort = 0;
+
 // ---------------------------------------------------------------------------
 // Global init / shutdown
 // ---------------------------------------------------------------------------
@@ -51,6 +58,7 @@ ENetHost* NetHostCreate(uint16_t port, int maxPeers)
     addr.port = port;
     ENetHost* host = enet_host_create(&addr, maxPeers, NET_NUM_CHANNELS, 0, 0);
     netGrowSocketBuffers(host);
+    gNetBoundPort = port;
     MpLog(MP_LOG_NET, "host create port=%u peers=%d result=%p", port, maxPeers, (void*)host);
     return host;
 }
@@ -76,6 +84,9 @@ ENetPeer* NetClientConnect(ENetHost* client, const char* address, uint16_t port)
     }
     addr.port = port;
     ENetPeer* peer = enet_host_connect(client, &addr, NET_NUM_CHANNELS, 0);
+    strncpy(gNetConnectedAddress, address, sizeof(gNetConnectedAddress) - 1);
+    gNetConnectedAddress[sizeof(gNetConnectedAddress) - 1] = '\0';
+    gNetConnectedPort = port;
     MpLog(MP_LOG_NET, "client connect '%s:%u' result=%p", address, port, (void*)peer);
     return peer;
 }
@@ -188,6 +199,59 @@ uint32_t NetGetVersionHash()
     }
     MpLog(MP_LOG_NET, "version hash=%08X src='%s'", hash, buf);
     return hash;
+}
+
+// FNV-1a 32-bit hash of a session password. 0 for empty input — the "no
+// password" sentinel. The password itself is never stored, sent or logged in
+// plaintext; only this hash rides the handshake.
+uint32_t NetPasswordHash(const char* password)
+{
+    if (password == nullptr || password[0] == '\0') {
+        return 0;
+    }
+    uint32_t hash = 0x811c9dc5u;
+    for (const char* p = password; *p != '\0'; p++) {
+        hash ^= (uint32_t)(unsigned char)(*p);
+        hash *= 0x01000193u;
+    }
+    return hash;
+}
+
+uint16_t NetGetBoundPort()
+{
+    return gNetBoundPort;
+}
+
+const char* NetGetConnectedAddress()
+{
+    return gNetConnectedAddress;
+}
+
+uint16_t NetGetConnectedPort()
+{
+    return gNetConnectedPort;
+}
+
+uint32_t NetGetPingMs(ENetHost* host, ENetPeer* hostPeer)
+{
+    if (hostPeer != nullptr) {
+        // Client: ping to the host.
+        return hostPeer->roundTripTime;
+    }
+    if (host == nullptr) {
+        return 0;
+    }
+    // Host: average ping of the connected peers.
+    uint64_t total = 0;
+    int count = 0;
+    for (size_t i = 0; i < host->peerCount; i++) {
+        ENetPeer* peer = &host->peers[i];
+        if (peer->state == ENET_PEER_STATE_CONNECTED) {
+            total += peer->roundTripTime;
+            count++;
+        }
+    }
+    return count > 0 ? (uint32_t)(total / count) : 0;
 }
 
 // ---------------------------------------------------------------------------

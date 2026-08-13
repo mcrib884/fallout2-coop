@@ -174,6 +174,16 @@ int MpMenuShow()
 // === MpHostFlowShow ===
 int MpHostFlowShow()
 {
+    // Main-menu hosting uses the default host options; the F11 CO-OP
+    // SETTINGS menu sets its own values explicitly right before hosting.
+    // Reset here so a previous F11 configuration never leaks into a later
+    // main-menu host.
+    gMpHostPort = NET_DEFAULT_PORT;
+    gMpHostMaxPlayers = NET_MAX_PLAYERS;
+    gMpHostPasswordHash = 0;
+    MpLog(MP_LOG_UI, "host flow defaults restored port=%u maxPlayers=%d",
+        gMpHostPort, gMpHostMaxPlayers);
+
     constexpr int kWindowWidth = 280;
     constexpr int kWindowHeight = 140;
     int winX, winY;
@@ -228,6 +238,18 @@ int MpJoinFlowShow()
         return 0;
     }
 
+    // Target port (defaults to the standard co-op port).
+    int port = gMpPendingClientPort > 0 ? gMpPendingClientPort : NET_DEFAULT_PORT;
+    if (win_get_num_i(&port, 1, 65535, false, "Host Port", ipX, ipY) == -1) {
+        return 0;
+    }
+
+    // Optional session password — masked entry, hashed for the handshake.
+    char passwordBuffer[64] = "";
+    if (_win_get_str_masked(passwordBuffer, 63, "Password (optional)", ipX, ipY) != 0) {
+        return 0;
+    }
+
     // Joining from an already-loaded game: per the co-op framework, never
     // use the in-memory character directly — back the session with a save
     // first. The current game is saved into the reserved hidden co-op slot
@@ -247,7 +269,7 @@ int MpJoinFlowShow()
             win_timed_msg("Could not reload your backed-up game", COLOR_RED);
             return 0;
         }
-        return MpClientConnect(ipBuffer, NET_DEFAULT_PORT) == 0 ? 1 : 0;
+        return MpClientConnect(ipBuffer, (uint16_t)port, passwordBuffer) == 0 ? 1 : 0;
     }
 
     constexpr int kWindowWidth = 320;
@@ -281,6 +303,9 @@ int MpJoinFlowShow()
 
     strncpy(gMpPendingClientAddress, ipBuffer, sizeof(gMpPendingClientAddress) - 1);
     gMpPendingClientAddress[sizeof(gMpPendingClientAddress) - 1] = '\0';
+    gMpPendingClientPort = port;
+    strncpy(gMpPendingClientPassword, passwordBuffer, sizeof(gMpPendingClientPassword) - 1);
+    gMpPendingClientPassword[sizeof(gMpPendingClientPassword) - 1] = '\0';
     gMpPendingClientStartAfterLoad = choice == MP_BTN_CREATE_CHARACTER ? 1 : 2;
 
     return 1;

@@ -135,6 +135,12 @@ static uint32_t gMpLastTileRefreshTick = 0;
 int gMpPendingHostStartAfterLoad = 0;
 int gMpPendingClientStartAfterLoad = 0;
 char gMpPendingClientAddress[64] = {};
+int gMpPendingClientPort = NET_DEFAULT_PORT;
+char gMpPendingClientPassword[64] = {};
+// Host options (F11 CO-OP SETTINGS): consumed by MpHostStart.
+uint16_t gMpHostPort = NET_DEFAULT_PORT;
+int gMpHostMaxPlayers = NET_MAX_PLAYERS;
+uint32_t gMpHostPasswordHash = 0;
 
 struct MpHostObjectRecord {
     uint32_t netId;
@@ -700,6 +706,8 @@ static void mpHostAcceptProfile(MultiplayerPlayer* player, ENetPeer* peer,
     // Ship the movie-seen array so the client's first map-enter script runs
     // its cutscenes exactly like the host's.
     gameMovieGetSeenFlags(welcome.moviesSeen, MOVIE_COUNT);
+    // Ship the session player cap so the client renders "Players: N/X".
+    welcome.maxPlayers = gMpSession.maxPlayers;
     NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_WELCOME, &welcome, sizeof(welcome));
 
     // The joining client must learn every canonical profile before it receives
@@ -1860,10 +1868,12 @@ int MpHostStart(int32_t mapId)
         MpLog(MP_LOG_LIFECYCLE, "host session slot fallback slot=%d", gMpSessionSlot);
     }
 
-    ENetHost* host = NetHostCreate(NET_DEFAULT_PORT, NET_MAX_PLAYERS);
+    ENetHost* host = NetHostCreate(gMpHostPort, gMpHostMaxPlayers);
     MpLog(MP_LOG_LIFECYCLE, "NetHostCreate result=%p", (void*)host);
     if (host == nullptr) {
-        win_timed_msg("Failed to host on port 7777", COLOR_RED);
+        char failMsg[64];
+        snprintf(failMsg, sizeof(failMsg), "Failed to host on port %u", gMpHostPort);
+        win_timed_msg(failMsg, COLOR_RED);
         debugPrint("MpHostStart: NetHostCreate failed\n");
         return -1;
     }
@@ -1873,6 +1883,7 @@ int MpHostStart(int32_t mapId)
     gMpSession.localNetId = 1;
     gMpSession.numPlayers = 1;
     gMpSession.currentMapId = mapId;
+    gMpSession.maxPlayers = (uint16_t)gMpHostMaxPlayers;
     gMpIsHost = true;
     gMpActive = true;
 
@@ -1923,8 +1934,11 @@ int MpHostStart(int32_t mapId)
     MpLog(MP_LOG_SYNC, "object sync baseline reset");
 
     gMpHostFirstTickPending = true;
-    win_timed_msg("Hosting on port 7777", COLOR_GREEN);
-    MpLog(MP_LOG_LIFECYCLE, "MpHostStart success");
+    char hostMsg[64];
+    snprintf(hostMsg, sizeof(hostMsg), "Hosting on port %u", gMpHostPort);
+    win_timed_msg(hostMsg, COLOR_GREEN);
+    MpLog(MP_LOG_LIFECYCLE, "MpHostStart success port=%u maxPlayers=%d password=%u",
+        gMpHostPort, gMpHostMaxPlayers, gMpHostPasswordHash);
     return 0;
 }
 
@@ -1997,10 +2011,19 @@ int MpHostStop()
 // Client side
 // ---------------------------------------------------------------------------
 
-int MpClientConnect(const char* address, uint16_t port)
+int MpClientConnect(const char* address, uint16_t port, const char* password)
 {
     if (gMpActive) {
         return -1;
+    }
+
+    // The password rides inside the session (the HELLO carries its hash);
+    // never logged, never stored anywhere else.
+    if (password != nullptr) {
+        strncpy(gMpPendingClientPassword, password, sizeof(gMpPendingClientPassword) - 1);
+        gMpPendingClientPassword[sizeof(gMpPendingClientPassword) - 1] = '\0';
+    } else {
+        gMpPendingClientPassword[0] = '\0';
     }
 
     if (gMpSessionSlot < 0) {
@@ -3500,6 +3523,17 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                     NetPeerDisconnect(peer);
                     return;
                 }
+                // Session password gate: a configured password must be met
+                // by the HELLO hash, and the empty hash (no password) never
+                // satisfies a protected session. The password itself never
+                // crosses the wire — only the FNV-1a hash does.
+                if (gMpHostPasswordHash != 0
+                    && hello->passwordHash != gMpHostPasswordHash) {
+                    MpLogAlways(MP_LOG_HANDSHAKE, "hello password mismatch kick peer=%p", (void*)peer);
+                    NetSendPacket(peer, NET_CHANNEL_RELIABLE, NET_PKT_KICK, nullptr, 0);
+                    NetPeerDisconnect(peer);
+                    return;
+                }
                 MultiplayerPlayer* p = mpPlayerFindByPeer(peer);
                 if (p == nullptr) {
                     return;
@@ -4103,6 +4137,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
         MpLog(MP_LOG_HANDSHAKE, "client connected to host, sending HELLO");
         NetHelloPayload hello;
         hello.versionHash = NetGetVersionHash();
+        hello.passwordHash = NetPasswordHash(gMpPendingClientPassword);
         memset(hello.peerName, 0, sizeof(hello.peerName));
         if (gMpPendingClientProfileValid) {
             strncpy(hello.peerName, gMpPendingClientProfile.name,
@@ -4274,6 +4309,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             gameMovieSetSeenFlags(w->moviesSeen, MOVIE_COUNT);
             gMpSession.localNetId = w->assignedNetId;
             gMpSession.currentMapId = w->map.mapId;
+            gMpSession.maxPlayers = w->maxPlayers;
             // Set up the player-slot for self.
             uint8_t selfIdx = (uint8_t)(w->assignedNetId - 1);
             if (selfIdx < NET_MAX_PLAYERS) {

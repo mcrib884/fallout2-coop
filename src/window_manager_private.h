@@ -16,6 +16,9 @@ extern char gProgramWindowTitle[256];
 int _win_list_select(const char* title, const char* const* fileList, int fileListLength, ListSelectionHandler* callback, int x, int y, int color);
 int _win_list_select_at(const char* title, const char* const* items, int itemsLength, ListSelectionHandler* callback, int x, int y, int color, int start);
 int _win_get_str(char* dest, int length, const char* title, int x, int y);
+// Same prompt as _win_get_str but every typed character renders as '*'
+// (the input cursor stays visible). Used for session passwords.
+int _win_get_str_masked(char* dest, int length, const char* title, int x, int y);
 int win_yes_no(const char* question, int x, int y, int color);
 int _win_msg(const char* string, int x, int y, int color);
 int _win_pull_down(char** items, int itemsLength, int x, int y, int color);
@@ -28,6 +31,7 @@ void _win_delete_menu_bar(int win);
 int _find_first_letter(int ch, const char* const* stringList, int stringListLength);
 int _win_width_needed(const char* const* fileNameList, int fileNameListLength);
 int _win_input_str(int win, char* dest, int maxLength, int x, int y, int textColor, int backgroundColor);
+int _win_input_str_masked(int win, char* dest, int maxLength, int x, int y, int textColor, int backgroundColor);
 int process_pull_down(int win, Rect* rect, char** items, int itemsLength, int foregroundColor, int backgroundColor, MenuBar* menuBar, int pulldownIndex);
 int _GNW_process_menu(MenuBar* menuBar, int pulldownIndex);
 int win_get_num_i(int* value, int min, int max, bool clear, const char* title, int x, int y);

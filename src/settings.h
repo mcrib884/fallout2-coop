@@ -79,6 +79,10 @@ struct UISettings {
     // Disables map edges, including vanilla scroll blockers and CE hi-res stencil.
     bool ignore_map_edges = false;
 
+    // Allows the camera to scroll to the ends of the map instead of being
+    // limited to a radius around the player (vanilla scroll limiting).
+    bool free_camera_scroll = true;
+
     // iOS quick-actions toolbar above the interface bar. No-op on other platforms.
     bool quick_toolbar_visible = false;
 

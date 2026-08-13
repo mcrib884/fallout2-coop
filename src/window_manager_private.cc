@@ -549,7 +549,22 @@ int _win_list_select_at(const char* title, const char* const* items, int itemsLe
 }
 
 // 0x4DB478
+// Shared prompt window for _win_get_str / _win_get_str_masked (defined with
+// the input loop below).
+static int winGetStrCore(char* dest, int length, const char* title, int x, int y, bool mask);
+
 int _win_get_str(char* dest, int length, const char* title, int x, int y)
+{
+    return winGetStrCore(dest, length, title, x, y, false);
+}
+
+int _win_get_str_masked(char* dest, int length, const char* title, int x, int y)
+{
+    return winGetStrCore(dest, length, title, x, y, true);
+}
+
+// Shared prompt window for _win_get_str / _win_get_str_masked.
+static int winGetStrCore(char* dest, int length, const char* title, int x, int y, bool mask)
 {
     if (!gWindowSystemInitialized) {
         return -1;
@@ -614,13 +629,24 @@ int _win_get_str(char* dest, int length, const char* title, int x, int y)
 
     windowRefresh(win);
 
-    int rc = _win_input_str(win,
-        dest,
-        length,
-        16,
-        fontGetLineHeight() + 16,
-        _colorTable[_GNW_wcolor[3]],
-        _colorTable[_GNW_wcolor[0]]);
+    int rc;
+    if (mask) {
+        rc = _win_input_str_masked(win,
+            dest,
+            length,
+            16,
+            fontGetLineHeight() + 16,
+            _colorTable[_GNW_wcolor[3]],
+            _colorTable[_GNW_wcolor[0]]);
+    } else {
+        rc = _win_input_str(win,
+            dest,
+            length,
+            16,
+            fontGetLineHeight() + 16,
+            _colorTable[_GNW_wcolor[3]],
+            _colorTable[_GNW_wcolor[0]]);
+    }
 
     windowDestroy(win);
 
@@ -1107,7 +1133,27 @@ int _win_width_needed(const char* const* fileNameList, int fileNameListLength)
 }
 
 // 0x4DCA5C
-int _win_input_str(int win, char* dest, int maxLength, int x, int y, int textColor, int backgroundColor)
+// Renders the input line. When [mask] is set every typed character renders
+// as '*' — only the cursor '_' and the backspace-cleared spaces stay literal.
+static void winInputStrDraw(unsigned char* buffer, const char* dest, int stringWidth,
+    int windowWidth, int textColor, bool mask)
+{
+    char display[256];
+    size_t len = strlen(dest);
+    if (len >= sizeof(display)) {
+        len = sizeof(display) - 1;
+    }
+    for (size_t i = 0; i < len; i++) {
+        char ch = dest[i];
+        display[i] = (mask && ch != '_' && ch != ' ') ? '*' : ch;
+    }
+    display[len] = '\0';
+    fontDrawText(buffer, display, stringWidth, windowWidth, textColor);
+}
+
+// Shared input loop for _win_input_str / _win_input_str_masked.
+static int winInputStrCore(int win, char* dest, int maxLength, int x, int y,
+    int textColor, int backgroundColor, bool mask)
 {
     Window* window = windowGetWindow(win);
     unsigned char* buffer = window->buffer + window->width * y + x;
@@ -1119,7 +1165,7 @@ int _win_input_str(int win, char* dest, int maxLength, int x, int y, int textCol
     int lineHeight = fontGetLineHeight();
     int stringWidth = fontGetStringWidth(dest);
     bufferFill(buffer, stringWidth, lineHeight, window->width, backgroundColor);
-    fontDrawText(buffer, dest, stringWidth, window->width, textColor);
+    winInputStrDraw(buffer, dest, stringWidth, window->width, textColor, mask);
 
     Rect dirtyRect;
     dirtyRect.left = window->rect.left + x;
@@ -1164,7 +1210,7 @@ int _win_input_str(int win, char* dest, int maxLength, int x, int y, int textCol
                     }
 
                     bufferFill(buffer, stringWidth, lineHeight, window->width, backgroundColor);
-                    fontDrawText(buffer, dest, stringWidth, window->width, textColor);
+                    winInputStrDraw(buffer, dest, stringWidth, window->width, textColor, mask);
 
                     dirtyRect.left = window->rect.left + x;
                     dirtyRect.top = window->rect.top + y;
@@ -1192,7 +1238,7 @@ int _win_input_str(int win, char* dest, int maxLength, int x, int y, int textCol
 
                         int stringWidth = fontGetStringWidth(dest);
                         bufferFill(buffer, stringWidth, lineHeight, window->width, backgroundColor);
-                        fontDrawText(buffer, dest, stringWidth, window->width, textColor);
+                        winInputStrDraw(buffer, dest, stringWidth, window->width, textColor, mask);
 
                         dirtyRect.left = window->rect.left + x;
                         dirtyRect.top = window->rect.top + y;
@@ -1217,6 +1263,16 @@ int _win_input_str(int win, char* dest, int maxLength, int x, int y, int textCol
     dest[cursorPos] = '\0';
 
     return 0;
+}
+
+int _win_input_str(int win, char* dest, int maxLength, int x, int y, int textColor, int backgroundColor)
+{
+    return winInputStrCore(win, dest, maxLength, x, y, textColor, backgroundColor, false);
+}
+
+int _win_input_str_masked(int win, char* dest, int maxLength, int x, int y, int textColor, int backgroundColor)
+{
+    return winInputStrCore(win, dest, maxLength, x, y, textColor, backgroundColor, true);
 }
 
 // 0x4DCD68

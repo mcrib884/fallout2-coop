@@ -183,8 +183,15 @@ mp_run_new_game:
                     strncpy(pendingClientAddress, gMpPendingClientAddress,
                         sizeof(pendingClientAddress) - 1);
                     pendingClientAddress[sizeof(pendingClientAddress) - 1] = '\0';
+                    int pendingClientPort = gMpPendingClientPort;
+                    char pendingClientPassword[sizeof(gMpPendingClientPassword)];
+                    strncpy(pendingClientPassword, gMpPendingClientPassword,
+                        sizeof(pendingClientPassword) - 1);
+                    pendingClientPassword[sizeof(pendingClientPassword) - 1] = '\0';
                     gMpPendingClientStartAfterLoad = 0;
                     gMpPendingClientAddress[0] = '\0';
+                    gMpPendingClientPort = NET_DEFAULT_PORT;
+                    gMpPendingClientPassword[0] = '\0';
                     MpLog(MP_LOG_LIFECYCLE, "new-game load complete pendingHostStart=%d map=%d",
                         pendingHostStart, gMapHeader.index);
                     if (pendingHostStart == 1) {
@@ -215,7 +222,7 @@ mp_run_new_game:
                         }
                         int coopSaveRc = lsgQuickSaveGameCoop();
                         MpLog(MP_LOG_LIFECYCLE, "new-game coop save rc=%d sessionSlot=%d", coopSaveRc, gMpSessionSlot);
-                        if (MpClientConnect(pendingClientAddress, NET_DEFAULT_PORT) != 0) {
+                        if (MpClientConnect(pendingClientAddress, (uint16_t)pendingClientPort, pendingClientPassword) != 0) {
                             win_timed_msg("Could not join co-op session", COLOR_RED);
                         }
                     }
@@ -275,8 +282,15 @@ mp_run_load_game:
                         strncpy(pendingClientAddress, gMpPendingClientAddress,
                             sizeof(pendingClientAddress) - 1);
                         pendingClientAddress[sizeof(pendingClientAddress) - 1] = '\0';
+                        int pendingClientPort = gMpPendingClientPort;
+                        char pendingClientPassword[sizeof(gMpPendingClientPassword)];
+                        strncpy(pendingClientPassword, gMpPendingClientPassword,
+                            sizeof(pendingClientPassword) - 1);
+                        pendingClientPassword[sizeof(pendingClientPassword) - 1] = '\0';
                         gMpPendingClientStartAfterLoad = 0;
                         gMpPendingClientAddress[0] = '\0';
+                        gMpPendingClientPort = NET_DEFAULT_PORT;
+                        gMpPendingClientPassword[0] = '\0';
                         MpLog(MP_LOG_LIFECYCLE, "save load complete pendingHostStart=%d map=%d",
                             pendingHostStart, gMapHeader.index);
                         if (pendingHostStart == 2) {
@@ -295,7 +309,7 @@ mp_run_load_game:
                             // that same SP slot.
                             gMpSessionSlot = lsgGetLastLoadedSlot();
                             MpLog(MP_LOG_LIFECYCLE, "load-client session slot=%d", gMpSessionSlot);
-                            if (MpClientConnect(pendingClientAddress, NET_DEFAULT_PORT) != 0) {
+                            if (MpClientConnect(pendingClientAddress, (uint16_t)pendingClientPort, pendingClientPassword) != 0) {
                                 win_timed_msg("Could not join co-op session", COLOR_RED);
                             }
                         }

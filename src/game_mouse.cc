@@ -722,26 +722,40 @@ int _gmouse_is_scrolling()
     return isScrolling;
 }
 
-// Co-op diagnostics for the "invisible cursor on the client after a turn"
-// bug. Dumps the full cursor state so the log shows exactly which flag or
-// fid leaves nothing on screen. Only active on a co-op client in combat.
+// Co-op diagnostics for the "invisible cursor on the client" bug. Dumps the
+// full cursor state so the log shows exactly which flag or fid leaves nothing
+// on screen. Fires (throttled) whenever a co-op client is in the anomaly
+// state: gmouse enabled but the 3D cursor objects hidden — the field cursor
+// is invisible while input still works. MP_LOG_UI-gated via MpLog.
 static void mpCursorDebugDump(const char* why)
 {
-    if (!gMpActive || !gMpIsClient || !MpCombatIsActive()) {
+    if (!gMpActive || !gMpIsClient || !_gmouse_enabled) {
         return;
     }
-    // debugFilePrint("MPCURSOR[%s]: cursor=%d mode=%d gmouseEnabled=%d uiDisabled=%d hexHidden=%d hexFid=0x%X hexTile=%d hexElev=%d bounceHidden=%d elev=%d",
-    //     why,
-    //     gGameMouseCursor,
-    //     gGameMouseMode,
-    //     _gmouse_enabled ? 1 : 0,
-    //     gameUiIsDisabled() ? 1 : 0,
-    //     (gGameMouseHexCursor->flags & OBJECT_HIDDEN) != 0 ? 1 : 0,
-    //     gGameMouseHexCursor->fid,
-    //     gGameMouseHexCursor->tile,
-    //     gGameMouseHexCursor->elevation,
-    //     (gGameMouseBouncingCursor->flags & OBJECT_HIDDEN) != 0 ? 1 : 0,
-    //     gElevation);
+    bool hexHidden = (gGameMouseHexCursor->flags & OBJECT_HIDDEN) != 0;
+    bool bounceHidden = (gGameMouseBouncingCursor->flags & OBJECT_HIDDEN) != 0;
+    if (!hexHidden && !bounceHidden) {
+        return;
+    }
+    int atPoint = -1;
+    int mouseX;
+    int mouseY;
+    mouseGetPosition(&mouseX, &mouseY);
+    atPoint = windowGetAtPoint(mouseX, mouseY);
+    MpLog(MP_LOG_UI, "cursor anomaly [%s]: cursor=%d mode=%d gmouseEnabled=%d uiDisabled=%d hexHidden=%d hexFid=0x%X hexTile=%d hexElev=%d bounceHidden=%d atPointWin=%d isoWin=%d elev=%d",
+        why,
+        gGameMouseCursor,
+        gGameMouseMode,
+        _gmouse_enabled ? 1 : 0,
+        gameUiIsDisabled() ? 1 : 0,
+        hexHidden ? 1 : 0,
+        gGameMouseHexCursor->fid,
+        gGameMouseHexCursor->tile,
+        gGameMouseHexCursor->elevation,
+        bounceHidden ? 1 : 0,
+        atPoint,
+        gIsoWindow,
+        gElevation);
 }
 
 // 0x44B684 gmouse_bk_process
@@ -752,9 +766,9 @@ void gameMouseRefresh()
     }
 
     // Co-op diagnostics: periodic cursor-state dump (1s) while a co-op client
-    // is in combat, so the invisible-cursor steady state is captured no matter
-    // how it got there.
-    if (gMpActive && gMpIsClient && MpCombatIsActive()) {
+    // is in the invisible-cursor anomaly state, so the stuck steady state is
+    // captured no matter how it got there.
+    if (gMpActive && gMpIsClient) {
         static unsigned int gMpCursorLastDumpTick = 0;
         unsigned int now = getTicks();
         if (gMpCursorLastDumpTick == 0 || getTicksBetween(now, gMpCursorLastDumpTick) >= 1000) {

@@ -15,12 +15,14 @@
 #include "debug.h"
 #include "display_monitor.h"
 #include "game.h"
+#include "game_mouse.h"
 #include "input.h"
 #include "interface.h"
 #include "item.h"
 #include "kb.h"
 #include "mouse.h"
 #include "multiplayer.h"
+#include "multiplayer_menu.h"
 #include "multiplayer_perf.h"
 #include "multiplayer_profile.h"
 #include "multiplayer_log.h"
@@ -96,6 +98,18 @@ constexpr int DBG_BTN_SKIN_MODEL_NEXT = 746;
 constexpr int DBG_BTN_SKIN = 747;
 constexpr int DBG_BTN_NAME = 748;
 constexpr int DBG_BTN_COLOR = 749;
+constexpr int DBG_BTN_CURSOR_RESET = 750;
+// Multiplayer section (CO-OP SETTINGS): host options + session actions.
+// 751-759 reserved for the skin/cursor pickers; 770+ are picker bases.
+constexpr int DBG_BTN_HOST_MAX = 760;
+constexpr int DBG_BTN_HOST_PASS = 761;
+constexpr int DBG_BTN_HOST_PORT = 762;
+constexpr int DBG_BTN_HOST_GAME = 763;
+constexpr int DBG_BTN_JOIN = 764;
+constexpr int DBG_BTN_LEAVE = 765;
+// Set when the user pressed Reset Cursor: the cheats menu must NOT restore
+// the pre-menu hidden cursor state on close, or the reset would be undone.
+static bool gMpCursorResetRequested = false;
 constexpr int DBG_BTN_COLOR_BASE = 830;
 constexpr int DBG_BTN_SKIN_CAT_BASE = 750;
 constexpr int DBG_BTN_SKIN_MODEL_BASE = 770;
@@ -122,6 +136,14 @@ uint32_t gDbgCheatLastSyncTick = 0;
 // is broadcast to the clients (NET_PKT_CHEAT_POLICY), which gate their
 // menus and local effects on it.
 bool gDbgClientCheatsEnabled = false;
+
+// Host options captured by the F11 CO-OP SETTINGS menu and applied when the
+// player presses Host Game: max player cap (1..NET_MAX_PLAYERS), bind port
+// (1..65535) and the optional session password (kept raw only in this menu
+// for re-display; the session consumes NetPasswordHash of it).
+int gDbgHostMaxPlayers = NET_MAX_PLAYERS;
+int gDbgHostPort = NET_DEFAULT_PORT;
+char gDbgHostPassword[64] = "";
 
 // Centered position for a window of the given (width, height).
 void dbgCenteredPos(int width, int height, int* outX, int* outY)
@@ -1043,15 +1065,17 @@ static int dbgKillHostiles()
 // to the local dude in the current quantity. Stays open for repeated grabs.
 static void dbgItemBrowserShow()
 {
-    // One-time enumeration: FO2 item protos are contiguous from 0x1000001;
-    // stop after a run of 16 misses.
+    // One-time enumeration: FO2 item protos live in the type-0 (item) pid
+    // range — pid is the 1-based line index into PROTO\ITEM\ITEM.lst, i.e.
+    // plain small integers. (The critter range starts at 0x1000000; that
+    // mistake would hand out NPCs.) Stop after a run of 32 misses.
     static std::vector<int> sItemPids;
     if (sItemPids.empty()) {
         int miss = 0;
-        for (int n = 1; n <= 4096 && miss < 16; n++) {
+        for (int pid = 1; pid <= 4096 && miss < 32; pid++) {
             Proto* proto = nullptr;
-            if (protoGetProto(0x1000000 + n, &proto) == 0) {
-                sItemPids.push_back(0x1000000 + n);
+            if (protoGetProto(pid, &proto) == 0) {
+                sItemPids.push_back(pid);
                 miss = 0;
             } else {
                 miss++;
@@ -1646,6 +1670,7 @@ static void dbgCheatsMenuShow()
     _win_register_text_button(win, 170, 255, -1, -1, -1, DBG_BTN_CHEATS, "Cheat Options...", 0);
     _win_register_text_button(win, 30, 280, -1, -1, -1, DBG_BTN_CLOSE, "Close", 0);
     _win_register_text_button(win, 170, 280, -1, -1, -1, DBG_BTN_TRAITS, "Traits...", 0);
+    _win_register_text_button(win, 310, 280, -1, -1, -1, DBG_BTN_CURSOR_RESET, "Reset Cursor", 0);
     windowRefresh(win);
 
     SubmenuCallbacks skillsCb {
@@ -1699,6 +1724,7 @@ static void dbgCheatsMenuShow()
             case DBG_BTN_TRAITS:
             case DBG_BTN_CHEATS:
             case DBG_BTN_CLOSE:
+            case DBG_BTN_CURSOR_RESET:
                 rc = keyCode;
                 break;
             default:
@@ -1710,9 +1736,11 @@ static void dbgCheatsMenuShow()
         }
 
         // Individual-action gate (defense in depth): even if this menu is
-        // somehow open, every action is inert for a disabled client. Close
-        // and ESC always pass so the window can always be exited.
-        if (rc != 0 && rc != DBG_BTN_CLOSE && gMpActive && gMpIsClient
+        // somehow open, every action is inert for a disabled client. Close,
+        // ESC and the cursor reset always pass so the window can always be
+        // exited and the cursor can always be recovered.
+        if (rc != 0 && rc != DBG_BTN_CLOSE && rc != DBG_BTN_CURSOR_RESET
+            && gMpActive && gMpIsClient
             && !gDbgClientCheatsEnabled) {
             MpLogAlways(MP_LOG_UI, "cheats action blocked (disabled by host) rc=%d", rc);
             displayMonitorAddMessage("Cheats are disabled by the host.");
@@ -1792,13 +1820,42 @@ static void dbgCheatsMenuShow()
         case DBG_BTN_CHEATS:
             dbgCheatModal();
             break;
+        case DBG_BTN_CURSOR_RESET:
+            // Client-side cursor recovery. The engine has two cursor layers:
+            // the 2D software cursor (menus/modals force-show it every frame,
+            // which is why it appears inside this window) and the iso 3D
+            // game-mouse objects (hex + bouncing cursor) that are the cursor
+            // on the play field. The 3D layer is gated behind the game-UI
+            // enabled flag: if a client path disabled the UI and never
+            // re-enabled it (or left the gmouse layer off), the play-field
+            // cursor vanishes even though menus still draw theirs. Restore
+            // both layers + a sane frame + center position.
+            if (gameUiIsDisabled()) {
+                gameUiEnable();
+            }
+            _gmouse_enable();
+            gameMouseObjectsShow();
+            gameMouseSetCursor(MOUSE_CURSOR_ARROW);
+            mouseShowCursor();
+            mouseSetFrame(nullptr, 0, 0, 0, 0, 0, 0);
+            _mouse_set_position(screenGetWidth() / 2, screenGetHeight() / 2);
+            gMpCursorResetRequested = true;
+            MpLog(MP_LOG_UI, "cursor reset uiDisabled=%d gmouseObjects=%d hidden=%d",
+                gameUiIsDisabled() ? 1 : 0,
+                gameMouseObjectsIsVisible() ? 1 : 0,
+                cursorIsHidden() ? 1 : 0);
+            break;
         }
     }
 
     windowDestroy(win);
-    if (cursorWasHidden) {
+    // A user-requested cursor reset must survive the menu close: the close
+    // normally restores the pre-menu hidden state, which would re-hide the
+    // very cursor the reset just brought back.
+    if (cursorWasHidden && !gMpCursorResetRequested) {
         mouseHideCursor();
     }
+    gMpCursorResetRequested = false;
     MpLog(MP_LOG_UI, "cheats menu end");
 }
 
@@ -1806,6 +1863,161 @@ static void dbgCheatsMenuShow()
 // Forward: the skin status helper is defined with the skin-picker block below
 // but drawn from the settings menu.
 static void dbgSkinStatusText(char* buf, size_t size);
+
+// All status strings drawn by the CO-OP SETTINGS window. Rebuilt from live
+// state by dbgFillSettingsStatus; the modal loop redraws the session lines
+// whenever the strings change (players join/leave, ping moves).
+struct DbgSettingsStatus {
+    char perf[64];
+    char clientCheats[64];
+    char skin[64];
+    char name[64];
+    char color[64];
+    char state[64];
+    char players[48];
+    char ping[32];
+};
+
+static void dbgFillSettingsStatus(DbgSettingsStatus* st)
+{
+    snprintf(st->perf, sizeof(st->perf), "Perf: %s", MpPerfIsEnabled() ? "ON" : "OFF");
+    if (gMpActive) {
+        if (gMpIsHost) {
+            snprintf(st->clientCheats, sizeof(st->clientCheats), "Clients: %s",
+                gDbgClientCheatsEnabled ? "ON" : "OFF");
+        } else {
+            snprintf(st->clientCheats, sizeof(st->clientCheats), "%s",
+                gDbgClientCheatsEnabled ? "enabled" : "disabled by host");
+        }
+    } else {
+        st->clientCheats[0] = '\0';
+    }
+    dbgSkinStatusText(st->skin, sizeof(st->skin));
+    snprintf(st->name, sizeof(st->name), "Name: %.20s",
+        MpDebugLocalPlayerNameOverride() != nullptr ? MpDebugLocalPlayerNameOverride() : "");
+    int curColor = MpDebugLocalPlayerColor();
+    snprintf(st->color, sizeof(st->color), "Color: %s",
+        curColor >= 0 && curColor < 8 ? kPlayerPaletteNames[curColor] : "default");
+
+    if (!gMpActive) {
+        snprintf(st->state, sizeof(st->state), "Not in a session");
+        snprintf(st->players, sizeof(st->players), "Players: -/-");
+        snprintf(st->ping, sizeof(st->ping), "Ping: -");
+        return;
+    }
+    if (gMpIsHost) {
+        snprintf(st->state, sizeof(st->state), "Hosting on port %u", NetGetBoundPort());
+    } else {
+        const char* addr = NetGetConnectedAddress();
+        if (addr[0] == '\0') {
+            addr = "?";
+        }
+        snprintf(st->state, sizeof(st->state), "Joined %s:%u", addr, NetGetConnectedPort());
+    }
+    int connected = 0;
+    for (int i = 0; i < NET_MAX_PLAYERS; i++) {
+        if (gMpSession.players[i].isConnected) {
+            connected++;
+        }
+    }
+    if (gMpSession.maxPlayers != 0) {
+        snprintf(st->players, sizeof(st->players), "Players: %d/%u", connected, gMpSession.maxPlayers);
+    } else {
+        snprintf(st->players, sizeof(st->players), "Players: %d/?", connected);
+    }
+    snprintf(st->ping, sizeof(st->ping), "Ping: %u ms", NetGetPingMs(gMpSession.enetHost, gMpSession.hostPeer));
+}
+
+// Redraws one status line in the settings window (fill the row, draw the
+// text, refresh).
+static void dbgDrawSettingsLine(int win, int x, int y, const char* text)
+{
+    windowFill(win, x, y - 2, fontGetStringWidth(text) + 8, 20, COLOR_BLACK);
+    windowDrawText(win, text, 0, x, y, COLOR_WHITE);
+    windowRefresh(win);
+}
+
+// Builds (or rebuilds) the CO-OP SETTINGS window for the current session
+// state. Idle: host options (max players / password / port), Host Game and
+// Join, plus the session status lines. In session: Leave Session plus the
+// live status lines. Returns the window handle, -1 on failure.
+static int dbgBuildSettingsWindow(const DbgSettingsStatus* st)
+{
+    int winX, winY;
+    dbgCenteredPos(kDbgWindowWidth, kDbgWindowHeight, &winX, &winY);
+
+    int win = windowCreate(winX, winY, kDbgWindowWidth, kDbgWindowHeight,
+        COLOR_BLACK, WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
+    if (win == -1) {
+        return -1;
+    }
+    windowDrawBorder(win);
+
+    const char* title = "CO-OP SETTINGS";
+    int titleX = (kDbgWindowWidth - fontGetStringWidth(title)) / 2;
+    windowDrawText(win, title, 0, titleX, 6, COLOR_WHITE);
+
+    _win_register_text_button(win, 30, 30, -1, -1, -1, DBG_BTN_CHEATS, "Cheats...", 0);
+    _win_register_text_button(win, 30, 55, -1, -1, -1, DBG_BTN_CLOSE, "Close", 0);
+
+    if (gMpActive) {
+        // --- In session: leave action + live session status ---
+        _win_register_text_button(win, 30, 85, -1, -1, -1, DBG_BTN_LEAVE, "Leave Session", 0);
+        windowDrawText(win, st->state, 0, 30, 120, COLOR_WHITE);
+        windowDrawText(win, st->players, 0, 30, 145, COLOR_WHITE);
+        windowDrawText(win, st->ping, 0, 30, 170, COLOR_WHITE);
+    } else {
+        // --- Idle: host options (labels carry the current values), the
+        // host/join actions, and the session status lines ---
+        char maxLabel[64];
+        snprintf(maxLabel, sizeof(maxLabel), "Max Players: %d", gDbgHostMaxPlayers);
+        _win_register_text_button(win, 30, 85, -1, -1, -1, DBG_BTN_HOST_MAX, maxLabel, 0);
+        char passLabel[64];
+        snprintf(passLabel, sizeof(passLabel), "Password: %s",
+            gDbgHostPassword[0] != '\0' ? "set" : "none");
+        _win_register_text_button(win, 30, 110, -1, -1, -1, DBG_BTN_HOST_PASS, passLabel, 0);
+        char portLabel[64];
+        snprintf(portLabel, sizeof(portLabel), "Port: %d", gDbgHostPort);
+        _win_register_text_button(win, 30, 135, -1, -1, -1, DBG_BTN_HOST_PORT, portLabel, 0);
+        _win_register_text_button(win, 30, 160, -1, -1, -1, DBG_BTN_HOST_GAME, "Host Game", 0);
+        _win_register_text_button(win, 30, 185, -1, -1, -1, DBG_BTN_JOIN, "Join...", 0);
+        windowDrawText(win, st->state, 0, 30, 215, COLOR_WHITE);
+        windowDrawText(win, st->players, 0, 30, 240, COLOR_WHITE);
+        windowDrawText(win, st->ping, 0, 30, 265, COLOR_WHITE);
+    }
+
+    // --- Settings column (right side): the perf meter is a per-machine
+    // render toggle available to everyone (singleplayer included); the
+    // co-op host policy toggles sit below it ---
+    _win_register_text_button(win, 330, 30, -1, -1, -1, DBG_BTN_PERF_METER, "Perf Meter", 0);
+    windowDrawText(win, st->perf, 0, 330, 58, COLOR_WHITE);
+    if (gMpActive) {
+        if (gMpIsHost) {
+            // Host: toggle button; the status line below carries the state
+            // (buttons keep a static label, so the state is drawn here and
+            // redrawn after each toggle).
+            _win_register_text_button(win, 330, 88, -1, -1, -1, DBG_BTN_CLIENT_CHEATS, "Client Cheats", 0);
+            windowDrawText(win, st->clientCheats, 0, 330, 116, COLOR_WHITE);
+        } else {
+            // Client: informational only — the host controls this setting.
+            windowDrawText(win, "Client Cheats:", 0, 330, 92, COLOR_WHITE);
+            windowDrawText(win, st->clientCheats, 0, 330, 110, COLOR_WHITE);
+        }
+    }
+    // Skin picker: per-machine appearance override, available to everyone
+    // (singleplayer included — it is the local dude's look either way).
+    _win_register_text_button(win, 330, 146, -1, -1, -1, DBG_BTN_SKIN, "Skin...", 0);
+    windowDrawText(win, st->skin, 0, 330, 174, COLOR_WHITE);
+    // Player identity: rename and recolor. Both ride the profile (IDENTITY
+    // wire) to every machine and persist via the COOP save handler.
+    _win_register_text_button(win, 330, 204, -1, -1, -1, DBG_BTN_NAME, "Name...", 0);
+    windowDrawText(win, st->name, 0, 330, 232, COLOR_WHITE);
+    _win_register_text_button(win, 330, 262, -1, -1, -1, DBG_BTN_COLOR, "Color...", 0);
+    windowDrawText(win, st->color, 0, 330, 290, COLOR_WHITE);
+    windowRefresh(win);
+
+    return win;
+}
 
 void MpDebugMenuShow()
 {
@@ -1818,70 +2030,16 @@ void MpDebugMenuShow()
         mouseShowCursor();
     }
 
-    int winX, winY;
-    dbgCenteredPos(kDbgWindowWidth, kDbgWindowHeight, &winX, &winY);
-
-    int win = windowCreate(winX, winY, kDbgWindowWidth, kDbgWindowHeight, COLOR_BLACK, WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
+    DbgSettingsStatus st;
+    bool wasInSession = gMpActive;
+    dbgFillSettingsStatus(&st);
+    int win = dbgBuildSettingsWindow(&st);
     if (win == -1) {
         if (cursorWasHidden) {
             mouseHideCursor();
         }
         return;
     }
-    windowDrawBorder(win);
-
-    const char* title = "CO-OP SETTINGS";
-    int titleX = (kDbgWindowWidth - fontGetStringWidth(title)) / 2;
-    windowDrawText(win, title, 0, titleX, 6, COLOR_WHITE);
-
-    _win_register_text_button(win, 30, 30, -1, -1, -1, DBG_BTN_CHEATS, "Cheats...", 0);
-    _win_register_text_button(win, 30, 55, -1, -1, -1, DBG_BTN_CLOSE, "Close", 0);
-
-    // --- Settings column (right side): the perf meter is a per-machine
-    // render toggle available to everyone (singleplayer included); the
-    // co-op host policy toggles sit below it ---
-    char perfStatus[64];
-    snprintf(perfStatus, sizeof(perfStatus), "Perf: %s", MpPerfIsEnabled() ? "ON" : "OFF");
-    _win_register_text_button(win, 330, 30, -1, -1, -1, DBG_BTN_PERF_METER, "Perf Meter", 0);
-    windowDrawText(win, perfStatus, 0, 330, 58, COLOR_WHITE);
-    char clientCheatsStatus[64];
-    if (gMpActive) {
-        if (gMpIsHost) {
-            // Host: toggle button; the status line below carries the state
-            // (buttons keep a static label, so the state is drawn here and
-            // redrawn after each toggle).
-            _win_register_text_button(win, 330, 88, -1, -1, -1, DBG_BTN_CLIENT_CHEATS, "Client Cheats", 0);
-            snprintf(clientCheatsStatus, sizeof(clientCheatsStatus), "Clients: %s",
-                gDbgClientCheatsEnabled ? "ON" : "OFF");
-            windowDrawText(win, clientCheatsStatus, 0, 330, 116, COLOR_WHITE);
-        } else {
-            // Client: informational only — the host controls this setting.
-            windowDrawText(win, "Client Cheats:", 0, 330, 92, COLOR_WHITE);
-            snprintf(clientCheatsStatus, sizeof(clientCheatsStatus), "%s",
-                gDbgClientCheatsEnabled ? "enabled" : "disabled by host");
-            windowDrawText(win, clientCheatsStatus, 0, 330, 110, COLOR_WHITE);
-        }
-    }
-    // Skin picker: per-machine appearance override, available to everyone
-    // (singleplayer included — it is the local dude's look either way).
-    char skinStatus[64];
-    dbgSkinStatusText(skinStatus, sizeof(skinStatus));
-    _win_register_text_button(win, 330, 146, -1, -1, -1, DBG_BTN_SKIN, "Skin...", 0);
-    windowDrawText(win, skinStatus, 0, 330, 174, COLOR_WHITE);
-    // Player identity: rename and recolor. Both ride the profile (IDENTITY
-    // wire) to every machine and persist via the COOP save handler.
-    char nameStatus[64];
-    snprintf(nameStatus, sizeof(nameStatus), "Name: %.20s",
-        MpDebugLocalPlayerNameOverride() != nullptr ? MpDebugLocalPlayerNameOverride() : "");
-    _win_register_text_button(win, 330, 204, -1, -1, -1, DBG_BTN_NAME, "Name...", 0);
-    windowDrawText(win, nameStatus, 0, 330, 232, COLOR_WHITE);
-    char colorStatus[64];
-    int curColor = MpDebugLocalPlayerColor();
-    snprintf(colorStatus, sizeof(colorStatus), "Color: %s",
-        curColor >= 0 && curColor < 8 ? kPlayerPaletteNames[curColor] : "default");
-    _win_register_text_button(win, 330, 262, -1, -1, -1, DBG_BTN_COLOR, "Color...", 0);
-    windowDrawText(win, colorStatus, 0, 330, 290, COLOR_WHITE);
-    windowRefresh(win);
 
     bool keepGoing = true;
     while (keepGoing) {
@@ -1906,28 +2064,55 @@ void MpDebugMenuShow()
             case DBG_BTN_NAME:
             case DBG_BTN_COLOR:
             case DBG_BTN_CLOSE:
+            case DBG_BTN_HOST_MAX:
+            case DBG_BTN_HOST_PASS:
+            case DBG_BTN_HOST_PORT:
+            case DBG_BTN_HOST_GAME:
+            case DBG_BTN_JOIN:
+            case DBG_BTN_LEAVE:
                 rc = keyCode;
                 break;
             case DBG_BTN_PERF_METER:
                 MpPerfSetEnabled(!MpPerfIsEnabled());
                 // Redraw the toggle status line (the button label is static).
-                snprintf(perfStatus, sizeof(perfStatus), "Perf: %s",
-                    MpPerfIsEnabled() ? "ON" : "OFF");
-                windowFill(win, 330, 56, 130, 20, COLOR_BLACK);
-                windowDrawText(win, perfStatus, 0, 330, 58, COLOR_WHITE);
-                windowRefresh(win);
+                dbgFillSettingsStatus(&st);
+                dbgDrawSettingsLine(win, 330, 58, st.perf);
                 break;
             case DBG_BTN_CLIENT_CHEATS:
                 MpDebugToggleClientCheats();
                 // Redraw the toggle status line (the button label is static).
-                snprintf(clientCheatsStatus, sizeof(clientCheatsStatus), "Clients: %s",
-                    gDbgClientCheatsEnabled ? "ON" : "OFF");
-                windowFill(win, 330, 114, 130, 20, COLOR_BLACK);
-                windowDrawText(win, clientCheatsStatus, 0, 330, 116, COLOR_WHITE);
-                windowRefresh(win);
+                dbgFillSettingsStatus(&st);
+                dbgDrawSettingsLine(win, 330, 116, st.clientCheats);
                 break;
             default:
                 break;
+            }
+
+            // Session entered or left while the menu was open: rebuild the
+            // window (the button set differs between idle and in-session).
+            if (gMpActive != wasInSession) {
+                wasInSession = gMpActive;
+                windowDestroy(win);
+                dbgFillSettingsStatus(&st);
+                win = dbgBuildSettingsWindow(&st);
+                if (win == -1) {
+                    keepGoing = false;
+                    break;
+                }
+            } else {
+                // Live poll: session state, player count and ping move while
+                // the menu is open (players join/leave, host pings change).
+                DbgSettingsStatus fresh;
+                dbgFillSettingsStatus(&fresh);
+                if (strcmp(fresh.state, st.state) != 0
+                    || strcmp(fresh.players, st.players) != 0
+                    || strcmp(fresh.ping, st.ping) != 0) {
+                    st = fresh;
+                    int statusY = wasInSession ? 120 : 215;
+                    dbgDrawSettingsLine(win, 30, statusY, st.state);
+                    dbgDrawSettingsLine(win, 30, statusY + 25, st.players);
+                    dbgDrawSettingsLine(win, 30, statusY + 50, st.ping);
+                }
             }
 
             renderPresent();
@@ -1950,18 +2135,13 @@ void MpDebugMenuShow()
         case DBG_BTN_SKIN:
             MpDebugModelPickerShow();
             // Redraw the skin status line after the picker returned.
-            dbgSkinStatusText(skinStatus, sizeof(skinStatus));
-            windowFill(win, 330, 172, 130, 20, COLOR_BLACK);
-            windowDrawText(win, skinStatus, 0, 330, 174, COLOR_WHITE);
-            windowRefresh(win);
+            dbgFillSettingsStatus(&st);
+            dbgDrawSettingsLine(win, 330, 174, st.skin);
             break;
         case DBG_BTN_NAME:
             dbgNameEditorShow();
-            snprintf(nameStatus, sizeof(nameStatus), "Name: %.20s",
-                MpDebugLocalPlayerNameOverride() != nullptr ? MpDebugLocalPlayerNameOverride() : "");
-            windowFill(win, 330, 230, 130, 20, COLOR_BLACK);
-            windowDrawText(win, nameStatus, 0, 330, 232, COLOR_WHITE);
-            windowRefresh(win);
+            dbgFillSettingsStatus(&st);
+            dbgDrawSettingsLine(win, 330, 232, st.name);
             break;
         case DBG_BTN_COLOR:
             dbgColorPickerShow();
@@ -1971,9 +2151,7 @@ void MpDebugMenuShow()
             MpLog(MP_LOG_UI, "color picker returned win=%d valid=%d buf=%p",
                 win, windowGetWindow(win) != nullptr ? 1 : 0,
                 windowGetWindow(win) != nullptr ? (void*)windowGetWindow(win)->buffer : nullptr);
-            curColor = MpDebugLocalPlayerColor();
-            snprintf(colorStatus, sizeof(colorStatus), "Color: %s",
-                curColor >= 0 && curColor < 8 ? kPlayerPaletteNames[curColor] : "default");
+            dbgFillSettingsStatus(&st);
             // NOTE: the window is kDbgWindowHeight=305 tall, so a 20px fill
             // from y=288 writes rows 288..307 — 3 rows (1,380 bytes) past
             // the buffer. That overrun corrupted the heap on every color
@@ -1981,13 +2159,82 @@ void MpDebugMenuShow()
             // memset). Height 16 covers the status text at y=290 and stays
             // inside the buffer.
             windowFill(win, 330, 288, 130, 16, COLOR_BLACK);
-            windowDrawText(win, colorStatus, 0, 330, 290, COLOR_WHITE);
+            windowDrawText(win, st.color, 0, 330, 290, COLOR_WHITE);
             windowRefresh(win);
+            break;
+        case DBG_BTN_HOST_MAX:
+            if (win_get_num_i(&gDbgHostMaxPlayers, 1, NET_MAX_PLAYERS, false,
+                    "Max Players (1-90)", 60, 60) != -1) {
+                // The option labels carry the values — rebuild the window.
+                windowDestroy(win);
+                dbgFillSettingsStatus(&st);
+                win = dbgBuildSettingsWindow(&st);
+                if (win == -1) {
+                    keepGoing = false;
+                    break;
+                }
+                MpLog(MP_LOG_UI, "host max players set to %d", gDbgHostMaxPlayers);
+            }
+            break;
+        case DBG_BTN_HOST_PASS:
+            if (_win_get_str_masked(gDbgHostPassword, 63, "Password (optional)", 60, 60) != -1) {
+                windowDestroy(win);
+                dbgFillSettingsStatus(&st);
+                win = dbgBuildSettingsWindow(&st);
+                if (win == -1) {
+                    keepGoing = false;
+                    break;
+                }
+                MpLog(MP_LOG_UI, "host password %s", gDbgHostPassword[0] != '\0' ? "set" : "cleared");
+            }
+            break;
+        case DBG_BTN_HOST_PORT:
+            if (win_get_num_i(&gDbgHostPort, 1, 65535, false, "Host Port (1-65535)", 60, 60) != -1) {
+                windowDestroy(win);
+                dbgFillSettingsStatus(&st);
+                win = dbgBuildSettingsWindow(&st);
+                if (win == -1) {
+                    keepGoing = false;
+                    break;
+                }
+                MpLog(MP_LOG_UI, "host port set to %d", gDbgHostPort);
+            }
+            break;
+        case DBG_BTN_HOST_GAME:
+            gMpHostPort = (uint16_t)gDbgHostPort;
+            gMpHostMaxPlayers = gDbgHostMaxPlayers;
+            gMpHostPasswordHash = NetPasswordHash(gDbgHostPassword);
+            MpLog(MP_LOG_UI, "host game apply port=%u maxPlayers=%d password=%u",
+                gMpHostPort, gMpHostMaxPlayers, gMpHostPasswordHash);
+            if (MpHostCurrentGame() == 0) {
+                // Hosting started — close the settings menu; reopen F11 to
+                // watch the session status.
+                keepGoing = false;
+            }
+            break;
+        case DBG_BTN_JOIN:
+            if (MpJoinFlowShow() != 0) {
+                keepGoing = false;
+            }
+            break;
+        case DBG_BTN_LEAVE:
+            if (win_yes_no("Leave the co-op session?", 80, 80, COLOR_WHITE) != 0) {
+                MpLog(MP_LOG_UI, "leave session requested");
+                if (gMpIsHost) {
+                    MpHostStop();
+                } else if (gMpIsClient) {
+                    MpClientDisconnect();
+                }
+                _game_user_wants_to_quit = GAME_QUIT_REQUEST_MAIN_MENU;
+                keepGoing = false;
+            }
             break;
         }
     }
 
-    windowDestroy(win);
+    if (win != -1) {
+        windowDestroy(win);
+    }
     if (cursorWasHidden) {
         mouseHideCursor();
     }

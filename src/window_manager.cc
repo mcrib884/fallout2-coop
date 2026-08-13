@@ -1176,6 +1176,16 @@ int windowGetAtPoint(int x, int y)
 {
     for (int index = gWindowsLength - 1; index >= 0; index--) {
         Window* window = gWindows[index];
+        // Hidden windows are invisible and never refresh, so they must not
+        // intercept point queries. Before this check a leftover hidden window
+        // covering the field (e.g. a modal that was hidden instead of
+        // destroyed) made gameMouseRefresh take the "not over the iso window"
+        // branch forever: the 3D cursor objects stayed hidden and the 2D
+        // arrow never blitted over the field (hidden windows don't refresh),
+        // while input kept working — the invisible-but-functional cursor.
+        if ((window->flags & WINDOW_HIDDEN) != 0) {
+            continue;
+        }
         if (x >= window->rect.left && x <= window->rect.right
             && y >= window->rect.top && y <= window->rect.bottom) {
             return window->id;

@@ -166,6 +166,9 @@ typedef struct NetPacketHeader {
 
 typedef struct NetHelloPayload {
     uint32_t versionHash;
+    // FNV-1a hash of the session password (NetPasswordHash); 0 = no password.
+    // The raw password never crosses the wire or lands in logs.
+    uint32_t passwordHash;
     char peerName[NET_PEER_NAME_LENGTH];
 } NetHelloPayload;
 
@@ -217,6 +220,8 @@ typedef struct NetWelcomePayload {
     // from it, so the client must start with the host's state or map-enter
     // scripts skip their movies.
     uint8_t moviesSeen[MOVIE_COUNT];
+    // Host's configured session player cap (the "Players: N/X" display).
+    uint16_t maxPlayers;
 } NetWelcomePayload;
 
 typedef struct NetPlayerInputPayload {
@@ -834,6 +839,18 @@ typedef void (*NetEventCallback)(ENetPeer* peer, int eventType, const void* data
 void NetHostService(ENetHost* host, NetEventCallback callback, void* userData);
 
 uint32_t NetGetVersionHash();
+// FNV-1a 32-bit hash of a session password; returns 0 for null/empty input
+// (the "no password" sentinel, so an empty string is never a valid secret).
+uint32_t NetPasswordHash(const char* password);
+// Host: the port the last NetHostCreate bound (0 before any host).
+uint16_t NetGetBoundPort();
+// Client: the address/port the last NetClientConnect resolved (address text
+// as typed by the player, port as passed). Empty string before any connect.
+const char* NetGetConnectedAddress();
+uint16_t NetGetConnectedPort();
+// Round-trip time in ms. Client (hostPeer set): ping to the host. Host
+// (hostPeer null): average ping of all connected peers, 0 when idle.
+uint32_t NetGetPingMs(ENetHost* host, ENetPeer* hostPeer);
 
 // Helper that appends a NetPacketHeader in front of a payload and sends it
 // on the given peer/channel. payload may be NULL if payloadLength == 0.

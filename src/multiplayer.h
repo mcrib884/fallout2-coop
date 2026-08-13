@@ -56,6 +56,14 @@ typedef struct MultiplayerPlayer {
     int32_t lastHp, lastAp, lastRadiation, lastPoison, lastCombatResults;
     uint8_t lastFlags;
     bool hasLastState;
+    // Host-only: the tile the avatar's current registered walk is heading to
+    // and whether a walk is in flight. When the walk ends and the avatar is
+    // NOT on this tile, the walk was interrupted (trap plate, script stop)
+    // and the owning client must be told to stop its optimistic walk.
+    // memset-safe: zeroed = no walk in flight (tile 0 IS a valid tile, so the
+    // bool is the guard, not the sentinel).
+    bool walkInFlight;
+    int32_t walkTargetTile;
     int32_t lastSafeTile, lastSafeElevation, lastSafeRotation;
     bool hasSafePosition;
     uint32_t debugCheatFlags;
@@ -76,6 +84,10 @@ typedef struct MultiplayerSession {
     MultiplayerPlayer players[NET_MAX_PLAYERS];
     int numPlayers;
     int32_t currentMapId;
+    // Session player cap: the host's configured max (NetHostCreate peer
+    // limit), shipped to clients in the WELCOME so both sides render
+    // "Players: N/X". 0 before a session.
+    uint16_t maxPlayers;
 
     // host: obj -> objNetId  (per-object map in multiplayer.cc, immune to
     // duplicate obj ids; cannot live here because mpZeroSession() memsets
@@ -125,6 +137,15 @@ extern bool gMpSuppressExitGridCheck;
 extern int gMpPendingHostStartAfterLoad;
 extern int gMpPendingClientStartAfterLoad;
 extern char gMpPendingClientAddress[64];
+// Join options captured by the join flow: the target port and the session
+// password (the HELLO carries NetPasswordHash of it). Empty password = none.
+extern int gMpPendingClientPort;
+extern char gMpPendingClientPassword[64];
+// Host options set by the F11 CO-OP SETTINGS menu before hosting (defaults:
+// port 7777, cap NET_MAX_PLAYERS, no password). MpHostStart consumes them.
+extern uint16_t gMpHostPort;
+extern int gMpHostMaxPlayers;
+extern uint32_t gMpHostPasswordHash;
 
 // lifecycle
 int MpInit();
@@ -137,7 +158,7 @@ int MpHostCurrentGame();
 int MpHostStop();
 
 // client
-int MpClientConnect(const char* address, uint16_t port);
+int MpClientConnect(const char* address, uint16_t port, const char* password = nullptr);
 int MpClientDisconnect();
 
 // per-tick
@@ -232,6 +253,10 @@ void MpGetClientMapEnteringPosition(int* tile, int* elevation, int* rotation);
 // Snap the local dude to an authoritative tile (combat move resolutions that
 // diverge from the optimistic walk). Stops the running walk first.
 void MpApplyLocalDudeSnap(int tile, int elevation);
+// The host stopped the avatar's walk before it reached the clicked tile
+// (pressure plate, script interrupt, knockback): stop the local optimistic
+// walk and snap to the authoritative position. (client)
+void MpOnWalkInterrupted(const NetWalkInterruptedPayload* payload);
 // Derive the weapon slot of a critter's FID from the weapon in its hands
 // (left preferred, right fallback). Run after any co-op inventory apply or
 // savegame load — the vanilla inven_wield path never runs for synced gear.

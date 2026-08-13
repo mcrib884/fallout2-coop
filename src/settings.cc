@@ -177,6 +177,7 @@ void initSettingsRegistry(bool isMapper)
     SETTING(movie_aspect_fit);
     SETTING(edg_support);
     SETTING(ignore_map_edges);
+    SETTING(free_camera_scroll);
     SETTING(quick_toolbar_visible);
     SETTING_P(anim_speed, clamp(0.1, 100.0));
     SETTING_P(skip_opening_movies, clamp(0, 2));

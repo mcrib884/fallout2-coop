@@ -52,7 +52,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED YES)
 set(CMAKE_CXX_EXTENSIONS NO)
 
 if(MSVC)
-    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
+    # /EHa (not /EHsc): C++ exceptions must reach the SEH unhandled-exception
+    # filter (debugInstallCrashHandler) so a thrown exception in the co-op
+    # teardown paths writes a FATAL EXCEPTION dump instead of dying silently.
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/EHa>)
 endif()
 
 option(FALLOUT_VENDORED "Use vendored third-party libraries" ON)

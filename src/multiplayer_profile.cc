@@ -2077,6 +2077,18 @@ void MpProfileDestroyRuntime(uint8_t netId)
             mpProfileDestroyObjectItems(runtime.object);
             runtime.object->flags &= ~OBJECT_NO_REMOVE;
             objectDestroy(runtime.object, nullptr);
+        } else {
+            // The LOCAL dude survives gameReset (never destroyed here), but
+            // his session inventory was rebuilt from the profile via
+            // objectCreateWithFidPid, which inserts the items into the world
+            // head list (tile == -1, owner set). Leaving them behind makes
+            // gameReset's _obj_remove_all free them while
+            // gDude->data.inventory still points at the dead slots; the
+            // later _proto_dude_init -> _obj_inven_free then double-frees
+            // them (silent heap fast-fail on Leave). Destroy the item graph
+            // now — children first, slots nulled, length zeroed — so the
+            // vanilla inventory free only frees the items array once.
+            mpProfileDestroyObjectItems(runtime.object);
         }
     }
     if (runtime.syntheticPid != -1) protoRemove(runtime.syntheticPid);

@@ -392,7 +392,7 @@ static void textObjectsTicker()
         TextObject* textObject = gTextObjects[index];
 
         unsigned int delay = gTextObjectsLineDelay * textObject->linesCount + gTextObjectsBaseDelay;
-        if ((textObject->flags & TEXT_OBJECT_MARKED_FOR_REMOVAL) != 0 || (getTicksBetween(_get_bk_time(), textObject->time) > delay)) {
+        if ((textObject->flags & TEXT_OBJECT_MARKED_FOR_REMOVAL) != 0 || (getTicksBetween(_get_bk_time(), textObject->time) >= delay)) {
             static int sTickerDiag = 0;
             if (sTickerDiag < 20) {
                 sTickerDiag++;

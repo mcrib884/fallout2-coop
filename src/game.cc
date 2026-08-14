@@ -430,6 +430,13 @@ void gameReset()
     aiReset();
     inventoryResetDude();
     gameSoundReset();
+
+    // Flush the art cache during game loads if the target map differs from the current one.
+    // This prevents memory fragmentation and avoids heavy eviction loops on the art heap.
+    if (_isLoadingGame() && gMapHeader.index != mapIdBeingLoaded()) {
+        artCacheFlush();
+    }
+
     _movieStop();
     movieEffectsReset();
     gameMoviesReset();
@@ -1177,7 +1184,7 @@ int globalVarsRead(const char* path, const char* section, int* variablesListLeng
         if (equals != nullptr) {
             sscanf(equals + 1, "%d", *variablesListPtr + *variablesListLengthPtr - 1);
         } else {
-            *variablesListPtr[*variablesListLengthPtr - 1] = 0;
+            (*variablesListPtr)[*variablesListLengthPtr - 1] = 0;
         }
     }
 

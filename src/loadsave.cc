@@ -302,6 +302,8 @@ static LoadGameHandler* _master_load_list[LOAD_SAVE_HANDLER_COUNT] = {
 // 0x5194C4 loadingGame
 static bool _loadingGame = false;
 
+static int _loadingMapId = -1;
+
 // lsgame.msg
 //
 // 0x613D28 lsgame_msgfl
@@ -2115,6 +2117,11 @@ bool _isLoadingGame()
     return _loadingGame;
 }
 
+int mapIdBeingLoaded()
+{
+    return _loadingMapId;
+}
+
 // 0x47DC68
 static int lsgLoadGameInSlot(int slot)
 {
@@ -2159,6 +2166,7 @@ static int lsgLoadGameInSlot(int slot)
     LoadSaveSlotData* ptr = (slot >= 0 && slot < saveLoadTotalSlots)
         ? &(_LSData[slot])
         : &_LSDataCoopSlot;
+    _loadingMapId = ptr->map;
     debugPrint("\nLOADSAVE: Load name: %s\n", ptr->description);
 
     debugPrint("LOADSAVE: Load file header size read: %d bytes.\n", fileTell(_flptr) - pos);
@@ -2174,11 +2182,14 @@ static int lsgLoadGameInSlot(int slot)
             fileClose(_flptr);
             gameReset();
             _loadingGame = false;
+            _loadingMapId = -1;
             return -1;
         }
 
         debugPrint("LOADSAVE: Load function #%d data size read: %d bytes.\n", index, fileTell(_flptr) - pos);
     }
+
+    _loadingMapId = -1;
 
     debugPrint("LOADSAVE: Total load data read: %ld bytes.\n", fileTell(_flptr));
     fileClose(_flptr);

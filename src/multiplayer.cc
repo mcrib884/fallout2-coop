@@ -1602,8 +1602,8 @@ static int mpHostRegisterPlayerMovement(Object* obj, bool isRun, int tile, int e
     if (isRun && perkGetRank(obj, PERK_SILENT_RUNNING) == 0) {
         Proto* playerProto = nullptr;
         if (protoGetProto(obj->pid, &playerProto) == 0
-            && (playerProto->critter.data.flags & (1 << DUDE_STATE_SNEAKING)) != 0) {
-            playerProto->critter.data.flags &= ~(1 << DUDE_STATE_SNEAKING);
+            && (playerProto->critter.data.flags & CRITTER_DUDE_SNEAKING) != CRITTER_NONE) {
+            playerProto->critter.data.flags &= ~CRITTER_DUDE_SNEAKING;
             MpLog(MP_LOG_SYNC, "run cancelled sneak netId=%u", MpGetObjNetId(obj));
         }
     }
@@ -6099,7 +6099,7 @@ static void mpApplyObjectTransform(Object* obj, int tile, int x, int y, int rota
         int localObjectFlags = obj == gDude
             ? obj->flags & (OBJECT_NO_REMOVE | OBJECT_NO_SAVE | OBJECT_LIGHT_THRU)
             : 0;
-        obj->flags = flags | localObjectFlags;
+        obj->flags = static_cast<ObjectFlags>(flags | localObjectFlags);
     }
 
     gMpSession.applyingNetworkState = wasApplyingNetworkState;
@@ -6130,8 +6130,8 @@ static void mpApplyCritterState(Object* obj, int hp, int ap, int radiation, int 
     obj->data.critter.radiation = radiation;
     obj->data.critter.poison = poison;
     obj->data.critter.combat.team = combatTeam;
-    obj->data.critter.combat.maneuver = combatManeuver;
-    obj->data.critter.combat.results = combatResults;
+    obj->data.critter.combat.maneuver = static_cast<CritterManeuver>(combatManeuver);
+    obj->data.critter.combat.results = static_cast<Dam>(combatResults);
 }
 
 static void mpShowClientPlayer(Object* obj)
@@ -6530,9 +6530,9 @@ void MpApplyPlayerState(const NetPlayerStateUpdatePayload* s)
         Proto* mirrorProto;
         if (protoGetProto(obj->pid, &mirrorProto) == 0) {
             if ((s->flags & 1) != 0) {
-                mirrorProto->critter.data.flags |= (1 << DUDE_STATE_SNEAKING);
+                mirrorProto->critter.data.flags |= CRITTER_DUDE_SNEAKING;
             } else {
-                mirrorProto->critter.data.flags &= ~(1 << DUDE_STATE_SNEAKING);
+                mirrorProto->critter.data.flags &= ~CRITTER_DUDE_SNEAKING;
             }
         }
     }
@@ -7187,7 +7187,7 @@ void MpHostMirrorInventoryMove(Object* sourceAvatar, Object* destContainer,
                 if ((oldWeapon->flags & OBJECT_IN_RIGHT_HAND) != 0) {
                     flags |= OBJECT_IN_RIGHT_HAND;
                 }
-                correctFidForRemovedItem(player->obj, oldWeapon, flags);
+                correctFidForRemovedItem(player->obj, oldWeapon, static_cast<ObjectFlags>(flags));
             }
             if (oldArmor != nullptr) {
                 adjustCritterStatsOnArmorChange(gDude, oldArmor, nullptr);
@@ -7204,7 +7204,7 @@ void MpHostMirrorInventoryMove(Object* sourceAvatar, Object* destContainer,
             if ((oldWeapon->flags & OBJECT_IN_RIGHT_HAND) != 0) {
                 flags |= OBJECT_IN_RIGHT_HAND;
             }
-            correctFidForRemovedItem(player->obj, oldWeapon, flags);
+            correctFidForRemovedItem(player->obj, oldWeapon, static_cast<ObjectFlags>(flags));
             // Vanilla's non-gDude correction only un-arms right-hand weapons;
             // force the unarmed fid when no hand weapon remains so the owning
             // client's sprite doesn't stay armed.
@@ -7271,7 +7271,7 @@ void MpOnItemRemove(const NetItemRemovePayload* payload)
     updateFlags = (flags & (OBJECT_IN_ANY_HAND | OBJECT_WORN)) != 0;
     if (itemRemoveWithReason(gDude, item, quantity, removeReason) == 0) {
         if (updateFlags) {
-            correctFidForRemovedItem(gDude, item, flags);
+            correctFidForRemovedItem(gDude, item, static_cast<ObjectFlags>(flags));
         }
         // Belt-and-suspenders: if the dude's fid still shows a weapon
         // animation but no hand weapon remains, force the unarmed fid —

@@ -25,6 +25,7 @@
 #include "mouse.h"
 #include "multiplayer.h"
 #include "multiplayer_combat.h"
+#include "obj_types.h"
 #include "object.h"
 #include "party_member.h"
 #include "perk.h"
@@ -89,7 +90,7 @@ static bool animationKindIsCallback(AnimationKind kind)
     return kind == ANIM_KIND_CALLBACK || kind == ANIM_KIND_CALLBACK3;
 }
 
-typedef enum AnimationSequenceFlags {
+enum AnimationSequenceFlags : unsigned int {
     ANIM_SEQ_NONE = 0x00,
 
     // Specifies that the animation sequence has high priority, it cannot be
@@ -122,7 +123,29 @@ typedef enum AnimationSequenceFlags {
     // Specifies that the animation sequence should not return to ANIM_STAND
     // when it's completed.
     ANIM_SEQ_NO_STAND = 0x80,
-} AnimationSequenceFlags;
+};
+
+constexpr inline AnimationSequenceFlags operator|(AnimationSequenceFlags lhs, AnimationSequenceFlags rhs)
+{
+    return static_cast<AnimationSequenceFlags>(static_cast<unsigned int>(lhs) | static_cast<unsigned int>(rhs));
+}
+
+constexpr inline AnimationSequenceFlags operator~(AnimationSequenceFlags rhs)
+{
+    return static_cast<AnimationSequenceFlags>(~static_cast<unsigned int>(rhs));
+}
+
+inline AnimationSequenceFlags& operator&=(AnimationSequenceFlags& lhs, AnimationSequenceFlags rhs)
+{
+    lhs = static_cast<AnimationSequenceFlags>(static_cast<unsigned int>(lhs) & static_cast<unsigned int>(rhs));
+    return lhs;
+}
+
+inline AnimationSequenceFlags& operator|=(AnimationSequenceFlags& lhs, AnimationSequenceFlags rhs)
+{
+    lhs = lhs | rhs;
+    return lhs;
+}
 
 typedef enum AnimationSadFlags {
     // Specifies that the animation should play from end to start.
@@ -205,7 +228,7 @@ typedef struct AnimationDescription {
     union {
         // - ANIM_KIND_SET_FLAG
         // - ANIM_KIND_UNSET_FLAG
-        unsigned int objectFlag;
+        ObjectFlags objectFlag;
 
         // - ANIM_KIND_HIDE
         // - ANIM_KIND_CALLBACK
@@ -238,7 +261,7 @@ typedef struct AnimationSequence {
     int animationIndex;
     // Number of scheduled animations in [animations] array.
     int length;
-    unsigned int flags;
+    AnimationSequenceFlags flags;
     AnimationDescription animations[ANIMATION_DESCRIPTION_LIST_CAPACITY];
 } AnimationSequence;
 
@@ -382,7 +405,7 @@ void animationReset()
 
     for (int index = 0; index < ANIMATION_SEQUENCE_LIST_CAPACITY; index++) {
         gAnimationSequences[index].step = ANIM_COMPLETE;
-        gAnimationSequences[index].flags = 0;
+        gAnimationSequences[index].flags = ANIM_SEQ_NONE;
     }
 }
 
@@ -725,7 +748,7 @@ int animationRegisterRunToObject(Object* owner, Object* destination, int actionP
     animationDescription->owner = owner;
     animationDescription->destination = destination;
 
-    if ((objectTypeFromFid(owner->fid) == OBJ_TYPE_CRITTER && (owner->data.critter.combat.results & DAM_CRIP_LEG_ANY) != 0)
+    if ((objectTypeFromFid(owner->fid) == OBJ_TYPE_CRITTER && (owner->data.critter.combat.results & DAM_CRIP_LEG_ANY) != DAM_NONE)
         || (owner == gDude && dudeHasState(DUDE_STATE_SNEAKING) && !perkGetRank(gDude, PERK_SILENT_RUNNING))
         || !artExists(buildFid(objectTypeFromFid(owner->fid), owner->fid & 0xFFF, ANIM_RUNNING, WEAPON_ANIMATION_NONE, owner->rotation + 1))) {
         animationDescription->anim = ANIM_WALK;
@@ -818,7 +841,7 @@ int animationRegisterRunToTile(Object* owner, int tile, int elevation, int actio
     animationDescription->tile = tile;
     animationDescription->elevation = elevation;
 
-    if ((objectTypeFromFid(owner->fid) == OBJ_TYPE_CRITTER && (owner->data.critter.combat.results & DAM_CRIP_LEG_ANY) != 0)
+    if ((objectTypeFromFid(owner->fid) == OBJ_TYPE_CRITTER && (owner->data.critter.combat.results & DAM_CRIP_LEG_ANY) != DAM_NONE)
         || (owner == gDude && dudeHasState(DUDE_STATE_SNEAKING) && !perkGetRank(gDude, PERK_SILENT_RUNNING))
         || !artExists(buildFid(objectTypeFromFid(owner->fid), owner->fid & 0xFFF, ANIM_RUNNING, WEAPON_ANIMATION_NONE, owner->rotation + 1))) {
         animationDescription->anim = ANIM_WALK;
@@ -1186,7 +1209,7 @@ int animationRegisterCallbackForced(void* a1, void* a2, AnimationCallback* proc,
 // OR), but a one particular flag.
 //
 // 0x415034
-int animationRegisterSetFlag(Object* object, int flag, int delay)
+int animationRegisterSetFlag(Object* object, ObjectFlags flag, int delay)
 {
     if (_check_registry(object) == -1) {
         _anim_cleanup();
@@ -1211,7 +1234,7 @@ int animationRegisterSetFlag(Object* object, int flag, int delay)
 // OR), but a one particular flag.
 //
 // 0x4150A8
-int animationRegisterUnsetFlag(Object* object, int flag, int delay)
+int animationRegisterUnsetFlag(Object* object, ObjectFlags flag, int delay)
 {
     if (_check_registry(object) == -1) {
         _anim_cleanup();
@@ -1750,7 +1773,7 @@ static int _anim_set_end(int animationSequenceIndex)
     if (_anim_in_bk) {
         animationSequence->flags = ANIM_SEQ_0x20;
     } else {
-        animationSequence->flags = 0;
+        animationSequence->flags = ANIM_SEQ_NONE;
     }
 
     return 0;
@@ -2071,7 +2094,7 @@ int _make_straight_path_func(Object* obj, int from, int to, StraightPathNode* st
     if (obstaclePtr != nullptr) {
         Object* obstacle = callback(obj, from, obj->elevation);
         if (obstacle != nullptr) {
-            if (obstacle != *obstaclePtr && (a6 != 32 || (obstacle->flags & OBJECT_SHOOT_THRU) == 0)) {
+            if (obstacle != *obstaclePtr && (a6 != 32 || (obstacle->flags & OBJECT_SHOOT_THRU) == OBJECT_NONE)) {
                 *obstaclePtr = obstacle;
                 return 0;
             }
@@ -2165,7 +2188,7 @@ int _make_straight_path_func(Object* obj, int from, int to, StraightPathNode* st
                 if (obstaclePtr != nullptr) {
                     Object* obstacle = callback(obj, tile, obj->elevation);
                     if (obstacle != nullptr) {
-                        if (obstacle != *obstaclePtr && (a6 != 32 || (obstacle->flags & OBJECT_SHOOT_THRU) == 0)) {
+                        if (obstacle != *obstaclePtr && (a6 != 32 || (obstacle->flags & OBJECT_SHOOT_THRU) == OBJECT_NONE)) {
                             *obstaclePtr = obstacle;
                             break;
                         }
@@ -2218,7 +2241,7 @@ int _make_straight_path_func(Object* obj, int from, int to, StraightPathNode* st
                 if (obstaclePtr != nullptr) {
                     Object* obstacle = callback(obj, tile, obj->elevation);
                     if (obstacle != nullptr) {
-                        if (obstacle != *obstaclePtr && (a6 != 32 || (obstacle->flags & OBJECT_SHOOT_THRU) == 0)) {
+                        if (obstacle != *obstaclePtr && (a6 != 32 || (obstacle->flags & OBJECT_SHOOT_THRU) == OBJECT_NONE)) {
                             *obstaclePtr = obstacle;
                             break;
                         }
@@ -2994,8 +3017,8 @@ void _object_animate()
             }
 
             if ((sad->flags & ANIM_SAD_FOREVER) != 0 || object->frame != 0) {
-                int x;
-                int y;
+                int x = 0;
+                int y = 0;
 
                 CacheEntry* cacheHandle;
                 Art* art = artLock(object->fid, &cacheHandle);
@@ -3074,7 +3097,7 @@ static void _object_anim_compact()
     for (int index = 0; index < ANIMATION_SEQUENCE_LIST_CAPACITY; index++) {
         AnimationSequence* animationSequence = &(gAnimationSequences[index]);
         if ((animationSequence->flags & ANIM_SEQ_0x20) != 0) {
-            animationSequence->flags = 0;
+            animationSequence->flags = ANIM_SEQ_NONE;
         }
     }
 
@@ -3260,7 +3283,7 @@ void _dude_fidget()
         return;
     }
 
-    if ((gDude->flags & OBJECT_HIDDEN) != 0) {
+    if ((gDude->flags & OBJECT_HIDDEN) != OBJECT_NONE) {
         return;
     }
 
@@ -3278,7 +3301,7 @@ void _dude_fidget()
             break;
         }
 
-        if ((object->flags & OBJECT_HIDDEN) == 0 && objectTypeFromFid(object->fid) == OBJ_TYPE_CRITTER && animationTypeFromFid(object->fid) == ANIM_STAND && !critterIsDead(object)
+        if ((object->flags & OBJECT_HIDDEN) == OBJECT_NONE && objectTypeFromFid(object->fid) == OBJ_TYPE_CRITTER && animationTypeFromFid(object->fid) == ANIM_STAND && !critterIsDead(object)
             && !(gMpIsClient && gMpActive && MpIsNetworkedCritter(object))) {
             Rect rect;
             objectGetRect(object, &rect);

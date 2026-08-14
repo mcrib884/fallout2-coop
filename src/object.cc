@@ -490,7 +490,7 @@ int objectRead(Object* obj, File* stream)
     if (fileReadInt32(stream, &(obj->frame)) == -1) return -1;
     if (fileReadInt32Enum<Rotation>(stream, &(obj->rotation)) == -1) return -1;
     if (fileReadInt32(stream, &(obj->fid)) == -1) return -1;
-    if (fileReadInt32(stream, &(obj->flags)) == -1) return -1;
+    if (fileReadUInt32Enum<ObjectFlags>(stream, &(obj->flags)) == -1) return -1;
     if (fileReadInt32(stream, &(obj->elevation)) == -1) return -1;
     if (fileReadInt32(stream, &(obj->pid)) == -1) return -1;
     if (fileReadInt32(stream, &(obj->cid)) == -1) return -1;
@@ -500,7 +500,7 @@ int objectRead(Object* obj, File* stream)
     if (fileReadInt32(stream, &(obj->sid)) == -1) return -1;
     if (fileReadInt32(stream, &(obj->scriptIndex)) == -1) return -1;
 
-    obj->outline = 0;
+    obj->outline = OUTLINE_TYPE_NONE;
     obj->owner = nullptr;
 
     if (objectDataRead(obj, stream) != 0) {
@@ -534,7 +534,7 @@ bool objectIsSavable(Object* obj)
     if (obj == gDude) return true;
     if (objectIsPartyMember(obj)) return true;
 
-    return (obj->flags & OBJECT_NO_SAVE) == 0;
+    return (obj->flags & OBJECT_NO_SAVE) == OBJECT_NONE;
 }
 
 // 0x488CE4 obj_load
@@ -606,7 +606,7 @@ static int objectLoadAllInternal(File* stream)
                 return -1;
             }
 
-            objectListNode->obj->outline = 0;
+            objectListNode->obj->outline = OUTLINE_TYPE_NONE;
             gObjectFids[gObjectFidsLength++] = objectListNode->obj->fid;
 
             if (objectListNode->obj->sid != -1) {
@@ -730,13 +730,13 @@ static int objectWrite(Object* obj, File* stream)
     if (fileWriteInt32(stream, obj->frame) == -1) return -1;
     if (fileWriteInt32Enum<Rotation>(stream, obj->rotation) == -1) return -1;
     if (fileWriteInt32(stream, obj->fid) == -1) return -1;
-    if (fileWriteInt32(stream, obj->flags) == -1) return -1;
+    if (fileWriteUInt32Enum<ObjectFlags>(stream, obj->flags) == -1) return -1;
     if (fileWriteInt32(stream, obj->elevation) == -1) return -1;
     if (fileWriteInt32(stream, obj->pid) == -1) return -1;
     if (fileWriteInt32(stream, obj->cid) == -1) return -1;
     if (fileWriteInt32(stream, obj->lightDistance) == -1) return -1;
     if (fileWriteInt32(stream, obj->lightIntensity) == -1) return -1;
-    if (fileWriteInt32(stream, obj->outline) == -1) return -1;
+    if (fileWriteInt32Enum<OutlineType>(stream, obj->outline) == -1) return -1;
     if (fileWriteInt32(stream, obj->sid) == -1) return -1;
     if (fileWriteInt32(stream, obj->scriptIndex) == -1) return -1;
     if (objectDataWrite(obj, stream) == -1) return -1;
@@ -775,7 +775,7 @@ int objectSaveAll(File* stream)
                     continue;
                 }
 
-                if ((object->flags & OBJECT_NO_SAVE) != 0) {
+                if ((object->flags & OBJECT_NO_SAVE) != OBJECT_NONE) {
                     continue;
                 }
 
@@ -860,7 +860,7 @@ void _obj_render_pre_roof(Rect* rect, int elevation)
                 ? gObjectListHeadByTile[tile]
                 : nullptr;
 
-            int lightIntensity;
+            int lightIntensity = ambientIntensity;
             if (objectListNode != nullptr) {
                 // NOTE: Calls `lightGetTileIntensity` twice.
                 lightIntensity = std::max(ambientIntensity, lightGetTileIntensity(elevation, objectListNode->obj->tile));
@@ -872,11 +872,11 @@ void _obj_render_pre_roof(Rect* rect, int elevation)
                 }
 
                 if (elevation == objectListNode->obj->elevation) {
-                    if ((objectListNode->obj->flags & OBJECT_FLAT) == 0) {
+                    if ((objectListNode->obj->flags & OBJECT_FLAT) == OBJECT_NONE) {
                         break;
                     }
 
-                    if ((objectListNode->obj->flags & OBJECT_HIDDEN) == 0) {
+                    if ((objectListNode->obj->flags & OBJECT_HIDDEN) == OBJECT_NONE) {
                         _obj_render_object(objectListNode->obj, &updatedRect, lightIntensity);
 
                         // Co-op: players are always outlined — the post-roof
@@ -885,7 +885,7 @@ void _obj_render_pre_roof(Rect* rect, int elevation)
                         // outline keep the normal (disabled) gate.
                         if (objectHasVisibleOutline(objectListNode->obj)
                             || (gMpActive && MpIsPlayerObject(objectListNode->obj)
-                                && (objectListNode->obj->outline & OUTLINE_TYPE_MASK) == 0)) {
+                                && (objectListNode->obj->outline & OUTLINE_TYPE_MAX) == OUTLINE_TYPE_NONE)) {
                             outlinedObjects.push_back(objectListNode->obj);
                         }
                     }
@@ -903,7 +903,7 @@ void _obj_render_pre_roof(Rect* rect, int elevation)
     tileRenderEdgeBlackSquares(&updatedRect, elevation, false);
 
     for (int i = 0; i < renderCount; i++) {
-        int lightIntensity;
+        int lightIntensity = ambientIntensity;
 
         ObjectListNode* objectListNode = _renderTable[i];
         if (objectListNode != nullptr) {
@@ -918,13 +918,13 @@ void _obj_render_pre_roof(Rect* rect, int elevation)
             }
 
             if (elevation == objectListNode->obj->elevation) {
-                if ((objectListNode->obj->flags & OBJECT_HIDDEN) == 0) {
+                if ((objectListNode->obj->flags & OBJECT_HIDDEN) == OBJECT_NONE) {
                     _obj_render_object(object, &updatedRect, lightIntensity);
 
                     // Co-op: players are always outlined (see pre-roof note).
                     if (objectHasVisibleOutline(objectListNode->obj)
                         || (gMpActive && MpIsPlayerObject(objectListNode->obj)
-                            && (objectListNode->obj->outline & OUTLINE_TYPE_MASK) == 0)) {
+                            && (objectListNode->obj->outline & OUTLINE_TYPE_MAX) == OUTLINE_TYPE_NONE)) {
                         outlinedObjects.push_back(objectListNode->obj);
                     }
                 }
@@ -960,8 +960,8 @@ void _obj_render_post_roof(Rect* rect, int elevation)
         Object* object = objectListNode->obj;
         // Co-op ghost fix: the head list holds every non-tile object,
         // including inventory items (tile == -1, owner set). Drawing them
-        // here renders them at their stored sx/sy — the screen position from
-        // their LAST ground render — so a picked-up item leaves a frozen
+        // here renders them at their stored sx/sy - the screen position from
+        // their LAST ground render - so a picked-up item leaves a frozen
         // sprite on the map: fixed in screen space, following the camera
         // weirdly, and uninteractable (no tile node to click). Items with an
         // owner have no world position; nothing about them belongs on the map.
@@ -969,7 +969,7 @@ void _obj_render_post_roof(Rect* rect, int elevation)
             objectListNode = objectListNode->next;
             continue;
         }
-        if ((object->flags & OBJECT_HIDDEN) == 0) {
+        if ((object->flags & OBJECT_HIDDEN) == OBJECT_NONE) {
             _obj_render_object(object, &updatedRect, 0x10000);
         }
         objectListNode = objectListNode->next;
@@ -1018,47 +1018,47 @@ int objectCreateWithFidPid(Object** objectPtr, int fid, int pid)
 
     objectSetLight(objectListNode->obj, proto->lightDistance, proto->lightIntensity, nullptr);
 
-    if ((proto->flags & PROTO_FLAG_FLAT) != 0) {
+    if ((proto->flags & PROTO_FLAG_FLAT) != PROTO_FLAG_NONE) {
         _obj_toggle_flat(objectListNode->obj, nullptr);
     }
 
-    if ((proto->flags & PROTO_FLAG_NO_BLOCK) != 0) {
+    if ((proto->flags & PROTO_FLAG_NO_BLOCK) != PROTO_FLAG_NONE) {
         objectListNode->obj->flags |= OBJECT_NO_BLOCK;
     }
 
-    if ((proto->flags & PROTO_FLAG_MULTIHEX) != 0) {
+    if ((proto->flags & PROTO_FLAG_MULTIHEX) != PROTO_FLAG_NONE) {
         objectListNode->obj->flags |= OBJECT_MULTIHEX;
     }
 
-    if ((proto->flags & PROTO_FLAG_TRANS_NONE) != 0) {
+    if ((proto->flags & PROTO_FLAG_TRANS_NONE) != PROTO_FLAG_NONE) {
         objectListNode->obj->flags |= OBJECT_TRANS_NONE;
     } else {
-        if ((proto->flags & PROTO_FLAG_TRANS_WALL) != 0) {
+        if ((proto->flags & PROTO_FLAG_TRANS_WALL) != PROTO_FLAG_NONE) {
             objectListNode->obj->flags |= OBJECT_TRANS_WALL;
-        } else if ((proto->flags & PROTO_FLAG_TRANS_GLASS) != 0) {
+        } else if ((proto->flags & PROTO_FLAG_TRANS_GLASS) != PROTO_FLAG_NONE) {
             objectListNode->obj->flags |= OBJECT_TRANS_GLASS;
-        } else if ((proto->flags & PROTO_FLAG_TRANS_STEAM) != 0) {
+        } else if ((proto->flags & PROTO_FLAG_TRANS_STEAM) != PROTO_FLAG_NONE) {
             objectListNode->obj->flags |= OBJECT_TRANS_STEAM;
-        } else if ((proto->flags & PROTO_FLAG_TRANS_ENERGY) != 0) {
+        } else if ((proto->flags & PROTO_FLAG_TRANS_ENERGY) != PROTO_FLAG_NONE) {
             objectListNode->obj->flags |= OBJECT_TRANS_ENERGY;
-        } else if ((proto->flags & PROTO_FLAG_TRANS_RED) != 0) {
+        } else if ((proto->flags & PROTO_FLAG_TRANS_RED) != PROTO_FLAG_NONE) {
             objectListNode->obj->flags |= OBJECT_TRANS_RED;
         }
     }
 
-    if ((proto->flags & PROTO_FLAG_LIGHT_THRU) != 0) {
+    if ((proto->flags & PROTO_FLAG_LIGHT_THRU) != PROTO_FLAG_NONE) {
         objectListNode->obj->flags |= OBJECT_LIGHT_THRU;
     }
 
-    if ((proto->flags & PROTO_FLAG_SHOOT_THRU) != 0) {
+    if ((proto->flags & PROTO_FLAG_SHOOT_THRU) != PROTO_FLAG_NONE) {
         objectListNode->obj->flags |= OBJECT_SHOOT_THRU;
     }
 
-    if ((proto->flags & PROTO_FLAG_WALL_TRANS_END) != 0) {
+    if ((proto->flags & PROTO_FLAG_WALL_TRANS_END) != PROTO_FLAG_NONE) {
         objectListNode->obj->flags |= OBJECT_WALL_TRANS_END;
     }
 
-    if ((proto->flags & PROTO_FLAG_NO_HIGHLIGHT) != 0) {
+    if ((proto->flags & PROTO_FLAG_NO_HIGHLIGHT) != PROTO_FLAG_NONE) {
         objectListNode->obj->flags |= OBJECT_NO_HIGHLIGHT;
     }
 
@@ -1573,8 +1573,8 @@ int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
 
     if (isInCombat()) {
         if (objectTypeFromFid(obj->fid) == OBJ_TYPE_CRITTER) {
-            bool v8 = obj->outline != 0 && (obj->outline & OUTLINE_DISABLED) == 0;
-            _combat_update_critter_outline_for_los(obj, v8);
+            bool enableOutline = obj->outline != OUTLINE_TYPE_NONE && (obj->outline & OUTLINE_DISABLED) == OUTLINE_TYPE_NONE;
+            _combat_update_critter_outline_for_los(obj, enableOutline);
         }
     }
 
@@ -1605,7 +1605,7 @@ int objectSetLocation(Object* obj, int tile, int elevation, Rect* rect)
             if (elevation == elev) {
                 if (objectTypeFromFid(obj->fid) == OBJ_TYPE_MISC) {
                     if (isExitGridPid(obj->pid)) {
-                        if ((obj->flags & OBJECT_HIDDEN) != 0) {
+                        if ((obj->flags & OBJECT_HIDDEN) != OBJECT_NONE) {
                             objectListNode = objectListNode->next;
                             continue;
                         }
@@ -2089,7 +2089,7 @@ int _obj_turn_on_light(Object* obj, Rect* rect)
         return -1;
     }
 
-    if ((obj->flags & OBJECT_LIGHTING) == 0) {
+    if ((obj->flags & OBJECT_LIGHTING) == OBJECT_NONE) {
         obj->flags |= OBJECT_LIGHTING;
 
         if (_obj_adjust_light(obj, 0, rect) == -1) {
@@ -2114,7 +2114,7 @@ int _obj_turn_off_light(Object* obj, Rect* rect)
         return -1;
     }
 
-    if ((obj->flags & OBJECT_LIGHTING) != 0) {
+    if ((obj->flags & OBJECT_LIGHTING) != OBJECT_NONE) {
         if (_obj_adjust_light(obj, 1, rect) == -1) {
             if (rect != nullptr) {
                 objectGetRect(obj, rect);
@@ -2134,7 +2134,7 @@ int objectShow(Object* obj, Rect* rect)
         return -1;
     }
 
-    if ((obj->flags & OBJECT_HIDDEN) == 0) {
+    if ((obj->flags & OBJECT_HIDDEN) == OBJECT_NONE) {
         return -1;
     }
 
@@ -2165,7 +2165,7 @@ int objectHide(Object* object, Rect* rect)
         return -1;
     }
 
-    if ((object->flags & OBJECT_HIDDEN) != 0) {
+    if ((object->flags & OBJECT_HIDDEN) != OBJECT_NONE) {
         return -1;
     }
 
@@ -2722,7 +2722,7 @@ Object* _obj_blocking_at(Object* excludeObj, int tile, int elev)
     while (objectListNode != nullptr) {
         obj = objectListNode->obj;
         if (obj->elevation == elev) {
-            if ((obj->flags & OBJECT_HIDDEN) == 0 && (obj->flags & OBJECT_NO_BLOCK) == 0 && obj != excludeObj) {
+            if ((obj->flags & OBJECT_HIDDEN) == OBJECT_NONE && (obj->flags & OBJECT_NO_BLOCK) == OBJECT_NONE && obj != excludeObj) {
                 ObjectType type = objectTypeFromFid(obj->fid);
                 if (type == OBJ_TYPE_CRITTER
                     || type == OBJ_TYPE_SCENERY
@@ -2740,9 +2740,9 @@ Object* _obj_blocking_at(Object* excludeObj, int tile, int elev)
             objectListNode = gObjectListHeadByTile[neighboor];
             while (objectListNode != nullptr) {
                 obj = objectListNode->obj;
-                if ((obj->flags & OBJECT_MULTIHEX) != 0) {
+                if ((obj->flags & OBJECT_MULTIHEX) != OBJECT_NONE) {
                     if (obj->elevation == elev) {
-                        if ((obj->flags & OBJECT_HIDDEN) == 0 && (obj->flags & OBJECT_NO_BLOCK) == 0 && obj != excludeObj) {
+                        if ((obj->flags & OBJECT_HIDDEN) == OBJECT_NONE && (obj->flags & OBJECT_NO_BLOCK) == OBJECT_NONE && obj != excludeObj) {
                             ObjectType type = objectTypeFromFid(obj->fid);
                             if (type == OBJ_TYPE_CRITTER
                                 || type == OBJ_TYPE_SCENERY
@@ -2772,7 +2772,7 @@ Object* _obj_shoot_blocking_at(Object* excludeObj, int tile, int elev)
         Object* candidate = objectListItem->obj;
         if (candidate->elevation == elev) {
             unsigned int flags = candidate->flags;
-            if ((flags & OBJECT_HIDDEN) == 0 && ((flags & OBJECT_NO_BLOCK) == 0 || (flags & OBJECT_SHOOT_THRU) == 0) && candidate != excludeObj) {
+            if ((flags & OBJECT_HIDDEN) == OBJECT_NONE && ((flags & OBJECT_NO_BLOCK) == OBJECT_NONE || (flags & OBJECT_SHOOT_THRU) == OBJECT_NONE) && candidate != excludeObj) {
                 ObjectType type = objectTypeFromFid(candidate->fid);
                 // SFALL: Fix to prevent corpses from blocking line of fire.
                 if ((type == OBJ_TYPE_CRITTER && !critterIsDead(candidate))
@@ -2795,9 +2795,9 @@ Object* _obj_shoot_blocking_at(Object* excludeObj, int tile, int elev)
         while (objectListItem != nullptr) {
             Object* candidate = objectListItem->obj;
             unsigned int flags = candidate->flags;
-            if ((flags & OBJECT_MULTIHEX) != 0) {
+            if ((flags & OBJECT_MULTIHEX) != OBJECT_NONE) {
                 if (candidate->elevation == elev) {
-                    if ((flags & OBJECT_HIDDEN) == 0 && (flags & OBJECT_NO_BLOCK) == 0 && candidate != excludeObj) {
+                    if ((flags & OBJECT_HIDDEN) == OBJECT_NONE && (flags & OBJECT_NO_BLOCK) == OBJECT_NONE && candidate != excludeObj) {
                         ObjectType type = objectTypeFromFid(candidate->fid);
                         // SFALL: Fix to prevent corpses from blocking line of
                         // fire.
@@ -2827,8 +2827,8 @@ Object* _obj_ai_blocking_at(Object* excludeObj, int tile, int elevation)
     while (objectListNode != nullptr) {
         Object* object = objectListNode->obj;
         if (object->elevation == elevation) {
-            if ((object->flags & OBJECT_HIDDEN) == 0
-                && (object->flags & OBJECT_NO_BLOCK) == 0
+            if ((object->flags & OBJECT_HIDDEN) == OBJECT_NONE
+                && (object->flags & OBJECT_NO_BLOCK) == OBJECT_NONE
                 && object != excludeObj) {
                 ObjectType objectType = objectTypeFromFid(object->fid);
                 if (objectType == OBJ_TYPE_CRITTER
@@ -2854,10 +2854,10 @@ Object* _obj_ai_blocking_at(Object* excludeObj, int tile, int elevation)
         objectListNode = gObjectListHeadByTile[candidate];
         while (objectListNode != nullptr) {
             Object* object = objectListNode->obj;
-            if ((object->flags & OBJECT_MULTIHEX) != 0) {
+            if ((object->flags & OBJECT_MULTIHEX) != OBJECT_NONE) {
                 if (object->elevation == elevation) {
-                    if ((object->flags & OBJECT_HIDDEN) == 0
-                        && (object->flags & OBJECT_NO_BLOCK) == 0
+                    if ((object->flags & OBJECT_HIDDEN) == OBJECT_NONE
+                        && (object->flags & OBJECT_NO_BLOCK) == OBJECT_NONE
                         && object != excludeObj) {
                         ObjectType objectType = objectTypeFromFid(object->fid);
                         if (objectType == OBJ_TYPE_CRITTER
@@ -2910,8 +2910,8 @@ Object* _obj_sight_blocking_at(Object* excludeObj, int tile, int elevation)
     while (objectListNode != nullptr) {
         Object* object = objectListNode->obj;
         if (object->elevation == elevation
-            && (object->flags & OBJECT_HIDDEN) == 0
-            && (object->flags & OBJECT_LIGHT_THRU) == 0
+            && (object->flags & OBJECT_HIDDEN) == OBJECT_NONE
+            && (object->flags & OBJECT_LIGHT_THRU) == OBJECT_NONE
             && object != excludeObj) {
             ObjectType objectType = objectTypeFromFid(object->fid);
             if (objectType == OBJ_TYPE_SCENERY || objectType == OBJ_TYPE_WALL) {
@@ -2933,11 +2933,11 @@ int objectGetDistanceBetween(Object* object1, Object* object2)
 
     int distance = tileDistanceBetween(object1->tile, object2->tile);
 
-    if ((object1->flags & OBJECT_MULTIHEX) != 0) {
+    if ((object1->flags & OBJECT_MULTIHEX) != OBJECT_NONE) {
         distance -= 1;
     }
 
-    if ((object2->flags & OBJECT_MULTIHEX) != 0) {
+    if ((object2->flags & OBJECT_MULTIHEX) != OBJECT_NONE) {
         distance -= 1;
     }
 
@@ -2957,11 +2957,11 @@ int objectGetDistanceBetweenTiles(Object* object1, int tile1, Object* object2, i
 
     int distance = tileDistanceBetween(tile1, tile2);
 
-    if ((object1->flags & OBJECT_MULTIHEX) != 0) {
+    if ((object1->flags & OBJECT_MULTIHEX) != OBJECT_NONE) {
         distance -= 1;
     }
 
-    if ((object2->flags & OBJECT_MULTIHEX) != 0) {
+    if ((object2->flags & OBJECT_MULTIHEX) != OBJECT_NONE) {
         distance -= 1;
     }
 
@@ -3002,7 +3002,7 @@ int objectListCreate(int tile, int elevation, ObjectType objectType, Object*** o
             ObjectListNode* objectListNode = gObjectListHeadByTile[index];
             while (objectListNode != nullptr) {
                 Object* obj = objectListNode->obj;
-                if ((obj->flags & OBJECT_HIDDEN) == 0
+                if ((obj->flags & OBJECT_HIDDEN) == OBJECT_NONE
                     && obj->elevation == elevation
                     && objectTypeFromFid(obj->fid) == objectType) {
                     count++;
@@ -3014,7 +3014,7 @@ int objectListCreate(int tile, int elevation, ObjectType objectType, Object*** o
         ObjectListNode* objectListNode = gObjectListHeadByTile[tile];
         while (objectListNode != nullptr) {
             Object* obj = objectListNode->obj;
-            if ((obj->flags & OBJECT_HIDDEN) == 0
+            if ((obj->flags & OBJECT_HIDDEN) == OBJECT_NONE
                 && obj->elevation == elevation
                 && objectTypeFromFid(objectListNode->obj->fid) == objectType) {
                 count++;
@@ -3037,7 +3037,7 @@ int objectListCreate(int tile, int elevation, ObjectType objectType, Object*** o
             ObjectListNode* objectListNode = gObjectListHeadByTile[index];
             while (objectListNode) {
                 Object* obj = objectListNode->obj;
-                if ((obj->flags & OBJECT_HIDDEN) == 0
+                if ((obj->flags & OBJECT_HIDDEN) == OBJECT_NONE
                     && obj->elevation == elevation
                     && objectTypeFromFid(obj->fid) == objectType) {
                     *objects++ = obj;
@@ -3049,7 +3049,7 @@ int objectListCreate(int tile, int elevation, ObjectType objectType, Object*** o
         ObjectListNode* objectListNode = gObjectListHeadByTile[tile];
         while (objectListNode != nullptr) {
             Object* obj = objectListNode->obj;
-            if ((obj->flags & OBJECT_HIDDEN) == 0
+            if ((obj->flags & OBJECT_HIDDEN) == OBJECT_NONE
                 && obj->elevation == elevation
                 && objectTypeFromFid(obj->fid) == objectType) {
                 *objects++ = obj;
@@ -3185,7 +3185,7 @@ void _intensity_mask_buf_to_buf(unsigned char* src, int srcWidth, int srcHeight,
 }
 
 // 0x48C2B4 obj_outline_object
-int objectSetOutline(Object* obj, int outlineType, Rect* rect)
+int objectSetOutline(Object* obj, OutlineType outlineType, Rect* rect)
 {
     if (obj == nullptr) {
         return -1;
@@ -3195,13 +3195,13 @@ int objectSetOutline(Object* obj, int outlineType, Rect* rect)
         return -1;
     }
 
-    if ((obj->flags & OBJECT_NO_HIGHLIGHT) != 0) {
+    if ((obj->flags & OBJECT_NO_HIGHLIGHT) != OBJECT_NONE) {
         return -1;
     }
 
     obj->outline = outlineType;
 
-    if ((obj->flags & OBJECT_HIDDEN) != 0) {
+    if ((obj->flags & OBJECT_HIDDEN) != OBJECT_NONE) {
         obj->outline |= OUTLINE_DISABLED;
     }
 
@@ -3223,17 +3223,17 @@ int objectClearOutline(Object* object, Rect* rect)
         objectGetRect(object, rect);
     }
 
-    object->outline = 0;
+    object->outline = OUTLINE_TYPE_NONE;
 
     return 0;
 }
 
 // 0x48C340 obj_intersects_with
-int _obj_intersects_with(Object* object, int x, int y)
+ObjectFlags _obj_intersects_with(Object* object, int x, int y)
 {
-    int flags = 0;
+    ObjectFlags flags = OBJECT_NONE;
 
-    if (object == gEgg || (object->flags & OBJECT_HIDDEN) == 0) {
+    if (object == gEgg || (object->flags & OBJECT_HIDDEN) == OBJECT_NONE) {
         CacheEntry* handle;
         Art* art = artLock(object->fid, &handle);
         if (art != nullptr) {
@@ -3274,12 +3274,12 @@ int _obj_intersects_with(Object* object, int x, int y)
                 unsigned char* data = artGetFrameData(art, object->frame, object->rotation);
                 if (data != nullptr) {
                     if (data[width * (y - minY) + x - minX] != 0) {
-                        flags |= 0x01;
+                        flags |= OBJECT_HIDDEN;
 
-                        if ((object->flags & OBJECT_FLAG_0xFC000) != 0) {
-                            if ((object->flags & OBJECT_TRANS_NONE) == 0) {
-                                flags &= ~0x03;
-                                flags |= 0x02;
+                        if ((object->flags & OBJECT_FLAG_0xFC000) != OBJECT_NONE) {
+                            if ((object->flags & OBJECT_TRANS_NONE) == OBJECT_NONE) {
+                                flags &= ~(OBJECT_0X02 | OBJECT_HIDDEN);
+                                flags |= OBJECT_0X02;
                             }
                         } else {
                             ObjectType type = objectTypeFromFid(object->fid);
@@ -3288,22 +3288,22 @@ int _obj_intersects_with(Object* object, int x, int y)
                                 protoGetProto(object->pid, &proto);
 
                                 bool v20;
-                                int extendedFlags = proto->scenery.extendedFlags;
-                                if ((extendedFlags & PROTO_EXT_FLAG_HIDDEN) != 0 || (extendedFlags & PROTO_EXT_FLAG_WEST_CORNER) != 0) {
+                                ProtoExtendedFlags extendedFlags = proto->scenery.extendedFlags;
+                                if ((extendedFlags & PROTO_EXT_FLAG_HIDDEN) != PROTO_EXT_FLAG_NONE || (extendedFlags & PROTO_EXT_FLAG_WEST_CORNER) != PROTO_EXT_FLAG_NONE) {
                                     v20 = tileIsInFrontOf(object->tile, gDude->tile);
-                                } else if ((extendedFlags & PROTO_EXT_FLAG_NORTH_CORNER) != 0) {
+                                } else if ((extendedFlags & PROTO_EXT_FLAG_NORTH_CORNER) != PROTO_EXT_FLAG_NONE) {
                                     // NOTE: Original code uses bitwise or, but given the fact that these functions return
                                     // bools, logical or is more suitable.
                                     v20 = tileIsInFrontOf(object->tile, gDude->tile) || tileIsToRightOf(gDude->tile, object->tile);
-                                } else if ((extendedFlags & PROTO_EXT_FLAG_SOUTH_CORNER) != 0) {
+                                } else if ((extendedFlags & PROTO_EXT_FLAG_SOUTH_CORNER) != PROTO_EXT_FLAG_NONE) {
                                     v20 = tileIsInFrontOf(object->tile, gDude->tile) && tileIsToRightOf(gDude->tile, object->tile);
                                 } else {
                                     v20 = tileIsToRightOf(gDude->tile, object->tile);
                                 }
 
                                 if (v20) {
-                                    if (_obj_intersects_with(gEgg, x, y) != 0) {
-                                        flags |= 0x04;
+                                    if (_obj_intersects_with(gEgg, x, y) != OBJECT_NONE) {
+                                        flags |= OBJECT_NO_SAVE;
                                     }
                                 }
                             }
@@ -3348,8 +3348,8 @@ int _obj_create_intersect_list(int x, int y, int elevation, ObjectType objectTyp
                 if (object->elevation == elevation
                     && (objectType == OBJ_TYPE_INVALID || objectTypeFromFid(object->fid) == objectType)
                     && object != gEgg) {
-                    int flags = _obj_intersects_with(object, x, y);
-                    if (flags != 0) {
+                    ObjectFlags flags = _obj_intersects_with(object, x, y);
+                    if (flags != OBJECT_NONE) {
                         ObjectWithFlags* entries = (ObjectWithFlags*)internal_realloc(*entriesPtr, sizeof(*entries) * (count + 1));
                         if (entries != nullptr) {
                             *entriesPtr = entries;
@@ -3827,7 +3827,7 @@ static void _obj_blend_table_exit()
 // 0x48D348 obj_save_obj
 static int _obj_save_obj(File* stream, Object* object)
 {
-    if ((object->flags & OBJECT_NO_SAVE) != 0) {
+    if ((object->flags & OBJECT_NO_SAVE) != OBJECT_NONE) {
         return 0;
     }
 
@@ -3858,7 +3858,7 @@ static int _obj_save_obj(File* stream, Object* object)
             return -1;
         }
 
-        if ((inventoryItem->item->flags & OBJECT_NO_SAVE) != 0) {
+        if ((inventoryItem->item->flags & OBJECT_NO_SAVE) != OBJECT_NONE) {
             return -1;
         }
     }
@@ -3969,8 +3969,16 @@ int _obj_load_dude(File* stream)
 
     scriptsClearDudeScript();
 
-    Object* temp;
+    Object* temp = nullptr;
     int rc = _obj_load_obj(stream, &temp, -1, nullptr);
+    if (rc == -1 || temp == nullptr) {
+        gDude->tile = savedTile;
+        gDude->elevation = savedElevation;
+        gDude->rotation = savedRotation;
+        gDude->id = savedOid;
+        scriptsSetDudeScript();
+        return -1;
+    }
 
     memcpy(gDude, temp, sizeof(*gDude));
 
@@ -4049,7 +4057,7 @@ static int objectAllocate(Object** objectPtr)
     object->id = -1;
     object->tile = -1;
     object->cid = -1;
-    object->outline = 0;
+    object->outline = OUTLINE_TYPE_NONE;
     object->pid = -1;
     object->sid = -1;
     object->owner = nullptr;
@@ -4192,7 +4200,7 @@ static void _obj_insert(ObjectListNode* objectListNode)
             }
 
             if (obj->elevation == objectListNode->obj->elevation) {
-                if ((obj->flags & OBJECT_FLAT) == 0 && (objectListNode->obj->flags & OBJECT_FLAT) != 0) {
+                if ((obj->flags & OBJECT_FLAT) == OBJECT_NONE && (objectListNode->obj->flags & OBJECT_FLAT) != OBJECT_NONE) {
                     break;
                 }
 
@@ -4247,7 +4255,7 @@ static int _obj_remove(ObjectListNode* a1, ObjectListNode* a2)
         return -1;
     }
 
-    if ((a1->obj->flags & OBJECT_NO_REMOVE) != 0) {
+    if ((a1->obj->flags & OBJECT_NO_REMOVE) != OBJECT_NONE) {
         return -1;
     }
 
@@ -4329,11 +4337,11 @@ static int _obj_adjust_light(Object* obj, int a2, Rect* rect)
         return -1;
     }
 
-    if ((obj->flags & OBJECT_HIDDEN) != 0) {
+    if ((obj->flags & OBJECT_HIDDEN) != OBJECT_NONE) {
         return -1;
     }
 
-    if ((obj->flags & OBJECT_LIGHTING) == 0) {
+    if ((obj->flags & OBJECT_LIGHTING) == OBJECT_NONE) {
         return -1;
     }
 
@@ -4896,7 +4904,7 @@ static int _obj_adjust_light(Object* obj, int a2, Rect* rect)
 
                         ObjectListNode* objectListNode = gObjectListHeadByTile[tile];
                         while (objectListNode != nullptr) {
-                            if ((objectListNode->obj->flags & OBJECT_HIDDEN) == 0) {
+                            if ((objectListNode->obj->flags & OBJECT_HIDDEN) == OBJECT_NONE) {
                                 if (objectListNode->obj->elevation > obj->elevation) {
                                     break;
                                 }
@@ -4906,24 +4914,24 @@ static int _obj_adjust_light(Object* obj, int a2, Rect* rect)
                                     objectGetRect(objectListNode->obj, &v29);
                                     rectUnion(&objectRect, &v29, &objectRect);
 
-                                    v14 = (objectListNode->obj->flags & OBJECT_LIGHT_THRU) == 0;
+                                    v14 = (objectListNode->obj->flags & OBJECT_LIGHT_THRU) == OBJECT_NONE;
 
                                     if (objectTypeFromFid(objectListNode->obj->fid) == OBJ_TYPE_WALL) {
-                                        if ((objectListNode->obj->flags & OBJECT_FLAT) == 0) {
+                                        if ((objectListNode->obj->flags & OBJECT_FLAT) == OBJECT_NONE) {
                                             Proto* proto;
                                             protoGetProto(objectListNode->obj->pid, &proto);
-                                            if ((proto->wall.extendedFlags & PROTO_EXT_FLAG_HIDDEN) != 0 || (proto->wall.extendedFlags & PROTO_EXT_FLAG_EAST_CORNER) != 0) {
+                                            if ((proto->wall.extendedFlags & PROTO_EXT_FLAG_HIDDEN) != PROTO_EXT_FLAG_NONE || (proto->wall.extendedFlags & PROTO_EXT_FLAG_EAST_CORNER) != PROTO_EXT_FLAG_NONE) {
                                                 if (rotation != ROTATION_W
                                                     && rotation != ROTATION_NW
                                                     && (rotation != ROTATION_NE || index >= 8)
                                                     && (rotation != ROTATION_SW || index <= 15)) {
                                                     v12 = false;
                                                 }
-                                            } else if ((proto->wall.extendedFlags & PROTO_EXT_FLAG_NORTH_CORNER) != 0) {
+                                            } else if ((proto->wall.extendedFlags & PROTO_EXT_FLAG_NORTH_CORNER) != PROTO_EXT_FLAG_NONE) {
                                                 if (rotation != ROTATION_NE && rotation != ROTATION_NW) {
                                                     v12 = false;
                                                 }
-                                            } else if ((proto->wall.extendedFlags & PROTO_EXT_FLAG_SOUTH_CORNER) != 0) {
+                                            } else if ((proto->wall.extendedFlags & PROTO_EXT_FLAG_SOUTH_CORNER) != PROTO_EXT_FLAG_NONE) {
                                                 if (rotation != ROTATION_NE
                                                     && rotation != ROTATION_E
                                                     && rotation != ROTATION_W
@@ -5060,8 +5068,8 @@ static void objectDrawOutline(Object* object, Rect* rect)
         unsigned char* v47 = nullptr;
         unsigned char* v48 = nullptr;
         int v53 = object->outline & OUTLINE_PALETTED;
-        int outlineType = object->outline & OUTLINE_TYPE_MASK;
-        int v43;
+        OutlineType outlineType = object->outline & OUTLINE_TYPE_MAX;
+        int v43 = 0;
         int v44;
 
         // Co-op: constant dim ring around every player's sprite, drawn in
@@ -5070,7 +5078,7 @@ static void objectDrawOutline(Object* object, Rect* rect)
         // a hardcoded green was the original default. Much dimmer than the
         // bright combat outline (palette 229); when a combat outline is set
         // it takes over normally.
-        if (outlineType == 0 && gMpActive && MpIsPlayerObject(object)) {
+        if (outlineType == OUTLINE_TYPE_NONE && gMpActive && MpIsPlayerObject(object)) {
             color = MpPlayerColorFor(object);
             if (color < 0 || color >= 256) {
                 color = COLOR_LIGHT_GREEN_2;
@@ -5086,7 +5094,7 @@ static void objectDrawOutline(Object* object, Rect* rect)
                 v43 = 5;
                 v44 = frameHeight / 5;
                 break;
-            case OUTLINE_TYPE_2:
+            case OUTLINE_TYPE_SAME_TEAM:
                 color = COLOR_RED;
                 v44 = 0;
                 if (v53 != 0) {
@@ -5094,7 +5102,7 @@ static void objectDrawOutline(Object* object, Rect* rect)
                     v48 = _redBlendTable;
                 }
                 break;
-            case OUTLINE_TYPE_4:
+            case OUTLINE_TYPE_BODY:
                 color = COLOR_GREY_2;
                 v44 = 0;
                 if (v53 != 0) {
@@ -5116,7 +5124,7 @@ static void objectDrawOutline(Object* object, Rect* rect)
                     v48 = _redBlendTable;
                 }
                 break;
-            case OUTLINE_TYPE_32:
+            case OUTLINE_TYPE_BLOCKED:
                 color = 61;
                 v53 = 0;
                 v43 = 1;
@@ -5346,7 +5354,7 @@ static void _obj_render_object(Object* object, Rect* rect, int light)
     int objectWidth = objectRect.right - objectRect.left + 1;
     int objectHeight = objectRect.bottom - objectRect.top + 1;
 
-    if (type == 6) {
+    if (type == OBJ_TYPE_INTERFACE) {
         blitBufferToBufferTrans(src,
             objectWidth,
             objectHeight,
@@ -5357,8 +5365,8 @@ static void _obj_render_object(Object* object, Rect* rect, int light)
         return;
     }
 
-    if (type == 2 || type == 3) {
-        if ((gDude->flags & OBJECT_HIDDEN) == 0 && (object->flags & OBJECT_FLAG_0xFC000) == 0) {
+    if (type == OBJ_TYPE_SCENERY || type == OBJ_TYPE_WALL) {
+        if ((gDude->flags & OBJECT_HIDDEN) == OBJECT_NONE && (object->flags & OBJECT_FLAG_0xFC000) == OBJECT_NONE) {
             Proto* proto;
             protoGetProto(object->pid, &proto);
 
@@ -5376,7 +5384,7 @@ static void _obj_render_object(Object* object, Rect* rect, int light)
                 int eggHeight;
                 artGetSize(egg, 0, ROTATION_NE, &eggWidth, &eggHeight);
 
-                int extendedFlags = proto->critter.extendedFlags;
+                ProtoExtendedFlags extendedFlags = proto->critter.extendedFlags;
 
                 Rect eggRects[NET_MAX_PLAYERS + 1];
                 Rect updatedEggRects[NET_MAX_PLAYERS + 1];
@@ -5384,34 +5392,34 @@ static void _obj_render_object(Object* object, Rect* rect, int light)
                 for (int a = 0; a < anchorCount; a++) {
                     qualifies[a] = false;
                     Object* anchor = anchors[a];
-                    if (anchor == nullptr || (anchor->flags & OBJECT_HIDDEN) != 0
+                    if (anchor == nullptr || (anchor->flags & OBJECT_HIDDEN) != OBJECT_NONE
                         || !hexGridTileIsValid(anchor->tile) || !elevationIsValid(anchor->elevation)) {
                         continue;
                     }
 
                     bool v17;
-                    if ((extendedFlags & PROTO_EXT_FLAG_HIDDEN) != 0 || (extendedFlags & PROTO_EXT_FLAG_WEST_CORNER) != 0) {
+                    if ((extendedFlags & PROTO_EXT_FLAG_HIDDEN) != PROTO_EXT_FLAG_NONE || (extendedFlags & PROTO_EXT_FLAG_WEST_CORNER) != PROTO_EXT_FLAG_NONE) {
                         // TODO: Verify this visibility branch against the original logic.
                         v17 = tileIsInFrontOf(object->tile, anchor->tile);
                         if (!v17
                             || !tileIsToRightOf(object->tile, anchor->tile)
-                            || (object->flags & OBJECT_WALL_TRANS_END) == 0) {
+                            || (object->flags & OBJECT_WALL_TRANS_END) == OBJECT_NONE) {
                             // nothing
                         } else {
                             v17 = false;
                         }
-                    } else if ((extendedFlags & PROTO_EXT_FLAG_NORTH_CORNER) != 0) {
+                    } else if ((extendedFlags & PROTO_EXT_FLAG_NORTH_CORNER) != PROTO_EXT_FLAG_NONE) {
                         // NOTE: Original code used bitwise OR here; logical OR is clearer.
                         v17 = tileIsInFrontOf(object->tile, anchor->tile)
                             || tileIsToRightOf(anchor->tile, object->tile);
-                    } else if ((extendedFlags & PROTO_EXT_FLAG_SOUTH_CORNER) != 0) {
+                    } else if ((extendedFlags & PROTO_EXT_FLAG_SOUTH_CORNER) != PROTO_EXT_FLAG_NONE) {
                         v17 = tileIsInFrontOf(object->tile, anchor->tile)
                             && tileIsToRightOf(anchor->tile, object->tile);
                     } else {
                         v17 = tileIsToRightOf(anchor->tile, object->tile);
                         if (v17
                             && tileIsInFrontOf(anchor->tile, object->tile)
-                            && (object->flags & OBJECT_WALL_TRANS_END) != 0) {
+                            && (object->flags & OBJECT_WALL_TRANS_END) != OBJECT_NONE) {
                             v17 = 0;
                         }
                     }
@@ -5642,7 +5650,7 @@ bool isExitGridAt(int tile, int elevation)
     while (objectListNode != nullptr) {
         Object* obj = objectListNode->obj;
         if (obj->elevation == elevation) {
-            if ((obj->flags & OBJECT_HIDDEN) == 0) {
+            if ((obj->flags & OBJECT_HIDDEN) == OBJECT_NONE) {
                 if (isExitGridPid(obj->pid)) {
                     return true;
                 }

@@ -330,7 +330,7 @@ int objectExamineFunc(Object* critter, Object* target, void (*fn)(const char* st
             if (item2 != nullptr) {
                 MessageListItem weaponMessageListItem;
 
-                if (ammoGetCaliber(item2) != 0) {
+                if (ammoGetCaliber(item2) != CALIBER_TYPE_NONE) {
                     weaponMessageListItem.num = 547; // and is wielding a %s with %d/%d shots of %s.
                 } else {
                     weaponMessageListItem.num = 546; // and is wielding a %s.
@@ -344,7 +344,7 @@ int objectExamineFunc(Object* critter, Object* target, void (*fn)(const char* st
                 char format[80];
                 snprintf(format, sizeof(format), "%s%s", hpMessageListItem.text, weaponMessageListItem.text);
 
-                if (ammoGetCaliber(item2) != 0) {
+                if (ammoGetCaliber(item2) != CALIBER_TYPE_NONE) {
                     const int ammoTypePid = weaponGetAmmoTypePid(item2);
                     const char* ammoName = protoGetName(ammoTypePid);
                     const int ammoCapacity = ammoGetCapacity(item2);
@@ -498,7 +498,7 @@ int objectExamineFunc(Object* critter, Object* target, void (*fn)(const char* st
     } else if (type == OBJ_TYPE_ITEM) {
         ItemType itemType = itemGetType(target);
         if (itemType == ITEM_TYPE_WEAPON) {
-            if (ammoGetCaliber(target) != 0) {
+            if (ammoGetCaliber(target) != CALIBER_TYPE_NONE) {
                 MessageListItem weaponMessageListItem;
                 weaponMessageListItem.num = 526;
 
@@ -865,7 +865,7 @@ static UseItemResultCode _obj_use_flare(Object* critter, Object* flare)
         return USE_ITEM_RESULT_ERROR;
     }
 
-    if ((flare->flags & OBJECT_QUEUED) != 0) {
+    if ((flare->flags & OBJECT_QUEUED) != OBJECT_NONE) {
         if (critter == gDude) {
             // The flare is already lit.
             messageListItem.num = 588;
@@ -916,7 +916,7 @@ static UseItemResultCode _obj_use_explosive(Object* explosive)
         return USE_ITEM_RESULT_ERROR;
     }
 
-    if ((explosive->flags & OBJECT_QUEUED) != 0) {
+    if ((explosive->flags & OBJECT_QUEUED) != OBJECT_NONE) {
         // The timer is already ticking.
         messageListItem.num = 590;
         if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
@@ -1178,7 +1178,7 @@ UseItemResultCode objectUseItem(Object* userObj, Object* item)
     if (rc == USE_ITEM_RESULT_REMOVE || rc == USE_ITEM_RESULT_DROP) {
         Object* root = objectGetOwner(item);
         if (root != nullptr) {
-            int flags = item->flags & OBJECT_IN_ANY_HAND;
+            ObjectFlags flags = item->flags & OBJECT_IN_ANY_HAND;
             itemRemoveWithReason(root, item, 1, RemoveInventoryObjectHookReason::UseObj);
             Object* replacementItem = itemReplace(root, item, flags);
             if (root == gDude) {
@@ -1186,9 +1186,9 @@ UseItemResultCode objectUseItem(Object* userObj, Object* item)
                 InterfaceItemAction rightItemAction;
                 interfaceGetItemActions(&leftItemAction, &rightItemAction);
                 if (replacementItem == nullptr) {
-                    if ((flags & OBJECT_IN_LEFT_HAND) != 0) {
+                    if ((flags & OBJECT_IN_LEFT_HAND) != OBJECT_NONE) {
                         leftItemAction = INTERFACE_ITEM_ACTION_DEFAULT;
-                    } else if ((flags & OBJECT_IN_RIGHT_HAND) != 0) {
+                    } else if ((flags & OBJECT_IN_RIGHT_HAND) != OBJECT_NONE) {
                         rightItemAction = INTERFACE_ITEM_ACTION_DEFAULT;
                     } else {
                         leftItemAction = INTERFACE_ITEM_ACTION_DEFAULT;
@@ -1420,7 +1420,7 @@ UseItemResultCode objectUseItemOn(Object* user, Object* targetObj, Object* item)
 
     if (rc == USE_ITEM_RESULT_REMOVE) {
         if (user != nullptr) {
-            int flags = item->flags & OBJECT_IN_ANY_HAND;
+            ObjectFlags flags = item->flags & OBJECT_IN_ANY_HAND;
             itemRemoveWithReason(user, item, 1, RemoveInventoryObjectHookReason::UseDrugOn);
 
             Object* replacedItem = itemReplace(user, item, flags);
@@ -1434,9 +1434,9 @@ UseItemResultCode objectUseItemOn(Object* user, Object* targetObj, Object* item)
                 interfaceGetItemActions(&leftItemAction, &rightItemAction);
 
                 if (replacedItem == nullptr) {
-                    if ((flags & OBJECT_IN_LEFT_HAND) != 0) {
+                    if ((flags & OBJECT_IN_LEFT_HAND) != OBJECT_NONE) {
                         leftItemAction = INTERFACE_ITEM_ACTION_DEFAULT;
-                    } else if ((flags & OBJECT_IN_RIGHT_HAND) != 0) {
+                    } else if ((flags & OBJECT_IN_RIGHT_HAND) != OBJECT_NONE) {
                         rightItemAction = INTERFACE_ITEM_ACTION_DEFAULT;
                     } else {
                         leftItemAction = INTERFACE_ITEM_ACTION_DEFAULT;

@@ -877,7 +877,7 @@ void gameMouseRefresh()
             gameMouseSetCursor(MOUSE_CURSOR_NONE);
         }
 
-        if ((gGameMouseHexCursor->flags & OBJECT_HIDDEN) != 0) {
+        if ((gGameMouseHexCursor->flags & OBJECT_HIDDEN) != OBJECT_NONE) {
             gameMouseObjectsShow();
         }
 
@@ -889,7 +889,7 @@ void gameMouseRefresh()
         tileWindowRefreshRect(&r1, gElevation);
     }
 
-    if ((gGameMouseHexCursor->flags & OBJECT_HIDDEN) != 0 || _gmouse_mapper_mode != 0) {
+    if ((gGameMouseHexCursor->flags & OBJECT_HIDDEN) != OBJECT_NONE || _gmouse_mapper_mode != 0) {
         return;
     }
 
@@ -929,7 +929,7 @@ void gameMouseRefresh()
                                 break;
                             }
 
-                            bool canBeShootOrSeenThroughObject = (pointedObject->flags & (OBJECT_SHOOT_THRU | OBJECT_LIGHT_THRU)) != 0;
+                            bool canBeShootOrSeenThroughObject = (pointedObject->flags & (OBJECT_SHOOT_THRU | OBJECT_LIGHT_THRU)) != OBJECT_NONE;
 
                             // filter out not found itemObject and itemObject behind the blocking walls which is not outlined already
                             if (itemObject == nullptr || (objectType == OBJ_TYPE_WALL && !canBeShootOrSeenThroughObject)) {
@@ -1249,7 +1249,7 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                 // debugFilePrint("MPDRAG: press candidate armed mouse=%d,%d",
                 //     mouseX, mouseY);
             } else if ((mouseState & MOUSE_EVENT_RIGHT_BUTTON_REPEAT) == 0
-                && ((gMpActive && gMpIsClient) || (gGameMouseHexCursor->flags & OBJECT_HIDDEN) == 0)) {
+                && ((gMpActive && gMpIsClient) || (gGameMouseHexCursor->flags & OBJECT_HIDDEN) == OBJECT_NONE)) {
                 // Non-exploration presses keep the vanilla cycle-on-press.
                 gameMouseCycleMode();
             }
@@ -1827,7 +1827,7 @@ int gameMouseSetCursor(int cursor)
     if (cursor >= FIRST_GAME_MOUSE_ANIMATED_CURSOR) {
         unsigned int tick = getTicks();
 
-        if ((gGameMouseHexCursor->flags & OBJECT_HIDDEN) == 0) {
+        if ((gGameMouseHexCursor->flags & OBJECT_HIDDEN) == OBJECT_NONE) {
             gameMouseObjectsHide();
         }
 
@@ -2045,7 +2045,7 @@ int gameMouseSetBouncingCursorFid(int fid)
         refreshFlags |= REFRESH_HEX_CURSOR;
     }
 
-    if ((gGameMouseHexCursor->flags & OBJECT_HIDDEN) == 0) {
+    if ((gGameMouseHexCursor->flags & OBJECT_HIDDEN) == OBJECT_NONE) {
         if (refreshFlags == REFRESH_BOUNCING_CURSOR) {
             tileWindowRefreshRect(&oldRect, gElevation);
         } else if (refreshFlags == REFRESH_HEX_CURSOR) {
@@ -2162,7 +2162,7 @@ void gameMouseObjectsHide()
 // 0x44CEB0 gmouse_3d_is_on
 bool gameMouseObjectsIsVisible()
 {
-    return (gGameMouseHexCursor->flags & OBJECT_HIDDEN) == 0;
+    return (gGameMouseHexCursor->flags & OBJECT_HIDDEN) == OBJECT_NONE;
 }
 
 // 0x44CEC4 object_under_mouse
@@ -2189,8 +2189,8 @@ Object* gameMouseGetObjectUnderCursor(ObjectType objectType, bool includeDude, i
             ObjectWithFlags* ptr = &(entries[index]);
             if (includeDude || gDude != ptr->object) {
                 found = ptr->object;
-                if ((ptr->flags & 0x01) != 0) {
-                    if ((ptr->flags & 0x04) == 0) {
+                if ((ptr->flags & OBJECT_HIDDEN) != OBJECT_NONE) {
+                    if ((ptr->flags & OBJECT_NO_SAVE) == OBJECT_NONE) {
                         if (objectTypeFromFid(ptr->object->fid) != OBJ_TYPE_CRITTER || (ptr->object->data.critter.combat.results & (DAM_KNOCKED_OUT | DAM_DEAD)) == 0) {
                             break;
                         }
@@ -2537,7 +2537,7 @@ int gameMouseObjectsInit()
         return -1;
     }
 
-    if (objectSetOutline(gGameMouseHexCursor, OUTLINE_PALETTED | OUTLINE_TYPE_2, nullptr) != 0) {
+    if (objectSetOutline(gGameMouseHexCursor, OUTLINE_TYPE_SAME_TEAM | OUTLINE_PALETTED, nullptr) != 0) {
         return -1;
     }
 
@@ -2823,7 +2823,7 @@ int _gmouse_3d_move_to(int x, int y, int elevation, Rect* rect)
             x1 = -8;
             y1 = 13;
 
-            if (settings.system.executableIsMapper() && tileRoofIsVisible() && (gDude->flags & OBJECT_HIDDEN) == 0) {
+            if (settings.system.executableIsMapper() && tileRoofIsVisible() && (gDude->flags & OBJECT_HIDDEN) == OBJECT_NONE) {
                 y1 = -83;
             }
         } else {

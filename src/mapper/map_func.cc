@@ -113,6 +113,7 @@ void pick_region(Rect* rect)
     temp.top = y;
     temp.right = x;
     temp.bottom = y;
+    *rect = temp;
 
     while ((mouseGetEvent() & MOUSE_EVENT_LEFT_BUTTON_UP) == 0) {
         sharedFpsLimiter.mark();
@@ -122,6 +123,8 @@ void pick_region(Rect* rect)
 
         if (x != temp.right || y != temp.bottom) {
             erase_rect(rect);
+            temp.right = x;
+            temp.bottom = y;
             sort_rect(rect, &temp);
             draw_rect(rect, COLOR_LIGHT_YELLOW);
         }
@@ -181,7 +184,11 @@ void draw_rect(Rect* rect, unsigned char color)
 // 0x4843A0
 void erase_rect(Rect* rect)
 {
-    Rect r = *rect;
+    Rect r;
+    r.left = rect->left;
+    r.top = rect->top;
+    r.right = rect->right;
+    r.bottom = rect->bottom;
 
     r.bottom = rect->top;
     windowRefreshAll(&r);
@@ -192,6 +199,7 @@ void erase_rect(Rect* rect)
 
     r.left = rect->left;
     r.top = rect->bottom;
+    r.right = rect->right;
     windowRefreshAll(&r);
 
     r.top = rect->top;
@@ -760,7 +768,7 @@ void copyObject(int filterType)
                     || obj == gDude
                     || obj == gGameMouseBouncingCursor
                     || obj == gGameMouseHexCursor
-                    || (obj->flags & OBJECT_HIDDEN) != 0
+                    || (obj->flags & OBJECT_HIDDEN) != OBJECT_NONE
                     || filterType != -1 && objectTypeFromFid(obj->fid) != filterType) continue;
 
                 if (mpCopyCount >= kMaxCopyEntries) {
@@ -931,7 +939,7 @@ void eraseObject()
                          obj = objectFindNextAtElevation()) {
                         if (obj == gDude) continue;
                         if (objectTypeFromPid(obj->pid) == OBJ_TYPE_INTERFACE) continue;
-                        if ((obj->flags & OBJECT_HIDDEN) != 0) continue;
+                        if ((obj->flags & OBJECT_HIDDEN) != OBJECT_NONE) continue;
                         if (obj == gGameMouseBouncingCursor) continue;
                         if (obj == gGameMouseHexCursor) continue;
                         // Original mapper also tested `obj->flags & 0x40` here; that flag is
@@ -1170,7 +1178,7 @@ void mapper_shift_map_elev()
             && (obj == gGameMouseBouncingCursor
                 || obj == gGameMouseHexCursor
                 || obj == gDude
-                || (obj->flags & OBJECT_NO_REMOVE) != 0)) {
+                || (obj->flags & OBJECT_NO_REMOVE) != OBJECT_NONE)) {
             obj = objectFindNextAtElevation();
         }
         if (obj == nullptr) break;
@@ -1185,7 +1193,7 @@ void mapper_shift_map_elev()
             && (obj == gGameMouseBouncingCursor
                 || obj == gGameMouseHexCursor
                 || obj == gDude
-                || (obj->flags & OBJECT_NO_REMOVE) != 0)) {
+                || (obj->flags & OBJECT_NO_REMOVE) != OBJECT_NONE)) {
             obj = objectFindNextAtElevation();
         }
         if (obj == nullptr) break;
@@ -1263,7 +1271,7 @@ void mapper_copy_map_elev()
             && (obj == gGameMouseBouncingCursor
                 || obj == gGameMouseHexCursor
                 || obj == gDude
-                || (obj->flags & OBJECT_NO_REMOVE) != 0)) {
+                || (obj->flags & OBJECT_NO_REMOVE) != OBJECT_NONE)) {
             obj = objectFindNextAtElevation();
         }
         if (obj == nullptr) break;
@@ -1293,7 +1301,7 @@ void mapper_copy_map_elev()
             && (obj == gGameMouseBouncingCursor
                 || obj == gGameMouseHexCursor
                 || obj == gDude
-                || (obj->flags & OBJECT_NO_REMOVE) != 0
+                || (obj->flags & OBJECT_NO_REMOVE) != OBJECT_NONE
                 || obj->pid == -1)) {
             obj = objectFindNextAtElevation();
         }

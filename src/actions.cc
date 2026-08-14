@@ -335,7 +335,7 @@ void showDamageToObject(Object* defender, int damage, int flags, Object* weapon,
 
     AnimationType anim = animationTypeFromFid(defender->fid);
     if (!critterIsProne(defender)) {
-        if ((flags & DAM_DEAD) != 0) {
+        if ((flags & DAM_DEAD) != DAM_NONE) {
             anim = pickDeathAnim(attacker, defender, weapon, damage, attackerAnimation, hitFromFront);
             scriptHooks_DeathAnim(attacker, defender, weapon, damage, &anim);
 
@@ -441,7 +441,7 @@ void showDamageToObject(Object* defender, int damage, int flags, Object* weapon,
                     anim = pickFallAnim(defender, anim);
                     animationRegisterAnimate(defender, anim, 0);
                 }
-            } else if ((flags & DAM_ON_FIRE) != 0 && artExists(buildFid(OBJ_TYPE_CRITTER, defender->fid & 0xFFF, ANIM_FIRE_DANCE, weaponAnimationFromFid(defender->fid), defender->rotation + 1))) {
+            } else if ((flags & DAM_ON_FIRE) != DAM_NONE && artExists(buildFid(OBJ_TYPE_CRITTER, defender->fid & 0xFFF, ANIM_FIRE_DANCE, weaponAnimationFromFid(defender->fid), defender->rotation + 1))) {
                 animationRegisterAnimate(defender, ANIM_FIRE_DANCE, delay);
 
                 fid = buildFid(OBJ_TYPE_CRITTER, defender->fid & 0xFFF, ANIM_STAND, weaponAnimationFromFid(defender->fid), defender->rotation + 1);
@@ -472,7 +472,7 @@ void showDamageToObject(Object* defender, int damage, int flags, Object* weapon,
             }
         }
     } else {
-        if ((flags & DAM_DEAD) != 0 && (defender->data.critter.combat.results & DAM_DEAD) == 0) {
+        if ((flags & DAM_DEAD) != DAM_NONE && (defender->data.critter.combat.results & DAM_DEAD) == DAM_NONE) {
             anim = actionBlood(defender, anim, delay);
         } else {
             return;
@@ -480,7 +480,7 @@ void showDamageToObject(Object* defender, int damage, int flags, Object* weapon,
     }
 
     if (weapon != nullptr) {
-        if ((flags & DAM_EXPLODE) != 0) {
+        if ((flags & DAM_EXPLODE) != DAM_NONE) {
             animationRegisterCallbackForced(defender, weapon, (AnimationCallback*)objectDrop, -1);
             fid = buildFid(OBJ_TYPE_MISC, 10);
             animationRegisterSetFid(weapon, fid, 0);
@@ -492,14 +492,14 @@ void showDamageToObject(Object* defender, int damage, int flags, Object* weapon,
             }
 
             animationRegisterHideObjectForced(weapon);
-        } else if ((flags & DAM_DESTROY) != 0) {
+        } else if ((flags & DAM_DESTROY) != DAM_NONE) {
             animationRegisterCallbackForced(defender, weapon, (AnimationCallback*)_internal_destroy, -1);
-        } else if ((flags & DAM_DROP) != 0) {
+        } else if ((flags & DAM_DROP) != DAM_NONE) {
             animationRegisterCallbackForced(defender, weapon, (AnimationCallback*)objectDrop, -1);
         }
     }
 
-    if ((flags & DAM_DEAD) != 0) {
+    if ((flags & DAM_DEAD) != DAM_NONE) {
         // TODO: Get rid of casts.
         animationRegisterCallbackForced(defender, (void*)(uintptr_t)anim, (AnimationCallback*)_show_death, -1);
     }
@@ -600,8 +600,8 @@ void showDamage(Attack* attack, AnimationType attackerAnimation, int delay)
         }
     }
 
-    if ((attack->attackerFlags & DAM_HIT) == 0) {
-        if ((attack->attackerFlags & DAM_CRITICAL) != 0 || (attack->attackerFlags & DAM_BACKWASH) != 0) {
+    if ((attack->attackerFlags & DAM_HIT) == DAM_NONE) {
+        if ((attack->attackerFlags & DAM_CRITICAL) != DAM_NONE || (attack->attackerFlags & DAM_BACKWASH) != DAM_NONE) {
             showDamageToAttacker(attack, attackerAnimation);
         }
     } else {
@@ -619,7 +619,7 @@ void showDamage(Attack* attack, AnimationType attackerAnimation, int delay)
             }
         }
 
-        if ((attack->attackerFlags & DAM_DUD) != 0) {
+        if ((attack->attackerFlags & DAM_DUD) != DAM_NONE) {
             showDamageToAttacker(attack, attackerAnimation);
         }
     }
@@ -727,8 +727,8 @@ int _action_melee(Attack* attack, AnimationType anim)
         }
     }
 
-    if ((attack->attackerFlags & DAM_HIT) != 0) {
-        if ((attack->defenderFlags & DAM_DEAD) == 0) {
+    if ((attack->attackerFlags & DAM_HIT) != DAM_NONE) {
+        if ((attack->defenderFlags & DAM_DEAD) == DAM_NONE) {
             _combatai_msg(attack->attacker, attack, AI_MESSAGE_TYPE_HIT, -1);
         }
     } else {
@@ -800,7 +800,7 @@ int _action_ranged(Attack* attack, AnimationType anim)
     animationRegisterAnimate(attack->attacker, anim, 0);
 
     if (anim != ANIM_FIRE_CONTINUOUS) {
-        if ((attack->attackerFlags & DAM_HIT) != 0 || (attack->attackerFlags & DAM_CRITICAL) == 0) {
+        if ((attack->attackerFlags & DAM_HIT) != DAM_NONE || (attack->attackerFlags & DAM_CRITICAL) == DAM_NONE) {
             bool l56 = false;
 
             int projectilePid = weaponGetProjectilePid(weapon);
@@ -809,7 +809,7 @@ int _action_ranged(Attack* attack, AnimationType anim)
                 if (anim == ANIM_THROW_ANIM) {
                     projectile = weapon;
                     weaponFid = weapon->fid;
-                    int weaponFlags = weapon->flags;
+                    ObjectFlags weaponFlags = weapon->flags;
 
                     InterfaceItemAction leftItemAction;
                     InterfaceItemAction rightItemAction;
@@ -822,9 +822,9 @@ int _action_ranged(Attack* attack, AnimationType anim)
 
                     if (attack->attacker == gDude) {
                         if (replacedWeapon == nullptr) {
-                            if ((weaponFlags & OBJECT_IN_LEFT_HAND) != 0) {
+                            if ((weaponFlags & OBJECT_IN_LEFT_HAND) != OBJECT_NONE) {
                                 leftItemAction = INTERFACE_ITEM_ACTION_DEFAULT;
-                            } else if ((weaponFlags & OBJECT_IN_RIGHT_HAND) != 0) {
+                            } else if ((weaponFlags & OBJECT_IN_RIGHT_HAND) != OBJECT_NONE) {
                                 rightItemAction = INTERFACE_ITEM_ACTION_DEFAULT;
                             }
                         }
@@ -857,7 +857,7 @@ int _action_ranged(Attack* attack, AnimationType anim)
                 animationRegisterPlaySoundEffect(projectile, sfx, 0);
 
                 int explosionCenterTile;
-                if ((attack->attackerFlags & DAM_HIT) != 0) {
+                if ((attack->attackerFlags & DAM_HIT) != DAM_NONE) {
                     animationRegisterMoveToTileStraight(projectile, attack->defender->tile, attack->defender->elevation, ANIM_WALK, 0);
                     delay = _make_straight_path(projectile, projectileOrigin, attack->defender->tile, nullptr, nullptr, 32) - 1;
                     explosionCenterTile = attack->defender->tile;
@@ -869,7 +869,7 @@ int _action_ranged(Attack* attack, AnimationType anim)
 
                 // SFALL
                 if (isGrenade || damageType == explosionGetDamageType()) {
-                    if ((attack->attackerFlags & DAM_DROP) == 0) {
+                    if ((attack->attackerFlags & DAM_DROP) == DAM_NONE) {
                         int explosionFrmId;
                         if (isGrenade) {
                             switch (damageType) {
@@ -957,7 +957,7 @@ int _action_ranged(Attack* attack, AnimationType anim)
 
                 delay = 0;
             } else {
-                if ((attack->attackerFlags & DAM_HIT) == 0) {
+                if ((attack->attackerFlags & DAM_HIT) == DAM_NONE) {
                     Object* defender = attack->defender;
                     if ((defender->data.critter.combat.results & (DAM_KNOCKED_OUT | DAM_KNOCKED_DOWN)) == 0) {
                         animationRegisterAnimate(defender, ANIM_DODGE_ANIM, delay);
@@ -970,10 +970,10 @@ int _action_ranged(Attack* attack, AnimationType anim)
 
     showDamage(attack, anim, delay);
 
-    if ((attack->attackerFlags & DAM_HIT) == 0) {
+    if ((attack->attackerFlags & DAM_HIT) == DAM_NONE) {
         _combatai_msg(attack->defender, attack, AI_MESSAGE_TYPE_MISS, -1);
     } else {
-        if ((attack->defenderFlags & DAM_DEAD) == 0) {
+        if ((attack->defenderFlags & DAM_DEAD) == DAM_NONE) {
             _combatai_msg(attack->defender, attack, AI_MESSAGE_TYPE_HIT, -1);
         }
     }
@@ -1178,7 +1178,7 @@ int _action_use_an_item_on_object(Object* user, Object* targetObj, Object* item)
         ObjectType objectType = objectTypeFromFid(targetObj->fid);
         if (objectType == OBJ_TYPE_CRITTER && critterIsProne(targetObj)) {
             anim = ANIM_MAGIC_HANDS_GROUND;
-        } else if (objectType == OBJ_TYPE_SCENERY && (proto->scenery.extendedFlags & PROTO_EXT_FLAG_MAGIC_HANDS_GROUND) != 0) {
+        } else if (objectType == OBJ_TYPE_SCENERY && (proto->scenery.extendedFlags & PROTO_EXT_FLAG_MAGIC_HANDS_GROUND) != PROTO_EXT_FLAG_NONE) {
             anim = ANIM_MAGIC_HANDS_GROUND;
         } else {
             anim = ANIM_MAGIC_HANDS_MIDDLE;
@@ -1493,7 +1493,12 @@ int actionUseSkill(Object* user, Object* target, Skill skill)
         if (user != gDude && gMpIsHost && gMpActive && MpCombatIsPlayerCritter(user)) {
             Proto* proto;
             if (protoGetProto(user->pid, &proto) == 0) {
-                proto->critter.data.flags ^= (1 << DUDE_STATE_SNEAKING);
+                // No ^ operator on CritterFlags: toggle explicitly.
+                if ((proto->critter.data.flags & CRITTER_DUDE_SNEAKING) != CRITTER_NONE) {
+                    proto->critter.data.flags &= ~CRITTER_DUDE_SNEAKING;
+                } else {
+                    proto->critter.data.flags |= CRITTER_DUDE_SNEAKING;
+                }
             }
         } else {
             dudeToggleState(DUDE_STATE_SNEAKING);
@@ -1727,7 +1732,7 @@ int actionExplode(int tile, int elevation, int minDamage, int maxDamage, Object*
 
     Object* critter = _obj_blocking_at(nullptr, tile, elevation);
     if (critter != nullptr) {
-        if (objectTypeFromFid(critter->fid) != OBJ_TYPE_CRITTER || (critter->data.critter.combat.results & DAM_DEAD) != 0) {
+        if (objectTypeFromFid(critter->fid) != OBJ_TYPE_CRITTER || (critter->data.critter.combat.results & DAM_DEAD) != DAM_NONE) {
             critter = nullptr;
         }
     }
@@ -1801,13 +1806,13 @@ int actionExplode(int tile, int elevation, int minDamage, int maxDamage, Object*
         showDamageToExtras(attack);
     } else {
         if (critter != nullptr) {
-            if ((attack->defenderFlags & DAM_DEAD) != 0) {
+            if ((attack->defenderFlags & DAM_DEAD) != DAM_NONE) {
                 critterKill(critter, ANIM_INVALID, false);
             }
         }
 
         for (int index = 0; index < attack->extrasLength; index++) {
-            if ((attack->extrasFlags[index] & DAM_DEAD) != 0) {
+            if ((attack->extrasFlags[index] & DAM_DEAD) != DAM_NONE) {
                 critterKill(attack->extras[index], ANIM_INVALID, false);
             }
         }
@@ -1831,14 +1836,14 @@ int _report_explosion(Attack* attack, Object* sourceObj)
 {
     bool mainTargetWasDead;
     if (attack->defender != nullptr) {
-        mainTargetWasDead = (attack->defender->data.critter.combat.results & DAM_DEAD) != 0;
+        mainTargetWasDead = (attack->defender->data.critter.combat.results & DAM_DEAD) != DAM_NONE;
     } else {
         mainTargetWasDead = false;
     }
 
-    bool extrasWasDead[6];
+    bool extrasWasDead[EXPLOSION_TARGET_COUNT] = {};
     for (int index = 0; index < attack->extrasLength; index++) {
-        extrasWasDead[index] = (attack->extras[index]->data.critter.combat.results & DAM_DEAD) != 0;
+        extrasWasDead[index] = (attack->extras[index]->data.critter.combat.results & DAM_DEAD) != DAM_NONE;
     }
 
     attackComputeDeathFlags(attack);
@@ -1849,7 +1854,7 @@ int _report_explosion(Attack* attack, Object* sourceObj)
     int xp = 0;
     if (sourceObj != nullptr) {
         if (attack->defender != nullptr && attack->defender != sourceObj) {
-            if ((attack->defender->data.critter.combat.results & DAM_DEAD) != 0) {
+            if ((attack->defender->data.critter.combat.results & DAM_DEAD) != DAM_NONE) {
                 if (sourceObj == gDude && !mainTargetWasDead) {
                     xp += critterGetExp(attack->defender);
                 }
@@ -1862,7 +1867,7 @@ int _report_explosion(Attack* attack, Object* sourceObj)
         for (int index = 0; index < attack->extrasLength; index++) {
             Object* critter = attack->extras[index];
             if (critter != sourceObj) {
-                if ((critter->data.critter.combat.results & DAM_DEAD) != 0) {
+                if ((critter->data.critter.combat.results & DAM_DEAD) != DAM_NONE) {
                     if (sourceObj == gDude && !extrasWasDead[index]) {
                         xp += critterGetExp(critter);
                     }
@@ -1923,7 +1928,7 @@ int _compute_explosion_damage(int min, int max, Object* defender, int* knockback
     }
 
     if (knockbackDistancePtr != nullptr) {
-        if ((defender->flags & OBJECT_MULTIHEX) == 0) {
+        if ((defender->flags & OBJECT_MULTIHEX) == OBJECT_NONE) {
             *knockbackDistancePtr = damage / 10;
         }
     }
@@ -2063,7 +2068,7 @@ void actionDamage(int tile, int elevation, int minDamage, int maxDamage, DamageT
         }
     } else {
         if (defender != nullptr) {
-            if ((attack->defenderFlags & DAM_DEAD) != 0) {
+            if ((attack->defenderFlags & DAM_DEAD) != DAM_NONE) {
                 critterKill(defender, ANIM_INVALID, 1);
             }
         }
@@ -2106,7 +2111,7 @@ int _compute_dmg_damage(int min, int max, Object* obj, int* knockbackDistancePtr
     }
 
     if (knockbackDistancePtr != nullptr) {
-        if ((obj->flags & OBJECT_MULTIHEX) == 0 && damageType != DAMAGE_TYPE_ELECTRICAL) {
+        if ((obj->flags & OBJECT_MULTIHEX) == OBJECT_NONE && damageType != DAMAGE_TYPE_ELECTRICAL) {
             *knockbackDistancePtr = damage / 10;
         }
     }

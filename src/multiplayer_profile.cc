@@ -561,7 +561,7 @@ static bool applyItemNode(const MpPlayerProfile& profile, uint32_t id,
     item->fid = fid;
     item->frame = node.frame;
     item->rotation = static_cast<Rotation>(node.rotation);
-    item->flags = node.flags;
+    item->flags = static_cast<ObjectFlags>(node.flags);
     item->data.flags = node.dataFlags;
     item->lightDistance = node.lightDistance;
     item->lightIntensity = node.lightIntensity;
@@ -1531,10 +1531,10 @@ MpPlayerRuntime* MpProfileCreateRuntime(uint8_t netId, const MpPlayerProfile& pr
     target->critter.fid = resolvedProfile.prototypeFid;
     target->critter.lightDistance = resolvedProfile.prototypeLightDistance;
     target->critter.lightIntensity = resolvedProfile.prototypeLightIntensity;
-    target->critter.flags = resolvedProfile.prototypeFlags;
-    target->critter.extendedFlags = resolvedProfile.prototypeExtendedFlags;
+    target->critter.flags = static_cast<ProtoFlags>(resolvedProfile.prototypeFlags);
+    target->critter.extendedFlags = static_cast<ProtoExtendedFlags>(resolvedProfile.prototypeExtendedFlags);
     target->critter.sid = -1;
-    target->critter.data.flags = resolvedProfile.critterFlags;
+    target->critter.data.flags = static_cast<CritterFlags>(resolvedProfile.critterFlags);
     memcpy(target->critter.data.baseStats, resolvedProfile.baseStats, sizeof(resolvedProfile.baseStats));
     memcpy(target->critter.data.bonusStats, resolvedProfile.bonusStats, sizeof(resolvedProfile.bonusStats));
     memcpy(target->critter.data.skills, resolvedProfile.skills, sizeof(resolvedProfile.skills));
@@ -1562,16 +1562,16 @@ MpPlayerRuntime* MpProfileCreateRuntime(uint8_t netId, const MpPlayerProfile& pr
     object->sx = resolvedProfile.sx;
     object->sy = resolvedProfile.sy;
     object->frame = resolvedProfile.frame;
-    object->flags = resolvedProfile.flags | OBJECT_NO_REMOVE | OBJECT_NO_SAVE;
+    object->flags = static_cast<ObjectFlags>(resolvedProfile.flags | OBJECT_NO_REMOVE | OBJECT_NO_SAVE);
     object->lightDistance = resolvedProfile.lightDistance;
     object->lightIntensity = resolvedProfile.lightIntensity;
     object->data.critter.hp = resolvedProfile.hp;
     object->data.critter.radiation = resolvedProfile.radiation;
     object->data.critter.poison = resolvedProfile.poison;
     object->data.critter.reaction = resolvedProfile.reaction;
-    object->data.critter.combat.maneuver = resolvedProfile.combatManeuver;
+    object->data.critter.combat.maneuver = static_cast<CritterManeuver>(resolvedProfile.combatManeuver);
     object->data.critter.combat.ap = resolvedProfile.combatAp;
-    object->data.critter.combat.results = resolvedProfile.combatResults;
+    object->data.critter.combat.results = static_cast<Dam>(resolvedProfile.combatResults);
     object->data.critter.combat.damageLastTurn = resolvedProfile.combatDamageLastTurn;
     object->data.critter.combat.aiPacket = resolvedProfile.combatAiPacket;
     object->data.critter.combat.team = resolvedProfile.combatTeam;
@@ -1720,9 +1720,9 @@ static bool mpProfileReapplyAvatar(MpPlayerRuntime& runtime, uint32_t changedSec
         proto->critter.messageId = profile.prototypeMessageId;
         proto->critter.lightDistance = profile.prototypeLightDistance;
         proto->critter.lightIntensity = profile.prototypeLightIntensity;
-        proto->critter.flags = profile.prototypeFlags;
-        proto->critter.extendedFlags = profile.prototypeExtendedFlags;
-        proto->critter.data.flags = profile.critterFlags;
+        proto->critter.flags = static_cast<ProtoFlags>(profile.prototypeFlags);
+        proto->critter.extendedFlags = static_cast<ProtoExtendedFlags>(profile.prototypeExtendedFlags);
+        proto->critter.data.flags = static_cast<CritterFlags>(profile.critterFlags);
         proto->critter.data.bodyType = (BodyType)profile.bodyType;
         proto->critter.data.experience = profile.experience;
         proto->critter.data.killType = (KillType)profile.killType;
@@ -1887,13 +1887,13 @@ bool MpProfileApplyLocal(const MpPlayerProfile& profile, bool applyPcStats,
     // means "apply everything" (join transfers).
     if (changedSections == 0
         || (changedSections & (1u << (PROFILE_SECTION_IDENTITY - 1))) != 0) {
-        proto->critter.data.flags = profile.critterFlags;
+        proto->critter.data.flags = static_cast<CritterFlags>(profile.critterFlags);
         proto->critter.data.bodyType = (BodyType)profile.bodyType;
         proto->critter.data.experience = profile.experience;
         proto->critter.data.killType = (KillType)profile.killType;
         proto->critter.data.damageType = (DamageType)profile.damageType;
-        proto->critter.flags = profile.prototypeFlags;
-        proto->critter.extendedFlags = profile.prototypeExtendedFlags;
+        proto->critter.flags = static_cast<ProtoFlags>(profile.prototypeFlags);
+        proto->critter.extendedFlags = static_cast<ProtoExtendedFlags>(profile.prototypeExtendedFlags);
         proto->critter.lightDistance = profile.prototypeLightDistance;
         proto->critter.lightIntensity = profile.prototypeLightIntensity;
         proto->critter.headFid = profile.prototypeHeadFid;
@@ -1921,9 +1921,9 @@ bool MpProfileApplyLocal(const MpPlayerProfile& profile, bool applyPcStats,
         gDude->data.critter.radiation = profile.radiation;
         gDude->data.critter.poison = profile.poison;
         gDude->data.critter.reaction = profile.reaction;
-        gDude->data.critter.combat.maneuver = profile.combatManeuver;
+        gDude->data.critter.combat.maneuver = static_cast<CritterManeuver>(profile.combatManeuver);
         gDude->data.critter.combat.ap = profile.combatAp;
-        gDude->data.critter.combat.results = profile.combatResults;
+        gDude->data.critter.combat.results = static_cast<Dam>(profile.combatResults);
         gDude->data.critter.combat.damageLastTurn = profile.combatDamageLastTurn;
         gDude->data.critter.combat.aiPacket = profile.combatAiPacket;
         gDude->data.critter.combat.team = profile.combatTeam;

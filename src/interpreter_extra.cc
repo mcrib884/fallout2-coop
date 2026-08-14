@@ -158,7 +158,7 @@ typedef enum OpRegAnimFunc {
 static void scriptPredefinedError(Program* program, const char* name, int error);
 static void scriptError(const char* format, ...);
 static int tileIsVisible(int tile);
-int correctFidForRemovedItem(Object* critter, Object* item, int flags);
+int correctFidForRemovedItem(Object* critter, Object* item, ObjectFlags flags);
 static void opGiveExpPoints(Program* program);
 static void opScrReturn(Program* program);
 static void opPlaySfx(Program* program);
@@ -412,12 +412,12 @@ static int tileIsVisible(int tile)
 }
 
 // 0x45409C correctFidForRemovedItem
-int correctFidForRemovedItem(Object* critter, Object* item, int flags)
+int correctFidForRemovedItem(Object* critter, Object* item, ObjectFlags flags)
 {
     InvenSlot invenSlot = InvenSlot::Armor;
-    if ((flags & OBJECT_IN_RIGHT_HAND) != 0) {
+    if ((flags & OBJECT_IN_RIGHT_HAND) != OBJECT_NONE) {
         invenSlot = InvenSlot::RightHand;
-    } else if ((flags & OBJECT_IN_LEFT_HAND) != 0) {
+    } else if ((flags & OBJECT_IN_LEFT_HAND) != OBJECT_NONE) {
         invenSlot = InvenSlot::LeftHand;
     }
 
@@ -432,19 +432,19 @@ int correctFidForRemovedItem(Object* critter, Object* item, int flags)
     WeaponAnimation weaponCode = weaponAnimationFromFid(fid);
     int newFid = -1;
 
-    if ((flags & OBJECT_IN_ANY_HAND) != 0) {
+    if ((flags & OBJECT_IN_ANY_HAND) != OBJECT_NONE) {
         if (critter == gDude) {
             if (interfaceGetCurrentHand() == HAND_RIGHT) {
-                if ((flags & OBJECT_IN_RIGHT_HAND) != 0) {
+                if ((flags & OBJECT_IN_RIGHT_HAND) != OBJECT_NONE) {
                     weaponCode = WEAPON_ANIMATION_NONE;
                 }
             } else {
-                if ((flags & OBJECT_IN_LEFT_HAND) != 0) {
+                if ((flags & OBJECT_IN_LEFT_HAND) != OBJECT_NONE) {
                     weaponCode = WEAPON_ANIMATION_NONE;
                 }
             }
         } else {
-            if ((flags & OBJECT_IN_RIGHT_HAND) != 0) {
+            if ((flags & OBJECT_IN_RIGHT_HAND) != OBJECT_NONE) {
                 weaponCode = WEAPON_ANIMATION_NONE;
             }
         }
@@ -1766,18 +1766,18 @@ static void opRemoveObjectFromInventory(Program* program)
     }
 
     bool updateFlags = false;
-    int flags = 0;
+    ObjectFlags flags = OBJECT_NONE;
 
-    if ((item->flags & OBJECT_EQUIPPED) != 0) {
-        if ((item->flags & OBJECT_IN_LEFT_HAND) != 0) {
+    if ((item->flags & OBJECT_EQUIPPED) != OBJECT_NONE) {
+        if ((item->flags & OBJECT_IN_LEFT_HAND) != OBJECT_NONE) {
             flags |= OBJECT_IN_LEFT_HAND;
         }
 
-        if ((item->flags & OBJECT_IN_RIGHT_HAND) != 0) {
+        if ((item->flags & OBJECT_IN_RIGHT_HAND) != OBJECT_NONE) {
             flags |= OBJECT_IN_RIGHT_HAND;
         }
 
-        if ((item->flags & OBJECT_WORN) != 0) {
+        if ((item->flags & OBJECT_WORN) != OBJECT_NONE) {
             flags |= OBJECT_WORN;
         }
 
@@ -1988,7 +1988,7 @@ static void opAttackComplex(Program* program)
         return;
     }
 
-    if (!critterIsActive(self) || (self->flags & OBJECT_HIDDEN) != 0) {
+    if (!critterIsActive(self) || (self->flags & OBJECT_HIDDEN) != OBJECT_NONE) {
         if (gMpActive && gMpIsHost) {
             MpLogAlways(MP_LOG_COMBAT, "attack refused (self inactive/hidden) self=0x%X flags=0x%X",
                 self->pid, self->flags);
@@ -1998,7 +1998,7 @@ static void opAttackComplex(Program* program)
         return;
     }
 
-    if (!critterIsActive(target) || (target->flags & OBJECT_HIDDEN) != 0) {
+    if (!critterIsActive(target) || (target->flags & OBJECT_HIDDEN) != OBJECT_NONE) {
         if (gMpActive && gMpIsHost) {
             MpLogAlways(MP_LOG_COMBAT, "attack refused (target inactive/hidden) target=0x%X flags=0x%X",
                 target->pid, target->flags);
@@ -2008,7 +2008,7 @@ static void opAttackComplex(Program* program)
         return;
     }
 
-    if ((target->data.critter.combat.maneuver & CRITTER_MANUEVER_FLEEING) != 0) {
+    if ((target->data.critter.combat.maneuver & CRITTER_MANUEVER_FLEEING) != CRITTER_MANEUVER_NONE) {
         if (gMpActive && gMpIsHost) {
             MpLogAlways(MP_LOG_COMBAT, "attack refused (target fleeing) target=0x%X maneuver=0x%X",
                 target->pid, target->data.critter.combat.maneuver);
@@ -2029,7 +2029,7 @@ static void opAttackComplex(Program* program)
 
     if (isInCombat()) {
         CritterCombatData* combatData = &(self->data.critter.combat);
-        if ((combatData->maneuver & CRITTER_MANEUVER_ENGAGING) == 0) {
+        if ((combatData->maneuver & CRITTER_MANEUVER_ENGAGING) == CRITTER_MANEUVER_NONE) {
             combatData->maneuver |= CRITTER_MANEUVER_ENGAGING;
             combatData->whoHitMe = target;
         }
@@ -2052,8 +2052,8 @@ static void opAttackComplex(Program* program)
         // are applied to defender because of the bug in 0x422F3C?
         if (data[1] == data[0]) {
             combat.overrideAttackResults = 1;
-            combat.targetResults = data[0];
-            combat.attackerResults = data[1];
+            combat.targetResults = static_cast<Dam>(data[0]);
+            combat.attackerResults = static_cast<Dam>(data[1]);
         } else {
             combat.overrideAttackResults = 0;
         }
@@ -2283,7 +2283,7 @@ static void opSetObjectVisibility(Program* program)
     }
 
     if (invisible != 0) {
-        if ((obj->flags & OBJECT_HIDDEN) == 0) {
+        if ((obj->flags & OBJECT_HIDDEN) == OBJECT_NONE) {
             if (isInCombat()) {
                 objectDisableOutline(obj, nullptr);
                 objectClearOutline(obj, nullptr);
@@ -2299,7 +2299,7 @@ static void opSetObjectVisibility(Program* program)
             }
         }
     } else {
-        if ((obj->flags & OBJECT_HIDDEN) != 0) {
+        if ((obj->flags & OBJECT_HIDDEN) != OBJECT_NONE) {
             if (objectTypeFromPid(obj->pid) == OBJ_TYPE_CRITTER) {
                 obj->flags &= ~OBJECT_NO_BLOCK;
             }
@@ -2593,7 +2593,7 @@ static void opKillCritterType(Program* program)
     Object* obj = objectFindFirst();
     while (obj != nullptr) {
         if (animationTypeFromFid(obj->fid) < ANIM_FALL_BACK_SF) {
-            if ((obj->flags & OBJECT_HIDDEN) == 0 && obj->pid == pid && !critterIsDead(obj)) {
+            if ((obj->flags & OBJECT_HIDDEN) == OBJECT_NONE && obj->pid == pid && !critterIsDead(obj)) {
                 if (obj == previousObj || count > 200) {
                     scriptPredefinedError(program, "kill_critter_type", SCRIPT_ERROR_FOLLOWS);
                     debugPrint(" Infinite loop destroying critters!");
@@ -2790,7 +2790,7 @@ static void opHasTrait(Program* program)
                 result = object->rotation;
                 break;
             case CRITTER_TRAIT_OBJECT_IS_INVISIBLE:
-                result = (object->flags & OBJECT_HIDDEN) == 0;
+                result = (object->flags & OBJECT_HIDDEN) == OBJECT_NONE;
                 break;
             case CRITTER_TRAIT_OBJECT_GET_INVENTORY_WEIGHT:
                 result = objectGetInventoryWeight(object);
@@ -3545,7 +3545,7 @@ static void opMetarule(Program* program)
             if (objectTypeFromPid(object->pid) == OBJ_TYPE_CRITTER) {
                 Proto* proto;
                 protoGetProto(object->pid, &proto);
-                if ((proto->critter.data.flags & CRITTER_BARTER) != 0) {
+                if ((proto->critter.data.flags & CRITTER_BARTER) != CRITTER_NONE) {
                     result = 1;
                 }
             }
@@ -3898,7 +3898,7 @@ static void opRemoveMultipleObjectsFromInventory(Program* program)
         return;
     }
 
-    bool itemWasEquipped = (item->flags & OBJECT_EQUIPPED) != 0;
+    bool itemWasEquipped = (item->flags & OBJECT_EQUIPPED) != OBJECT_NONE;
 
     int quantity = itemGetQuantity(owner, item);
     if (quantity > quantityToRemove) {
@@ -4224,7 +4224,7 @@ static void opRegAnimAnimateForever(Program* program)
 // 0x45AE8C op_critter_injure
 static void opCritterInjure(Program* program)
 {
-    int flags = programStackPopInteger(program);
+    Dam flags = static_cast<Dam>(programStackPopInteger(program));
     Object* critter = static_cast<Object*>(programStackPopPointer(program));
 
     if (critter == nullptr) {
@@ -4232,7 +4232,7 @@ static void opCritterInjure(Program* program)
         return;
     }
 
-    bool reverse = (flags & DAM_PERFORM_REVERSE) != 0;
+    bool reverse = (flags & DAM_PERFORM_REVERSE) != DAM_NONE;
 
     flags &= DAM_CRIP;
 
@@ -4243,7 +4243,7 @@ static void opCritterInjure(Program* program)
     }
 
     if (critter == gDude) {
-        if ((flags & DAM_CRIP_ARM_ANY) != 0) {
+        if ((flags & DAM_CRIP_ARM_ANY) != DAM_NONE) {
             InterfaceItemAction leftItemAction;
             InterfaceItemAction rightItemAction;
             interfaceGetItemActions(&leftItemAction, &rightItemAction);
@@ -4667,26 +4667,26 @@ static void opAttackSetup(Program* program)
     program->flags |= PROGRAM_FLAG_CHILD_CALL;
 
     if (attacker != nullptr) {
-        if (!critterIsActive(attacker) || (attacker->flags & OBJECT_HIDDEN) != 0) {
+        if (!critterIsActive(attacker) || (attacker->flags & OBJECT_HIDDEN) != OBJECT_NONE) {
             debugPrint("\n   But is already dead or invisible");
             program->flags &= ~PROGRAM_FLAG_CHILD_CALL;
             return;
         }
 
-        if (!critterIsActive(defender) || (defender->flags & OBJECT_HIDDEN) != 0) {
+        if (!critterIsActive(defender) || (defender->flags & OBJECT_HIDDEN) != OBJECT_NONE) {
             debugPrint("\n   But target is already dead or invisible");
             program->flags &= ~PROGRAM_FLAG_CHILD_CALL;
             return;
         }
 
-        if ((defender->data.critter.combat.maneuver & CRITTER_MANUEVER_FLEEING) != 0) {
+        if ((defender->data.critter.combat.maneuver & CRITTER_MANUEVER_FLEEING) != CRITTER_MANEUVER_NONE) {
             debugPrint("\n   But target is AFRAID");
             program->flags &= ~PROGRAM_FLAG_CHILD_CALL;
             return;
         }
 
         if (isInCombat()) {
-            if ((attacker->data.critter.combat.maneuver & CRITTER_MANEUVER_ENGAGING) == 0) {
+            if ((attacker->data.critter.combat.maneuver & CRITTER_MANEUVER_ENGAGING) == CRITTER_MANEUVER_NONE) {
                 attacker->data.critter.combat.maneuver |= CRITTER_MANEUVER_ENGAGING;
                 attacker->data.critter.combat.whoHitMe = defender;
             }
@@ -4869,12 +4869,12 @@ static void opMoveObjectInventoryToObject(Program* program)
         // CE intentionally reports the NPC weapon's actual hand slot here.
         // Sfall's op_move_obj_inven_to_obj HOOK_INVENWIELD path passes
         // InvenSlot::Armor unconditionally for NPC weapons in this case.
-        int flags = 0;
-        if ((oldWeapon->flags & OBJECT_IN_LEFT_HAND) != 0) {
+        ObjectFlags flags = OBJECT_NONE;
+        if ((oldWeapon->flags & OBJECT_IN_LEFT_HAND) != OBJECT_NONE) {
             flags |= OBJECT_IN_LEFT_HAND;
         }
 
-        if ((oldWeapon->flags & OBJECT_IN_RIGHT_HAND) != 0) {
+        if ((oldWeapon->flags & OBJECT_IN_RIGHT_HAND) != OBJECT_NONE) {
             flags |= OBJECT_IN_RIGHT_HAND;
         }
 
@@ -5046,7 +5046,7 @@ static void opCritterIsFleeing(Program* program)
 
     bool fleeing = false;
     if (obj != nullptr) {
-        fleeing = (obj->data.critter.combat.maneuver & CRITTER_MANUEVER_FLEEING) != 0;
+        fleeing = (obj->data.critter.combat.maneuver & CRITTER_MANUEVER_FLEEING) != CRITTER_MANEUVER_NONE;
     } else {
         scriptPredefinedError(program, "critter_is_fleeing", SCRIPT_ERROR_OBJECT_IS_NULL);
     }

@@ -3385,15 +3385,11 @@ int wmWorldMapFunc(int a1)
 
     wmResetTrailMarkers();
 
-    wmFadeOut();
-
     if (wmInterfaceInit() == -1) {
         wmInterfaceExit();
-        wmFadeReset();
         return -1;
     }
 
-    wmFadeIn();
     touch_set_touchscreen_mode(false);
 
     if (gMpWorldmapReadOnly) {
@@ -3562,7 +3558,6 @@ int wmWorldMapFunc(int a1)
                             }
                         }
 
-                        wmFadeOut();
                         // Co-op: the host loads through the sync pipeline
                         // (prepare / load / finish / MAP_CHANGED / FULL_SYNC).
                         if (gMpIsHost) {
@@ -3640,7 +3635,6 @@ int wmWorldMapFunc(int a1)
                             }
                         }
 
-                        wmFadeOut();
                         // Co-op: the host loads through the sync pipeline.
                         if (gMpIsHost) {
                             MpWorldmapHostLoadMap(map);
@@ -3693,7 +3687,6 @@ int wmWorldMapFunc(int a1)
                             wmGenData.currentCarAreaId = wmGenData.currentAreaId;
                         }
 
-                        wmFadeOut();
                         mapLoadById(map);
                     }
                 }
@@ -3884,7 +3877,6 @@ static int wmRndEncounterOccurred(int* mapToLoadPtr)
                 wmMatchAreaContainingMapIdx(MAP_IN_GAME_MOVIE1, &(wmGenData.currentCarAreaId));
             }
 
-            wmFadeOut();
             // Co-op: the host loads through the sync pipeline.
             if (gMpIsHost) {
                 MpWorldmapHostLoadMap(MAP_IN_GAME_MOVIE1);
@@ -4301,7 +4293,7 @@ int wmSetupRandomEncounter()
         }
 
         if (critterCount != 0) {
-            Object* critter;
+            Object* critter = nullptr;
             if (wmSetupCritterObjs(encounterTableSubEntry->encounterIndex, &critter, critterCount) == -1) {
                 scriptsRequestWorldMap();
                 return -1;
@@ -5842,7 +5834,7 @@ static int wmInterfaceRefresh()
     while (y < WM_VIEW_HEIGHT) {
         x = 0;
         int v23 = 0;
-        int height;
+        int height = WM_TILE_HEIGHT;
         while (x < WM_VIEW_WIDTH) {
             if (wmTileGrabArt(v0) == -1) {
                 return -1;
@@ -5905,7 +5897,7 @@ static int wmInterfaceRefresh()
     while (v30 < WM_VIEW_HEIGHT) {
         int v24 = 0;
         int v33 = 0;
-        int v29;
+        int v29 = WM_TILE_HEIGHT;
         while (v33 < WM_VIEW_WIDTH) {
             int v31 = WM_TILE_WIDTH;
             if (v33 == 0) {

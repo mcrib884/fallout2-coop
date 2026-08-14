@@ -109,7 +109,7 @@ typedef struct InterfaceItemState {
     int itemFid;
 } InterfaceItemState;
 
-constexpr int kCustomIndicatorMinTag = 5;
+constexpr int kCustomIndicatorMinTag = DUDE_STATE_COUNT;
 constexpr int kCustomIndicatorMaxTag = 126;
 constexpr int kCustomIndicatorMaxCount = kCustomIndicatorMaxTag - kCustomIndicatorMinTag + 1;
 constexpr int kCustomIndicatorDefaultCount = 5;
@@ -1720,7 +1720,7 @@ static int interfaceBarRefreshMainAction()
             if (hitMode != HIT_MODE_INVALID) {
                 actionPoints = weaponGetActionPointCost(gDude, hitMode, bullseyeFid != -1);
 
-                int id;
+                int id = -1;
                 AnimationType anim = critterGetAnimationForHitMode(gDude, hitMode);
                 switch (anim) {
                 case ANIM_THROW_PUNCH:
@@ -1793,7 +1793,9 @@ static int interfaceBarRefreshMainAction()
                     break;
                 }
 
-                primaryFid = buildFid(OBJ_TYPE_INTERFACE, id);
+                if (id != -1) {
+                    primaryFid = buildFid(OBJ_TYPE_INTERFACE, id);
+                }
             }
 
             if (primaryFid != -1) {
@@ -2418,13 +2420,13 @@ int indicatorBarRefresh()
             }
         }
 
-        if (critterGetPoison(gDude) > POISON_INDICATOR_THRESHOLD) {
+        if (dudeHasState(DUDE_STATE_POISONED)) {
             if (indicatorBarAdd(INDICATOR_POISONED)) {
                 ++count;
             }
         }
 
-        if (critterGetRadiation(gDude) > RADATION_INDICATOR_THRESHOLD) {
+        if (dudeHasState(DUDE_STATE_RADIATED)) {
             if (indicatorBarAdd(INDICATOR_RADIATED)) {
                 ++count;
             }

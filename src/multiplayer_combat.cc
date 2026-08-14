@@ -570,8 +570,8 @@ static void mpCombatResolveMove(MultiplayerPlayer* player, const NetCombatCmdPay
     if (isRun && perkGetRank(critter, PERK_SILENT_RUNNING) == 0) {
         Proto* playerProto = nullptr;
         if (protoGetProto(critter->pid, &playerProto) == 0
-            && (playerProto->critter.data.flags & (1 << DUDE_STATE_SNEAKING)) != 0) {
-            playerProto->critter.data.flags &= ~(1 << DUDE_STATE_SNEAKING);
+            && (playerProto->critter.data.flags & CRITTER_DUDE_SNEAKING) != CRITTER_NONE) {
+            playerProto->critter.data.flags &= ~CRITTER_DUDE_SNEAKING;
             MpLog(MP_LOG_COMBAT, "run cancelled sneak netId=%u", player->netId);
         }
     }
@@ -959,7 +959,7 @@ static void mpCombatSetActingNpcOutline(uint32_t targetNetId)
     // that (combat is host-authoritative), so every client critter has
     // outline == 0 and objectEnableOutline alone cannot render anything.
     // Set the type explicitly — team-based like vanilla — then enable it.
-    int outlineType = gDude->data.critter.combat.team == npc->data.critter.combat.team
+    OutlineType outlineType = gDude->data.critter.combat.team == npc->data.critter.combat.team
         ? OUTLINE_TYPE_FRIENDLY
         : OUTLINE_TYPE_HOSTILE;
     Rect rect;

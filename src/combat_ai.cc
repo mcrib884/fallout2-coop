@@ -1178,7 +1178,7 @@ static int _ai_check_drugs(Object* critter)
     return 0;
 }
 
-// 0x428868
+// 0x428868 ai_run_away
 static void _ai_run_away(Object* a1, Object* a2)
 {
     if (a2 == nullptr) {
@@ -1194,7 +1194,7 @@ static void _ai_run_away(Object* a1, Object* a2)
 
         Rotation rotation = tileGetRotationTo(a2->tile, a1->tile);
 
-        int destination;
+        int destination = a1->tile;
         int actionPoints = combatData->ap;
         for (; actionPoints > 0; actionPoints -= 1) {
             destination = tileGetTileInDirection(a1->tile, rotation, actionPoints);
@@ -1226,7 +1226,7 @@ static void _ai_run_away(Object* a1, Object* a2)
     }
 }
 
-// 0x42899C
+// 0x42899C ai_move_away
 static int _ai_move_away(Object* a1, Object* a2, int a3)
 {
     if (aiGetPacket(a1)->distance == DISTANCE_STAY) {
@@ -1241,7 +1241,7 @@ static int _ai_move_away(Object* a1, Object* a2, int a3)
 
         Rotation rotation = tileGetRotationTo(a2->tile, a1->tile);
 
-        int destination;
+        int destination = a1->tile;
         int actionPointsLeft = actionPoints;
         for (; actionPointsLeft > 0; actionPointsLeft -= 1) {
             destination = tileGetTileInDirection(a1->tile, rotation, actionPointsLeft);
@@ -1260,7 +1260,7 @@ static int _ai_move_away(Object* a1, Object* a2, int a3)
             }
         }
 
-        if (actionPoints > 0) {
+        if (actionPointsLeft > 0) {
             reg_anim_begin(ANIMATION_REQUEST_RESERVED);
             animationRegisterMoveToTile(a1, destination, a1->elevation, actionPoints, 0);
             if (reg_anim_end() == 0) {
@@ -1421,7 +1421,7 @@ static Object* _ai_find_nearest_team(Object* a1, Object* a2, int flags)
     for (int index = 0; index < _curr_crit_num; index++) {
         Object* obj = _curr_crit_list[index];
         if (a1 != obj
-            && (obj->data.critter.combat.results & DAM_DEAD) == 0
+            && (obj->data.critter.combat.results & DAM_DEAD) == DAM_NONE
             && (((flags & 0x02) && team != obj->data.critter.combat.team)
                 || ((flags & 0x01) && team == obj->data.critter.combat.team))) {
             return obj;
@@ -1450,7 +1450,7 @@ static Object* _ai_find_nearest_team_in_combat(Object* a1, Object* a2, int flags
     for (int index = 0; index < _curr_crit_num; index++) {
         Object* obj = _curr_crit_list[index];
         if (obj != a1
-            && (obj->data.critter.combat.results & DAM_DEAD) == 0
+            && (obj->data.critter.combat.results & DAM_DEAD) == DAM_NONE
             && (((flags & 0x02) != 0 && team != obj->data.critter.combat.team)
                 || ((flags & 0x01) != 0 && team == obj->data.critter.combat.team))) {
             if (obj->data.critter.combat.whoHitMe != nullptr) {
@@ -1493,7 +1493,7 @@ static int aiFindAttackers(Object* critter, Object** whoHitMePtr, Object** whoHi
         Object* candidate = _curr_crit_list[index];
         if (candidate != critter) {
             if (whoHitMePtr != nullptr && *whoHitMePtr == nullptr) {
-                if ((candidate->data.critter.combat.results & DAM_DEAD) == 0
+                if ((candidate->data.critter.combat.results & DAM_DEAD) == DAM_NONE
                     && candidate->data.critter.combat.whoHitMe == critter) {
                     foundTargetCount++;
                     *whoHitMePtr = candidate;
@@ -1507,7 +1507,7 @@ static int aiFindAttackers(Object* critter, Object** whoHitMePtr, Object** whoHi
                     if (whoHitCandidate != nullptr
                         && whoHitCandidate != critter
                         && team != whoHitCandidate->data.critter.combat.team
-                        && (whoHitCandidate->data.critter.combat.results & DAM_DEAD) == 0) {
+                        && (whoHitCandidate->data.critter.combat.results & DAM_DEAD) == DAM_NONE) {
                         foundTargetCount++;
                         *whoHitFriendPtr = whoHitCandidate;
                         continue;
@@ -1517,7 +1517,7 @@ static int aiFindAttackers(Object* critter, Object** whoHitMePtr, Object** whoHi
 
             if (whoHitByFriendPtr != nullptr && *whoHitByFriendPtr == nullptr) {
                 if (candidate->data.critter.combat.team != team
-                    && (candidate->data.critter.combat.results & DAM_DEAD) == 0) {
+                    && (candidate->data.critter.combat.results & DAM_DEAD) == DAM_NONE) {
                     Object* whoHitCandidate = candidate->data.critter.combat.whoHitMe;
                     if (whoHitCandidate != nullptr
                         && whoHitCandidate->data.critter.combat.team == team) {
@@ -1661,7 +1661,7 @@ static Object* _ai_danger_source(Object* a1)
     if (whoHitMe == nullptr || a1 == whoHitMe) {
         targets[0] = nullptr;
     } else {
-        if ((whoHitMe->data.critter.combat.results & DAM_DEAD) == 0) {
+        if ((whoHitMe->data.critter.combat.results & DAM_DEAD) == DAM_NONE) {
             if (attackWho == ATTACK_WHO_WHOMEVER || attackWho == -1) {
                 return whoHitMe;
             }
@@ -1845,7 +1845,7 @@ static Object* _ai_best_weapon(Object* attacker, Object* weapon1, Object* weapon
     attackInit(&attack, attacker, defender, HIT_MODE_RIGHT_WEAPON_PRIMARY, HIT_LOCATION_TORSO);
 
     AttackType attackType1;
-    int distance;
+    int distance = 0;
     AttackType attackType2;
     int avgDamage2 = 0;
 
@@ -2399,7 +2399,7 @@ static int _ai_move_steps_closer(Object* critter, Object* target, int actionPoin
     Object* initialTarget = target;
 
     bool shouldUnhide;
-    if ((target->flags & OBJECT_MULTIHEX) != 0) {
+    if ((target->flags & OBJECT_MULTIHEX) != OBJECT_NONE) {
         shouldUnhide = true;
         target->flags |= OBJECT_HIDDEN;
     } else {
@@ -2416,7 +2416,7 @@ static int _ai_move_steps_closer(Object* critter, Object* target, int actionPoin
             }
 
             target = _moveBlockObj;
-            if ((target->flags & OBJECT_MULTIHEX) != 0) {
+            if ((target->flags & OBJECT_MULTIHEX) != OBJECT_NONE) {
                 shouldUnhide = true;
                 target->flags |= OBJECT_HIDDEN;
             } else {
@@ -2435,13 +2435,13 @@ static int _ai_move_steps_closer(Object* critter, Object* target, int actionPoin
     }
 
     if (actionPoints >= critterGetStat(critter, STAT_MAXIMUM_ACTION_POINTS) / 2 && artCritterFidShouldRun(critter->fid)) {
-        if ((target->flags & OBJECT_MULTIHEX) != 0) {
+        if ((target->flags & OBJECT_MULTIHEX) != OBJECT_NONE) {
             animationRegisterRunToObject(critter, target, actionPoints, 0);
         } else {
             animationRegisterRunToTile(critter, tile, critter->elevation, actionPoints, 0);
         }
     } else {
-        if ((target->flags & OBJECT_MULTIHEX) != 0) {
+        if ((target->flags & OBJECT_MULTIHEX) != OBJECT_NONE) {
             animationRegisterMoveToObject(critter, target, actionPoints, 0);
         } else {
             animationRegisterMoveToTile(critter, tile, critter->elevation, actionPoints, 0);
@@ -2507,7 +2507,7 @@ static int _cai_retargetTileFromFriendlyFire(Object* source, Object* target, int
 
     for (int index = 0; index < _curr_crit_num; index++) {
         Object* obj = _curr_crit_list[index];
-        if ((obj->data.critter.combat.results & DAM_DEAD) == 0
+        if ((obj->data.critter.combat.results & DAM_DEAD) == DAM_NONE
             && obj->data.critter.combat.team == aiRetargetData.sourceTeam
             && aiInfoGetLastTarget(obj) == aiRetargetData.target
             && obj != aiRetargetData.source) {
@@ -2652,7 +2652,7 @@ static HitLocation _ai_called_shot(Object* attacker, Object* defender, HitMode h
         if (critterCanAim(attacker, hitMode)) {
             AiPacket* ai = aiGetPacket(attacker);
             if (randomBetween(1, ai->called_freq) == 1) {
-                int intelligenceRequired;
+                int intelligenceRequired = 5;
                 switch (settings.preferences.combat_difficulty) {
                 case COMBAT_DIFFICULTY_EASY:
                     intelligenceRequired = 7;
@@ -2682,7 +2682,7 @@ static HitLocation _ai_called_shot(Object* attacker, Object* defender, HitMode h
 // 0x42A748
 static int _ai_attack(Object* attacker, Object* defender, HitMode hitMode)
 {
-    if (attacker->data.critter.combat.maneuver & CRITTER_MANUEVER_FLEEING) {
+    if ((attacker->data.critter.combat.maneuver & CRITTER_MANUEVER_FLEEING) != CRITTER_MANEUVER_NONE) {
         return -1;
     }
 
@@ -3129,7 +3129,7 @@ void _combat_ai(Object* a1, Object* a2)
     }
 
     if (a2 != nullptr
-        && (a2->data.critter.combat.results & DAM_DEAD) == 0
+        && (a2->data.critter.combat.results & DAM_DEAD) == DAM_NONE
         && a1->data.critter.combat.ap != 0
         && objectGetDistanceBetween(a1, a2) > ai->max_dist) {
         Object* friendlyDead = aiInfoGetFriendlyDead(a1);
@@ -3147,7 +3147,7 @@ void _combat_ai(Object* a1, Object* a2)
     if (a2 == nullptr && !objectIsPartyMember(a1)) {
         Object* whoHitMe = combatData->whoHitMe;
         if (whoHitMe != nullptr) {
-            if ((whoHitMe->data.critter.combat.results & DAM_DEAD) == 0 && combatData->damageLastTurn > 0) {
+            if ((whoHitMe->data.critter.combat.results & DAM_DEAD) == DAM_NONE && combatData->damageLastTurn > 0) {
                 Object* friendlyDead = aiInfoGetFriendlyDead(a1);
                 if (friendlyDead != nullptr) {
                     _ai_move_away(a1, friendlyDead, 10);
@@ -3199,7 +3199,7 @@ bool _combatai_want_to_join(Object* a1)
 {
     _process_bk();
 
-    if ((a1->flags & OBJECT_HIDDEN) != 0) {
+    if ((a1->flags & OBJECT_HIDDEN) != OBJECT_NONE) {
         return false;
     }
 
@@ -3221,15 +3221,15 @@ bool _combatai_want_to_join(Object* a1)
         scriptExecProc(a1->sid, SCRIPT_PROC_COMBAT);
     }
 
-    if ((a1->data.critter.combat.maneuver & CRITTER_MANEUVER_ENGAGING) != 0) {
+    if ((a1->data.critter.combat.maneuver & CRITTER_MANEUVER_ENGAGING) != CRITTER_MANEUVER_NONE) {
         return true;
     }
 
-    if ((a1->data.critter.combat.maneuver & CRITTER_MANEUVER_DISENGAGING) != 0) {
+    if ((a1->data.critter.combat.maneuver & CRITTER_MANEUVER_DISENGAGING) != CRITTER_MANEUVER_NONE) {
         return false;
     }
 
-    if ((a1->data.critter.combat.maneuver & CRITTER_MANUEVER_FLEEING) != 0) {
+    if ((a1->data.critter.combat.maneuver & CRITTER_MANUEVER_FLEEING) != CRITTER_MANEUVER_NONE) {
         return false;
     }
 
@@ -3245,15 +3245,15 @@ bool _combatai_want_to_stop(Object* a1)
 {
     _process_bk();
 
-    if ((a1->data.critter.combat.maneuver & CRITTER_MANEUVER_DISENGAGING) != 0) {
+    if ((a1->data.critter.combat.maneuver & CRITTER_MANEUVER_DISENGAGING) != CRITTER_MANEUVER_NONE) {
         return true;
     }
 
-    if ((a1->data.critter.combat.results & (DAM_KNOCKED_OUT | DAM_DEAD)) != 0) {
+    if ((a1->data.critter.combat.results & (DAM_KNOCKED_OUT | DAM_DEAD)) != DAM_NONE) {
         return true;
     }
 
-    if ((a1->data.critter.combat.maneuver & CRITTER_MANUEVER_FLEEING) != 0) {
+    if ((a1->data.critter.combat.maneuver & CRITTER_MANUEVER_FLEEING) != CRITTER_MANEUVER_NONE) {
         return true;
     }
 
@@ -3294,13 +3294,13 @@ int critterSetTeam(Object* obj, int team)
     aiInfoSetLastTarget(obj, nullptr);
 
     if (isInCombat()) {
-        bool outlineWasEnabled = obj->outline != 0 && (obj->outline & OUTLINE_DISABLED) == 0;
+        bool outlineWasEnabled = obj->outline != OUTLINE_TYPE_NONE && (obj->outline & OUTLINE_DISABLED) == OUTLINE_TYPE_NONE;
 
         objectClearOutline(obj, nullptr);
 
-        int outlineType;
+        OutlineType outlineType;
         if (obj->data.critter.combat.team == gDude->data.critter.combat.team) {
-            outlineType = OUTLINE_TYPE_2;
+            outlineType = OUTLINE_TYPE_SAME_TEAM;
         } else {
             outlineType = OUTLINE_TYPE_HOSTILE;
         }
@@ -3602,7 +3602,7 @@ PerceptionResult isWithinPerceptionDetailed(Object* critter, Object* target, Per
     int perception = critterGetStat(critter, STAT_PERCEPTION);
     if (_can_see(critter, target)) {
         int maxDistance = perception * 5;
-        if ((target->flags & OBJECT_TRANS_GLASS) != 0) {
+        if ((target->flags & OBJECT_TRANS_GLASS) != OBJECT_NONE) {
             maxDistance /= 2;
         }
 
@@ -3705,10 +3705,10 @@ void _combatai_notify_onlookers(Object* a1)
 {
     for (int index = 0; index < _curr_crit_num; index++) {
         Object* obj = _curr_crit_list[index];
-        if ((obj->data.critter.combat.maneuver & CRITTER_MANEUVER_ENGAGING) == 0) {
+        if ((obj->data.critter.combat.maneuver & CRITTER_MANEUVER_ENGAGING) == CRITTER_MANEUVER_NONE) {
             if (isWithinPerception(obj, a1)) {
                 obj->data.critter.combat.maneuver |= CRITTER_MANEUVER_ENGAGING;
-                if ((a1->data.critter.combat.results & DAM_DEAD) != 0) {
+                if ((a1->data.critter.combat.results & DAM_DEAD) != DAM_NONE) {
                     if (!isWithinPerception(obj, a1->data.critter.combat.whoHitMe)) {
                         debugPrint("\nSomebody Died and I don't know why!  Run!!!");
                         aiInfoSetFriendlyDead(obj, a1);
@@ -3726,7 +3726,7 @@ void _combatai_notify_friends(Object* a1)
 
     for (int index = 0; index < _curr_crit_num; index++) {
         Object* obj = _curr_crit_list[index];
-        if ((obj->data.critter.combat.maneuver & CRITTER_MANEUVER_ENGAGING) == 0 && team == obj->data.critter.combat.team) {
+        if ((obj->data.critter.combat.maneuver & CRITTER_MANEUVER_ENGAGING) == CRITTER_MANEUVER_NONE && team == obj->data.critter.combat.team) {
             if (isWithinPerception(obj, a1)) {
                 obj->data.critter.combat.maneuver |= CRITTER_MANEUVER_ENGAGING;
             }

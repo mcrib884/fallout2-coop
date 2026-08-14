@@ -2485,15 +2485,41 @@ static void scriptListExtentClearRuntimeState(ScriptListExtent* scriptExtent)
     }
 }
 
+static void scriptListsFreeAll()
+{
+    for (int index = 0; index < SCRIPT_TYPE_COUNT; index++) {
+        ScriptList* scriptList = &(gScriptLists[index]);
+        ScriptListExtent* current = scriptList->head;
+
+        while (current != nullptr) {
+            ScriptListExtent* next = current->next;
+            internal_free(current);
+            current = next;
+        }
+
+        scriptList->head = nullptr;
+        scriptList->tail = nullptr;
+        scriptList->length = 0;
+        scriptList->nextScriptId = 0;
+    }
+
+    gScriptsEnumerationScriptIndex = 0;
+    gScriptsEnumerationScriptListExtent = nullptr;
+    gScriptsEnumerationElevation = 0;
+    scriptSelfOverrides.clear();
+}
+
 // 0x4A5C50
 int scriptLoadAll(File* stream)
 {
+    scriptListsFreeAll();
+
     for (int index = 0; index < SCRIPT_TYPE_COUNT; index++) {
         ScriptList* scriptList = &(gScriptLists[index]);
 
         int scriptsCount = 0;
         if (fileReadInt32(stream, &scriptsCount) == -1) {
-            return -1;
+            goto cleanup;
         }
 
         if (scriptsCount != 0) {
@@ -2504,35 +2530,38 @@ int scriptLoadAll(File* stream)
             }
 
             ScriptListExtent* extent = (ScriptListExtent*)internal_malloc(sizeof(*extent));
-            scriptList->head = extent;
-            scriptList->tail = extent;
+
             if (extent == nullptr) {
-                return -1;
+                goto cleanup;
             }
 
+            extent->next = nullptr;
+
+            scriptList->head = extent;
+            scriptList->tail = extent;
+
             if (scriptListExtentRead(extent, stream) != 0) {
-                return -1;
+                goto cleanup;
             }
 
             scriptListExtentClearRuntimeState(extent);
-
-            extent->next = nullptr;
 
             ScriptListExtent* prevExtent = extent;
             for (int extentIndex = 1; extentIndex < scriptList->length; extentIndex++) {
                 ScriptListExtent* extent = (ScriptListExtent*)internal_malloc(sizeof(*extent));
                 if (extent == nullptr) {
-                    return -1;
+                    goto cleanup;
                 }
 
+                extent->next = nullptr;
+
                 if (scriptListExtentRead(extent, stream) != 0) {
-                    return -1;
+                    goto cleanup;
                 }
 
                 scriptListExtentClearRuntimeState(extent);
 
                 prevExtent->next = extent;
-                extent->next = nullptr;
                 prevExtent = extent;
             }
 
@@ -2545,6 +2574,10 @@ int scriptLoadAll(File* stream)
     }
 
     return 0;
+
+cleanup:
+    scriptListsFreeAll();
+    return -1;
 }
 
 // scr_ptr
@@ -2973,7 +3006,7 @@ bool scriptsExecSpatialProc(Object* object, int tile, int elevation)
         return false;
     }
 
-    if ((object->flags & OBJECT_HIDDEN) != 0 || (object->flags & OBJECT_FLAT) != 0) {
+    if ((object->flags & OBJECT_HIDDEN) != OBJECT_NONE || (object->flags & OBJECT_FLAT) != OBJECT_NONE) {
         return false;
     }
 

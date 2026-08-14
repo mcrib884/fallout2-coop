@@ -484,7 +484,7 @@ static void optionsWindowCleanup(bool restoreWorldState)
 // preserveWorldState is always false
 int showPause(bool preserveWorldState)
 {
-    bool gameMouseWasVisible;
+    bool gameMouseWasVisible = false;
     if (!preserveWorldState) {
     // Co-op: the shared world must keep rendering while the ESC menu is open
     // (the menu must not pause anything). isoDisable() would freeze the world

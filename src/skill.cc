@@ -789,9 +789,15 @@ int skillRoll(Object* critter, Skill skill, int modifier, int* howMuch)
         if (critter == gDude) {
             sneaking = dudeHasState(DUDE_STATE_SNEAKING) && dudeIsSneaking();
         } else if (MpProfileIsNetworkPlayer(critter)) {
-            Proto* proto;
-            if (protoGetProto(critter->pid, &proto) == 0) {
-                sneaking = (proto->critter.data.flags & (1 << DUDE_STATE_SNEAKING)) != 0;
+            MpPlayerRuntime* runtime = MpProfileFindRuntimeByObject(critter);
+            if (runtime != nullptr) {
+                sneaking = runtime->profile.sneakWorking != 0
+                    && (runtime->profile.critterFlags & (1 << DUDE_STATE_SNEAKING)) != 0;
+            } else {
+                Proto* proto;
+                if (protoGetProto(critter->pid, &proto) == 0) {
+                    sneaking = (proto->critter.data.flags & (1 << DUDE_STATE_SNEAKING)) != 0;
+                }
             }
         }
         if (sneaking) {
@@ -1004,15 +1010,42 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
         }
 
         if (critterIsDead(target)) {
-            // 512: You can't heal the dead.
-            // 513: Let the dead rest in peace.
-            // 514: It's dead, get over it.
-            messageListItem.num = 512 + randomBetween(0, 2);
-            if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
-                debugPrint(messageListItem.text);
-            }
+            if (gMpActive && gMpIsHost && MpCritterIsDownedPlayer(target)) {
+                int roll = skillRoll(obj, skill, skillOrCritSuccessBonus, &hpToHeal);
+                if (roll == ROLL_SUCCESS || roll == ROLL_CRITICAL_SUCCESS) {
+                    hpToHeal = randomBetween(minimumHpToHeal + 1, maximumHpToHeal + 5);
+                    MpReviveDownedPlayerWithHp(target, hpToHeal);
+                    skillUpdateLastUse(obj, SKILL_FIRST_AID);
+                    char text[256];
+                    snprintf(text, sizeof(text), "%s revives %s with First Aid (+%d HP)!",
+                        objectGetName(obj), objectGetName(target), hpToHeal);
+                    displayMonitorAddMessage(text);
+                    if (mpSkillRemoteNetId(obj) != 0) {
+                        MpCombatSendMonitorMessageToPlayer(mpSkillRemoteNetId(obj), text);
+                    }
+                    uint8_t targetNetId = MpCombatGetCritterPlayerNetId(target);
+                    if (targetNetId != 0 && targetNetId != mpSkillRemoteNetId(obj)) {
+                        MpCombatSendMonitorMessageToPlayer(targetNetId, text);
+                    }
+                    return 0;
+                } else {
+                    messageListItem.num = 503;
+                    if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
+                        mpSkillFeedback(obj, &messageListItem, hpToHeal, 0, 1);
+                    }
+                    return -1;
+                }
+            } else {
+                // 512: You can't heal the dead.
+                // 513: Let the dead rest in peace.
+                // 514: It's dead, get over it.
+                messageListItem.num = 512 + randomBetween(0, 2);
+                if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
+                    debugPrint(messageListItem.text);
+                }
 
-            break;
+                break;
+            }
         }
 
         if (currentHp < maximumHp) {
@@ -1046,6 +1079,15 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                     displayMonitorAddMessage(text);
                 } else if (mpSkillRemoteNetId(obj) != 0) {
                     MpSendSkillUseFeedback(mpSkillRemoteNetId(obj), 500, hpToHeal, 0, 1);
+                }
+
+                if (gMpActive && gMpIsHost && target != obj && target != gDude) {
+                    uint8_t targetNetId = MpCombatGetCritterPlayerNetId(target);
+                    if (targetNetId != 0 && targetNetId != mpSkillRemoteNetId(obj)) {
+                        char targetNotify[256];
+                        snprintf(targetNotify, sizeof(targetNotify), "%s healed you (+%d HP).", objectGetName(obj), hpToHeal);
+                        MpCombatSendMonitorMessageToPlayer(targetNetId, targetNotify);
+                    }
                 }
 
                 target->data.critter.combat.maneuver &= ~CRITTER_MANUEVER_FLEEING;
@@ -1117,14 +1159,46 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
         }
 
         if (critterIsDead(target)) {
-            // 512: You can't heal the dead.
-            // 513: Let the dead rest in peace.
-            // 514: It's dead, get over it.
-            messageListItem.num = 512 + randomBetween(0, 2);
-            if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
-                mpSkillFeedback(obj, &messageListItem, 0, 0, 0);
+            if (gMpActive && gMpIsHost && MpCritterIsDownedPlayer(target)) {
+                int roll = skillRoll(obj, skill, skillOrCritSuccessBonus, &hpToHeal);
+                if (roll == ROLL_SUCCESS || roll == ROLL_CRITICAL_SUCCESS) {
+                    hpToHeal = randomBetween(minimumHpToHeal + 4, maximumHpToHeal + 10);
+                    MpReviveDownedPlayerWithHp(target, hpToHeal);
+                    skillUpdateLastUse(obj, SKILL_DOCTOR);
+                    Dam flags[HEALABLE_DAMAGE_FLAGS_LENGTH];
+                    memcpy(flags, gHealableDamageFlags, sizeof(gHealableDamageFlags));
+                    for (int index = 0; index < HEALABLE_DAMAGE_FLAGS_LENGTH; index++) {
+                        target->data.critter.combat.results &= ~flags[index];
+                    }
+                    char text[256];
+                    snprintf(text, sizeof(text), "%s revives %s with Doctor (+%d HP)!",
+                        objectGetName(obj), objectGetName(target), hpToHeal);
+                    displayMonitorAddMessage(text);
+                    if (mpSkillRemoteNetId(obj) != 0) {
+                        MpCombatSendMonitorMessageToPlayer(mpSkillRemoteNetId(obj), text);
+                    }
+                    uint8_t targetNetId = MpCombatGetCritterPlayerNetId(target);
+                    if (targetNetId != 0 && targetNetId != mpSkillRemoteNetId(obj)) {
+                        MpCombatSendMonitorMessageToPlayer(targetNetId, text);
+                    }
+                    return 0;
+                } else {
+                    messageListItem.num = 503;
+                    if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
+                        mpSkillFeedback(obj, &messageListItem, hpToHeal, 0, 1);
+                    }
+                    return -1;
+                }
+            } else {
+                // 512: You can't heal the dead.
+                // 513: Let the dead rest in peace.
+                // 514: It's dead, get over it.
+                messageListItem.num = 512 + randomBetween(0, 2);
+                if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
+                    mpSkillFeedback(obj, &messageListItem, 0, 0, 0);
+                }
+                break;
             }
-            break;
         }
 
         if (currentHp < maximumHp || critterIsCrippled(target)) {
@@ -1166,6 +1240,15 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
 
                             successCount = 1;
                             skillUseSlotAdded = 1;
+
+                            if (gMpActive && gMpIsHost && target != obj && target != gDude) {
+                                uint8_t targetNetId = MpCombatGetCritterPlayerNetId(target);
+                                if (targetNetId != 0 && targetNetId != mpSkillRemoteNetId(obj)) {
+                                    char targetNotify[256];
+                                    snprintf(targetNotify, sizeof(targetNotify), "%s healed your %s.", objectGetName(obj), messageListItem.text);
+                                    MpCombatSendMonitorMessageToPlayer(targetNetId, targetNotify);
+                                }
+                            }
                         } else {
                             // 525: You fail to heal your %s.
                             // 526: You fail to heal the %s.
@@ -1213,6 +1296,15 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                     MpSendSkillUseFeedback(mpSkillRemoteNetId(obj), 500, hpToHeal, 0, 1);
                 }
 
+                if (gMpActive && gMpIsHost && target != obj && target != gDude) {
+                    uint8_t targetNetId = MpCombatGetCritterPlayerNetId(target);
+                    if (targetNetId != 0 && targetNetId != mpSkillRemoteNetId(obj)) {
+                        char targetNotify[256];
+                        snprintf(targetNotify, sizeof(targetNotify), "%s healed you (+%d HP).", objectGetName(obj), hpToHeal);
+                        MpCombatSendMonitorMessageToPlayer(targetNetId, targetNotify);
+                    }
+                }
+
                 if (!skillUseSlotAdded) {
                     skillUpdateLastUse(obj, SKILL_DOCTOR);
                 }
@@ -1226,7 +1318,9 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                 successCount = 1;
                 _show_skill_use_messages(obj, skill, target, successCount, skillBonus);
                 scriptsExecMapUpdateProc();
-                paletteFadeTo(_cmap);
+                if (mpSkillRemoteNetId(obj) == 0) {
+                    paletteFadeTo(_cmap);
+                }
 
                 giveExp = false;
             } else {
@@ -1402,6 +1496,15 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                     displayMonitorAddMessage(text);
                 } else if (mpSkillRemoteNetId(obj) != 0) {
                     MpSendSkillUseFeedback(mpSkillRemoteNetId(obj), 500, hpToHeal, 0, 1);
+                }
+
+                if (gMpActive && gMpIsHost && target != obj && target != gDude) {
+                    uint8_t targetNetId = MpCombatGetCritterPlayerNetId(target);
+                    if (targetNetId != 0 && targetNetId != mpSkillRemoteNetId(obj)) {
+                        char targetNotify[256];
+                        snprintf(targetNotify, sizeof(targetNotify), "%s repaired you (+%d HP).", objectGetName(obj), hpToHeal);
+                        MpCombatSendMonitorMessageToPlayer(targetNetId, targetNotify);
+                    }
                 }
 
                 if (!skillUseSlotAdded) {

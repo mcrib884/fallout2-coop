@@ -30,6 +30,7 @@
 #include "item.h"
 #include "kb.h"
 #include "lips.h"
+#include "map.h"
 #include "memory.h"
 #include "mouse.h"
 #include "multiplayer.h"
@@ -37,6 +38,7 @@
 #include "object.h"
 #include "party_member.h"
 #include "perk.h"
+#include "platform_compat.h"
 #include "proto.h"
 #include "random.h"
 #include "scripts.h"
@@ -49,6 +51,7 @@
 #include "tile.h"
 #include "touch.h"
 #include "window_manager.h"
+#include "worldmap.h"
 #include "multiplayer_log.h"
 
 namespace fallout {
@@ -828,6 +831,37 @@ void gameDialogEnter(Object* speaker, int mode)
 
     if (speaker->sid == -1) {
         return;
+    }
+
+    // Vanilla bugfix: Ardin Buckner (KCARDIN) requires BOTH GVAR_SMILEY_STATUS == 3
+    // AND LVAR_10 == 1 to trigger Node52b ("You're the one that found my Smiley").
+    // If the player rescued Smiley before accepting the quest from Ardin, LVAR_10
+    // remains 0 (or GVAR stays 1/2), permanently locking her into "Have you found him?".
+    // If Smiley is in Klamath / rescued, ensure GVAR_SMILEY_STATUS = 3 and LVAR_10 = 1.
+    if (speaker->sid != -1) {
+        Script* script = nullptr;
+        if (scriptGetScript(speaker->sid, &script) != -1 && script != nullptr) {
+            char scrName[32]{};
+            if (scriptsGetFileName(script->index, scrName, sizeof(scrName)) != -1) {
+                if (compat_strnicmp(scrName, "kcardin", 7) == 0 || compat_strnicmp(scrName, "kcarden", 7) == 0) {
+                    int smileyStatus = gameGetGlobalVar(GVAR_SMILEY_STATUS);
+                    if (smileyStatus != 4 && (gMapHeader.index == MAP_KLAMATH_1 || gMapHeader.index == MAP_KLAMATH_MALL || smileyStatus >= 1)) {
+                        gameSetGlobalVar(GVAR_SMILEY_STATUS, 3);
+                        ProgramValue pv(1);
+                        scriptSetLocalVar(speaker->sid, 10, pv);
+                        MpLogAlways(MP_LOG_SCRIPT, "auto-repaired Ardin Buckner state: GVAR_SMILEY_STATUS=3, LVAR_10=1");
+                    }
+                } else if (compat_strnicmp(scrName, "kcsmiley", 8) == 0) {
+                    if (gMapHeader.index == MAP_KLAMATH_1 || gMapHeader.index == MAP_KLAMATH_MALL) {
+                        int smileyStatus = gameGetGlobalVar(GVAR_SMILEY_STATUS);
+                        if (smileyStatus != 4 && smileyStatus < 3) {
+                            gameSetGlobalVar(GVAR_SMILEY_STATUS, 3);
+                            MpLogAlways(MP_LOG_SCRIPT, "auto-repaired Smiley in Klamath: GVAR_SMILEY_STATUS=3");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     if (objectTypeFromPid(speaker->pid) != OBJ_TYPE_ITEM && SID_TYPE(speaker->sid) != SCRIPT_TYPE_SPATIAL) {
@@ -2320,6 +2354,39 @@ int gameDialogProcessUI()
 // 0x4468DC
 static void mpDialogNodeReadyCapture(); // defined below (co-op node broadcast)
 
+struct DialogVarsSnapshot {
+    std::vector<int> gvars;
+    std::vector<int> mgvars;
+    std::vector<int> mlvars;
+
+    void capture() {
+        if (gGameGlobalVars != nullptr && gGameGlobalVarsLength > 0) {
+            gvars.assign(gGameGlobalVars, gGameGlobalVars + gGameGlobalVarsLength);
+        }
+        if (gMapGlobalVars != nullptr && gMapGlobalVarsLength > 0) {
+            mgvars.assign(gMapGlobalVars, gMapGlobalVars + gMapGlobalVarsLength);
+        }
+        if (gMapLocalVars != nullptr && gMapLocalVarsLength > 0) {
+            mlvars.assign(gMapLocalVars, gMapLocalVars + gMapLocalVarsLength);
+        }
+    }
+
+    void restore() {
+        if (!gvars.empty() && gGameGlobalVars != nullptr) {
+            size_t count = (size_t)gGameGlobalVarsLength < gvars.size() ? (size_t)gGameGlobalVarsLength : gvars.size();
+            memcpy(gGameGlobalVars, gvars.data(), count * sizeof(int));
+        }
+        if (!mgvars.empty() && gMapGlobalVars != nullptr) {
+            size_t count = (size_t)gMapGlobalVarsLength < mgvars.size() ? (size_t)gMapGlobalVarsLength : mgvars.size();
+            memcpy(gMapGlobalVars, mgvars.data(), count * sizeof(int));
+        }
+        if (!mlvars.empty() && gMapLocalVars != nullptr) {
+            size_t count = (size_t)gMapLocalVarsLength < mlvars.size() ? (size_t)gMapLocalVarsLength : mlvars.size();
+            memcpy(gMapLocalVars, mlvars.data(), count * sizeof(int));
+        }
+    }
+};
+
 int _gdProcessChoice(int optionIndex)
 {
     // FIXME: There is a buffer underread bug when `optionIndex` is -1 (pressing 0 on the
@@ -2375,10 +2442,37 @@ int _gdProcessChoice(int optionIndex)
 
     gGameDialogOptionEntriesLength = 0;
 
+    DialogVarsSnapshot varsSnapshot;
+    varsSnapshot.capture();
+    gMpPartyAddBlockedPid = -1;
+
     if (_gdReenterLevel < 2) {
         if (dialogOptionEntry->proc != 0) {
             programExecuteProcedure(gDialogReplyProgram, dialogOptionEntry->proc);
         }
+    }
+
+    if (gMpPartyAddBlockedPid != -1) {
+        MpLogAlways(MP_LOG_DIALOG, "party add blocked during modal choice pid=0x%X — restoring vars and setting not-leader line",
+            gMpPartyAddBlockedPid);
+        varsSnapshot.restore();
+        gMpPartyAddBlockedPid = -1;
+
+        strncpy(gDialogReplyText, "Sorry, but you're not the party leader.", sizeof(gDialogReplyText) - 1);
+        gDialogReplyText[sizeof(gDialogReplyText) - 1] = '\0';
+        gDialogReplyMessageListId = -4;
+
+        gGameDialogOptionEntriesLength = 1;
+        gDialogOptionEntries[0].messageListId = -2;
+        gDialogOptionEntries[0].messageId = 650;
+        gDialogOptionEntries[0].proc = 0;
+        gDialogOptionEntries[0].reaction = GAME_DIALOG_REACTION_NEUTRAL;
+        gDialogOptionEntries[0].text[0] = '\0';
+
+        mouseShowCursor();
+        _gdProcessUpdate();
+        mpDialogNodeReadyCapture();
+        return 0;
     }
 
     mouseShowCursor();
@@ -2439,24 +2533,15 @@ static int mpDialogDirectorProcessChoice(int optionIndex)
         dialogOptionEntry->proc, (void*)gDialogReplyProgram,
         gDialogReplyProgram != nullptr ? (gDialogReplyProgram->exited ? 1 : 0) : -1,
         gDialogReplyProgram != nullptr ? gDialogReplyProgram->flags : 0u);
-    // Co-op: recruitment side effects (option-gating local vars on the
-    // speaker's script) must be rolled back when the recruit was blocked — a
-    // client's dialogue without the host must not exhaust the recruit option
-    // and softlock the host's own recruitment later (the Smiley case).
-    static int lvSnapshot[256];
-    int lvSnapshotCount = 0;
-    int lvSnapshotOffset = -1;
-    if (gGameDialogSpeaker != nullptr) {
-        Script* lvScript = nullptr;
-        if (scriptGetScript(gGameDialogSpeaker->sid, &lvScript) != -1
-            && lvScript->localVarsCount > 0 && lvScript->localVarsOffset >= 0
-            && lvScript->localVarsCount <= 256) {
-            lvSnapshotCount = lvScript->localVarsCount;
-            lvSnapshotOffset = lvScript->localVarsOffset;
-            memcpy(lvSnapshot, gMapLocalVars + lvSnapshotOffset,
-                sizeof(int) * lvSnapshotCount);
-        }
-    }
+
+    // Co-op: recruitment side effects (global vars, map vars, local vars)
+    // must be rolled back when the recruit was blocked — a client's dialogue
+    // without the host must not exhaust the recruit option and softlock the
+    // host's own recruitment later (e.g. the Smiley / Sulik / companion case).
+    DialogVarsSnapshot varsSnapshot;
+    varsSnapshot.capture();
+    gMpPartyAddBlockedPid = -1;
+
     if (dialogOptionEntry->proc != 0 && gDialogReplyProgram != nullptr) {
         // The talk program may carry stale death flags (a previous dialogue's
         // exit_proc, or an exit that raced the parked session). The director
@@ -2465,13 +2550,26 @@ static int mpDialogDirectorProcessChoice(int optionIndex)
         programExecuteProcedure(gDialogReplyProgram, dialogOptionEntry->proc);
     }
     if (gMpPartyAddBlockedPid != -1) {
-        MpLog(MP_LOG_DIALOG, "party add blocked during director choice pid=0x%X — restoring speaker LVs count=%d",
-            gMpPartyAddBlockedPid, lvSnapshotCount);
-        if (lvSnapshotCount > 0 && lvSnapshotOffset >= 0) {
-            memcpy(gMapLocalVars + lvSnapshotOffset, lvSnapshot,
-                sizeof(int) * lvSnapshotCount);
-        }
+        MpLogAlways(MP_LOG_DIALOG, "party add blocked during director choice pid=0x%X — restoring vars and setting not-leader line",
+            gMpPartyAddBlockedPid);
+        varsSnapshot.restore();
         gMpPartyAddBlockedPid = -1;
+
+        // Force NPC to say: "Sorry, but you're not the party leader."
+        strncpy(gDialogReplyText, "Sorry, but you're not the party leader.", sizeof(gDialogReplyText) - 1);
+        gDialogReplyText[sizeof(gDialogReplyText) - 1] = '\0';
+        gDialogReplyMessageListId = -4;
+
+        // Single [Done] exit option that closes dialogue upon selection
+        gGameDialogOptionEntriesLength = 1;
+        gDialogOptionEntries[0].messageListId = -2; // [Done]
+        gDialogOptionEntries[0].messageId = 650;
+        gDialogOptionEntries[0].proc = 0;
+        gDialogOptionEntries[0].reaction = GAME_DIALOG_REACTION_NEUTRAL;
+        gDialogOptionEntries[0].text[0] = '\0';
+
+        mpDialogNodeReadyCapture();
+        return 0;
     }
     MpLog(MP_LOG_DIALOG, "director choice done before=%u after=%u flags=0x%X postEntries=%d postReplyList=%d ip=%d",
         nodeSeqBefore, MpDialogHostNodeSeq(),

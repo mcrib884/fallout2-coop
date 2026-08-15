@@ -41,6 +41,11 @@ typedef enum MultiplayerState {
 // state, so this gap (12s — far longer than any legitimate silence) means the
 // host process died. ENet's own peer timeout is ~30s.
 #define MP_HOST_DEAD_TIMEOUT_MS 12000
+// A walk that makes no tile progress for this long while short of its target
+// is treated as interrupted (trap/acid script stops can leave the walk
+// animation in limbo without ever reporting idle). Normal walks advance a
+// hex every ~300-600ms, so this is far beyond any legit pause.
+#define MP_WALK_STALL_MS 1500
 
 typedef struct MultiplayerPlayer {
     uint8_t netId;
@@ -71,6 +76,12 @@ typedef struct MultiplayerPlayer {
     // bool is the guard, not the sentinel).
     bool walkInFlight;
     int32_t walkTargetTile;
+    // Host-only walk-stall tracking: the last tile the avatar stood on and
+    // when it changed. A walk that makes no tile progress for a long stretch
+    // while short of the target was interrupted (trap/acid script stop) even
+    // if the animation bookkeeping never reported it idle.
+    int32_t walkLastTile;
+    uint32_t walkLastTileChangeTick;
     int32_t lastSafeTile, lastSafeElevation, lastSafeRotation;
     bool hasSafePosition;
     uint32_t debugCheatFlags;
@@ -80,6 +91,10 @@ typedef struct MultiplayerPlayer {
     // local player only.
     bool downed;
     int32_t downedOrigFid;
+    // client: local dude walk-stall tracking (optimistic walk convergence
+    // when the host stops the avatar mid-path and the interrupt was missed).
+    int32_t localWalkLastTile;
+    uint32_t localWalkLastTileChangeTick;
 } MultiplayerPlayer;
 
 typedef struct MultiplayerSession {
@@ -187,6 +202,12 @@ void MpSendTeleportTo(uint8_t targetNetId);
 // of [targetNetId] and broadcast. Used by the F11 player list (host clicks
 // its own entry) and by the NET_PKT_TELEPORT_TO handler.
 void MpHostTeleportPlayer(uint8_t requesterNetId, uint8_t targetNetId);
+// Host-side party teleport: teleport all connected remote player critters to
+// neighboring tiles around [anchorTile] on [elevation] with [rotation]. Used
+// by scripted teleports (move_to) and party sync so the party stays together.
+void MpHostTeleportPartyToTile(int anchorTile, int elevation, int rotation);
+// Host -> clients: broadcast a palette fade transition (gfade_out / gfade_in).
+void MpBroadcastPaletteFade(bool fadeIn);
 // Per-player addictions: chem use sets the local gvar (shared quest relay is
 // skipped for these) — a client reports its own write to the host, which
 // keeps a per-player overlay; dialogue scripts for a client read the overlay
@@ -318,6 +339,10 @@ int MpOnNetworkedPlayerTransitionRequested(Object* obj, MapTransition* transitio
 // downed state (co-op: players are downed instead of killed)
 bool MpIsCoopPlayerCritter(const Object* critter);
 bool MpPlayerIsDownedByNetId(uint8_t netId);
+bool MpCritterIsDownedPlayer(const Object* critter, MultiplayerPlayer** outPlayer = nullptr);
+bool MpReviveDownedPlayerWithHp(Object* critter, int hp);
+void MpRestoreStandingVisual(Object* critter, int32_t standingFid, bool refreshRect);
+void MpBroadcastPlayerStatus(uint8_t netId, bool downed, int32_t hp);
 // Convert a would-be player death into the downed state (called from
 // critterKill on both sides; the host decides the game-over check).
 void MpPlayerDown(Object* critter);

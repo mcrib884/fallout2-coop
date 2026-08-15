@@ -35,8 +35,9 @@
 #include "interface.h"
 #include "kb.h"
 #include "map.h"
-#include "mouse.h"
+#include "combat.h"
 #include "multiplayer.h"
+#include "multiplayer_combat.h"
 #include "multiplayer_debug.h"
 #include "multiplayer_log.h"
 #include "multiplayer_worldmap.h"
@@ -721,6 +722,13 @@ void mpChatAppendTextInput(const char* utf8)
     gChatInput[len] = '\0';
 }
 
+static bool gMpChatOpen = false;
+
+bool MpChatIsOpen()
+{
+    return gMpChatOpen;
+}
+
 // Shared chat modal runner. transcriptOnly = passive transcript: full
 // history + live appends + scrolling, but no input field, no text capture,
 // no send keys, and an idle auto-close (MP_CHAT_TRANSCRIPT_IDLE_MS) so it
@@ -761,6 +769,8 @@ static int mpChatRunModal(bool transcriptOnly)
     gChatWindow = win;
     gChatScroll = 0;
     gChatInput[0] = '\0';
+    gMpChatOpen = true;
+    bool gChatOpenedInCombat = isInCombat() || MpCombatIsActive();
 
     MpLog(MP_LOG_CHAT, "open %s x=%d y=%d w=%d h=%d",
         transcriptOnly ? "transcript" : "full", winX, winY, winWidth, winHeight);
@@ -775,6 +785,13 @@ static int mpChatRunModal(bool transcriptOnly)
     bool keepGoing = true;
     while (gChatWindow == win && keepGoing) {
         sharedFpsLimiter.mark();
+        if (!transcriptOnly && !gChatOpenedInCombat
+            && (isInCombat() || MpCombatIsActive() || gMpCombat.pendingStart
+                || scriptsCombatRequestPending())) {
+            MpLog(MP_LOG_CHAT, "closing chat (combat initiated)");
+            keepGoing = false;
+            break;
+        }
 
         // The chat reads SDL events directly (text input + physical scan
         // codes) because the engine's logical-key tables are US-scancode
@@ -915,6 +932,7 @@ static int mpChatRunModal(bool transcriptOnly)
 
     windowDestroy(win);
     gChatWindow = -1;
+    gMpChatOpen = false;
     delete[] gChatBackground;
     gChatBackground = nullptr;
     MpLog(MP_LOG_CHAT, "close %s input='%s' sent=%d",

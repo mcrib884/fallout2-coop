@@ -19,6 +19,7 @@ constexpr int kLanBrowserHeight = 300;
 // caller must then leave the menu stack so the game takes over; returns 0 on
 // cancel.
 int MpLanBrowserShow(int x, int y);
+bool MpLanBrowserIsOpen();
 
 } // namespace fallout
 

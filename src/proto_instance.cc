@@ -1237,32 +1237,49 @@ static UseItemResultCode _protinst_default_use_item(Object* user, Object* target
         }
 
         if (critterIsDead(targetObj)) {
-            // 583: To your dismay, you realize that it is already dead.
-            // 584: As you reach down, you realize that it is already dead.
-            // 585: Alas, you are too late.
-            // 586: That won't work on the dead.
-            messageListItem.num = 583 + randomBetween(0, 3);
-            if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
+            if (gMpActive && gMpIsHost && MpCritterIsDownedPlayer(targetObj)) {
+                // Co-op: allow medical aid on downed players to revive them.
+            } else {
+                // 583: To your dismay, you realize that it is already dead.
+                // 584: As you reach down, you realize that it is already dead.
+                // 585: Alas, you are too late.
+                // 586: That won't work on the dead.
+                messageListItem.num = 583 + randomBetween(0, 3);
+                if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
+                    displayMonitorAddMessage(messageListItem.text);
+                }
+                return USE_ITEM_RESULT_ERROR;
             }
-            return USE_ITEM_RESULT_ERROR;
         }
 
         rc = drugItemTakeDrug(targetObj, item);
 
-        if (user == gDude && targetObj != gDude) {
-            // TODO: Looks like there is bug in this branch, message 580 will never be shown,
-            // as we can only be here when target is not dude.
+        if (user != nullptr && targetObj != nullptr) {
+            if (targetObj != user) {
+                // 581: You use the %s on %s.
+                messageListItem.num = 581;
+                if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
+                    snprintf(formattedText, sizeof(formattedText), messageListItem.text, objectGetName(item), objectGetName(targetObj));
+                    displayMonitorAddMessage(formattedText);
+                }
 
-            // 580: You use the %s.
-            // 581: You use the %s on %s.
-            messageListItem.num = 580 + (targetObj != gDude);
-            if (!messageListGetItem(&gProtoMessageList, &messageListItem)) {
-                return USE_ITEM_RESULT_ERROR;
+                // If target is another player, notify them on their screen.
+                if (gMpActive && gMpIsHost && targetObj != gDude) {
+                    uint8_t targetNetId = MpCombatGetCritterPlayerNetId(targetObj);
+                    if (targetNetId != 0 && targetNetId <= NET_MAX_PLAYERS) {
+                        char targetNotify[256];
+                        snprintf(targetNotify, sizeof(targetNotify), "%s used %s on you.", objectGetName(user), objectGetName(item));
+                        MpCombatSendMonitorMessageToPlayer(targetNetId, targetNotify);
+                    }
+                }
+            } else if (user == gDude) {
+                // 580: You use the %s.
+                messageListItem.num = 580;
+                if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
+                    snprintf(formattedText, sizeof(formattedText), messageListItem.text, objectGetName(item));
+                    displayMonitorAddMessage(formattedText);
+                }
             }
-
-            snprintf(formattedText, sizeof(formattedText), messageListItem.text, objectGetName(item), objectGetName(targetObj));
-            displayMonitorAddMessage(formattedText);
         }
 
         if (targetObj == gDude) {
@@ -1422,6 +1439,10 @@ UseItemResultCode objectUseItemOn(Object* user, Object* targetObj, Object* item)
         if (user != nullptr) {
             ObjectFlags flags = item->flags & OBJECT_IN_ANY_HAND;
             itemRemoveWithReason(user, item, 1, RemoveInventoryObjectHookReason::UseDrugOn);
+
+            if (gMpActive && gMpIsHost && user != gDude) {
+                MpHostMirrorItemRemoval(user, item, 1);
+            }
 
             Object* replacedItem = itemReplace(user, item, flags);
 

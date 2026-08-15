@@ -381,13 +381,12 @@ int partyMemberAdd(Object* object)
     // companions to the host's party. When the host is present in the dialogue
     // (hostParticipant, director mode off) and in non-dialogue script paths
     // (quest events), recruitment works exactly as vanilla.
-    if (gMpActive && gMpIsHost && MpDialogDirectorMode()) {
+    if (gMpActive && gMpIsHost && (!MpDialogHostIsParticipant() && (MpDialogDirectorMode() || MpDialogHostActive()))) {
         MpLogAlways(MP_LOG_DIALOG,
             "party add blocked (client dialogue, host absent) pid=0x%X",
             object != nullptr ? object->pid : 0);
         // Note the block so the director-choice executor can roll back the
-        // speaker script's local-var side effects — otherwise the recruit
-        // option's condition stays spent and the host can never recruit.
+        // speaker script's vars and present the 'not party leader' line.
         gMpPartyAddBlockedPid = object != nullptr ? object->pid : -1;
         return -1;
     }
@@ -838,6 +837,10 @@ int _partyMemberSyncPosition()
             distance++;
             n++;
         }
+    }
+
+    if (gMpActive && gMpIsHost && gDude != nullptr) {
+        MpHostTeleportPartyToTile(gDude->tile, gDude->elevation, gDude->rotation);
     }
 
     return 0;

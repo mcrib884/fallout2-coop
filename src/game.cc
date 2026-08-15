@@ -693,13 +693,11 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
     case KEY_UPPERCASE_T:
     case KEY_LOWERCASE_T:
         // Co-op chat: the combat log extended into a full chat. T opens it
-        // in and out of combat; the modal blocks and pumps the network, and
-        // Enter sends the typed line. Vanilla never binds T in world mode,
-        // and the modal contexts that do bind T (dialogue, barter,
-        // character creation) never route keys through this dispatcher. The
-        // modal resets the engine's key-repeat table on close so a T
+        // in and out of combat (even while waiting for a turn); the modal
+        // blocks and pumps the network, and Enter sends the typed line.
+        // The modal resets the engine's key-repeat table on close so a T
         // keyup swallowed by the modal can never feed a phantom reopen.
-        if (gDude != nullptr && interfaceBarEnabled()) {
+        if (gDude != nullptr) {
             MpChatShow();
         }
         break;
@@ -1096,6 +1094,12 @@ int gameSetGlobalVar(GameGlobalVar var, int value)
                 displayMonitorAddMessage(formattedMessage);
             }
         }
+    }
+
+    // Vanilla bugfix: Prevent Ardin's script from regressing Smiley quest state
+    // from 2/3 (rescued/returned) back to 1 (seeking) if player rescued Smiley first.
+    if (var == GVAR_SMILEY_STATUS && value == 1 && gGameGlobalVars[var] >= 2 && gGameGlobalVars[var] != 4) {
+        value = gGameGlobalVars[var];
     }
 
     gGameGlobalVars[var] = value;

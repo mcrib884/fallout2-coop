@@ -9,6 +9,7 @@ namespace fallout {
 // while it is up (MpTick), so incoming lines appear live. Returns 1 when a
 // message was sent, 0 when it was dismissed without sending.
 int MpChatShow();
+bool MpChatIsOpen();
 
 // Open the transcript-only chat modal: the full history, live appends, and
 // scrolling — but no input field, no text capture, no send keys (ESC closes;

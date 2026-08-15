@@ -216,6 +216,7 @@ int _scripts_clear_combat_requests(Script* script);
 int scriptsHandleRequests();
 bool scriptsHandlePendingEndgameSlideshow();
 int _scripts_check_state_in_combat();
+bool scriptsCombatRequestPending();
 int scriptsRequestCombat(CombatStartData* combat);
 void _scripts_request_combat_locked(CombatStartData* combat);
 void scripts_request_townmap();

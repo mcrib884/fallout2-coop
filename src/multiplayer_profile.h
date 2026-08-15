@@ -223,10 +223,12 @@ void MpProfileDestroyAllRuntimes();
 bool MpProfileApplyRuntimeUpdate(uint8_t netId, const MpPlayerProfile& profile,
     uint32_t changedSections = 0);
 
-// Host: grant combat XP to every remote player's avatar. Only the avatar's
-// proto experience is bumped — the stored runtime profile is left untouched
-// so the per-tick change detection sees the delta and rebroadcasts the
-// profile, and each client applies the XP through its own level-up path.
+// Host: grant shared XP (combat, quests, scripts, skills) to every remote
+// player's avatar. Only the avatar's proto experience is bumped — the stored
+// runtime profile is left untouched so the per-tick change detection sees
+// the delta and rebroadcasts the profile, and each client applies the XP
+// through its own level-up path.
+void MpProfileGrantExperience(int xp);
 void MpProfileGrantCombatXp(int xp);
 
 // Returns the canonical profile name for a network avatar, or nullptr for a

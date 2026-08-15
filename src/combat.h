@@ -37,6 +37,11 @@ void _combat(CombatStartData* csd);
 // Co-op wrappers around file-static combat machinery.
 void combatAttemptEndCoop();
 void combatShowEndDeniedMessage();
+// Co-op: expose the current combat's participant list. The Kill Hostile
+// cheat filters on ACTUAL combatants — the vanilla hostile team test only
+// applies to combatants, never to every critter on the map.
+int combatGetCombatantCount();
+Object* combatGetCombatant(int index);
 void attackInit(Attack* attack, Object* attacker, Object* defender, HitMode hitMode, HitLocation hitLocation);
 int _combat_attack(Object* attacker, Object* defender, HitMode hitMode, HitLocation hitLocation);
 int _combat_bullet_start(const Object* attacker, const Object* target);

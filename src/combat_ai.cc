@@ -24,6 +24,7 @@
 #include "message.h"
 #include "multiplayer.h"
 #include "multiplayer_combat.h"
+#include "multiplayer_profile.h"
 #include "object.h"
 #include "party_member.h"
 #include "platform_compat.h"
@@ -3590,14 +3591,26 @@ static int adjustPerceptionDistanceForDudeSneak(int maxDistance, Object* target)
         return maxDistance;
     }
 
-    // Co-op: a remote player's avatar sneaks through its proto flag (the
-    // gDude state helpers are singleplayer-scoped). The flag-only branch
-    // applies - the "attempting sneak" 2/3 perception reduction.
+    // Co-op: a remote player's avatar sneaks through its profile runtime state.
     if (gMpActive && MpCombatIsPlayerCritter(target)) {
-        Proto* proto;
-        if (protoGetProto(target->pid, &proto) == 0
-            && (proto->critter.data.flags & (1 << DUDE_STATE_SNEAKING)) != 0) {
-            maxDistance = maxDistance * 2 / 3;
+        MpPlayerRuntime* runtime = MpProfileFindRuntimeByObject(target);
+        if (runtime != nullptr) {
+            bool isAttemptingSneak = (runtime->profile.critterFlags & (1 << DUDE_STATE_SNEAKING)) != 0;
+            if (runtime->profile.sneakWorking != 0 && isAttemptingSneak) {
+                int sneak = runtime->profile.skills[SKILL_SNEAK];
+                maxDistance /= 4;
+                if (sneak > 120) {
+                    maxDistance -= 1;
+                }
+            } else if (isAttemptingSneak) {
+                maxDistance = maxDistance * 2 / 3;
+            }
+        } else {
+            Proto* proto;
+            if (protoGetProto(target->pid, &proto) == 0
+                && (proto->critter.data.flags & (1 << DUDE_STATE_SNEAKING)) != 0) {
+                maxDistance = maxDistance * 2 / 3;
+            }
         }
     }
 

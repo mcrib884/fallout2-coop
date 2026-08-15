@@ -28,6 +28,7 @@
 #include "display_monitor.h"
 #include "game.h"
 #include "game_mouse.h"
+#include "game_sound.h"
 #include "input.h"
 #include "interface.h"
 #include "item.h"
@@ -35,8 +36,10 @@
 #include "map.h"
 #include "memory.h"
 #include "multiplayer.h"
+#include "multiplayer_chat.h"
 #include "multiplayer_debug.h"
 #include "multiplayer_dialog.h"
+#include "multiplayer_lan.h"
 #include "multiplayer_loot.h"
 #include "multiplayer_vote.h"
 #include "multiplayer_log.h"
@@ -57,6 +60,38 @@
 namespace fallout {
 
 MpCombatState gMpCombat = {};
+
+// Host-only: players revived mid-combat may not act until the next round.
+// The round loop skips their turn when the sequence reaches them; the flags
+// clear at the round boundary (combat.cc calls MpCombatNewRound).
+static bool sMpRevivedThisRound[NET_MAX_PLAYERS] = {};
+
+void MpCombatMarkRevivedThisRound(uint8_t netId)
+{
+    if (netId == 0 || netId > NET_MAX_PLAYERS) {
+        return;
+    }
+    sMpRevivedThisRound[netId - 1] = true;
+    MpLog(MP_LOG_COMBAT, "revived this round netId=%u (turn skipped until next round)", netId);
+}
+
+bool MpCombatWasRevivedThisRound(uint8_t netId)
+{
+    if (netId == 0 || netId > NET_MAX_PLAYERS) {
+        return false;
+    }
+    return sMpRevivedThisRound[netId - 1];
+}
+
+void MpCombatNewRound()
+{
+    for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+        if (sMpRevivedThisRound[index]) {
+            MpLog(MP_LOG_COMBAT, "new round clears revived flag netId=%u", index + 1);
+            sMpRevivedThisRound[index] = false;
+        }
+    }
+}
 
 // Max length of a mirrored display-monitor line (including the NUL).
 #define MP_COMBAT_MESSAGE_MAX_LENGTH 255
@@ -337,6 +372,7 @@ void MpCombatOnStarted()
     // never runs when the round is remote — consume the flag here instead.
     gCombatState &= ~COMBAT_STATE_EXIT_REQUESTED;
     mpCombatBroadcast(NET_PKT_COMBAT_STARTED, nullptr, 0);
+    MpBroadcastPlayerStates();
     mpCombatCreateCards();
     MpLog(MP_LOG_COMBAT, "host combat started, STARTED broadcast");
 }
@@ -428,6 +464,17 @@ int MpCombatHostRemoteTurn(Object* critter, uint8_t netId)
             // combat with RETURN (the vanilla enemy check runs here).
             gMpCombat.endRequestPending = true;
             gMpCombat.endRequesterNetId = gMpSession.localNetId;
+        } else if (key == KEY_F11) {
+            if (gDude != nullptr) {
+                soundPlayFile("ib1p1xx1");
+                MpDebugMenuShow();
+            }
+        } else if (key == KEY_UPPERCASE_T || key == KEY_LOWERCASE_T) {
+            if (gDude != nullptr) {
+                MpChatShow();
+            }
+        } else if (key != -1) {
+            gameHandleKey(key, true);
         }
 
         if ((gCombatState & COMBAT_STATE_EXIT_REQUESTED) != 0) {
@@ -575,6 +622,11 @@ static void mpCombatResolveMove(MultiplayerPlayer* player, const NetCombatCmdPay
             MpLog(MP_LOG_COMBAT, "run cancelled sneak netId=%u", player->netId);
         }
     }
+
+    player->walkInFlight = true;
+    player->walkTargetTile = targetTile;
+    player->walkLastTile = critter->tile;
+    player->walkLastTileChangeTick = getTicks();
 
     mpCombatSendMoveResult(player, targetTile, cmd->elevation);
     MpLog(MP_LOG_COMBAT, "move resolved netId=%u tile=%d elev=%d run=%d ap=%d free=%d",
@@ -772,6 +824,37 @@ void MpCombatPump()
     if (gMpIsHost) {
         mpCombatDrainQueue();
         mpCombatDrainEndRequest();
+
+        for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+            MultiplayerPlayer* walker = &gMpSession.players[index];
+            if (!walker->isLocal && walker->isConnected && walker->walkInFlight && walker->obj != nullptr) {
+                bool stalled = walker->obj->tile == walker->walkLastTile
+                    && getTicksSince(walker->walkLastTileChangeTick) >= MP_WALK_STALL_MS;
+                bool walkEnded = animationIsBusy(walker->obj) == 0 || stalled;
+                if (walker->obj->tile != walker->walkLastTile) {
+                    walker->walkLastTile = walker->obj->tile;
+                    walker->walkLastTileChangeTick = getTicks();
+                }
+                if (!walkEnded) {
+                    continue;
+                }
+                walker->walkInFlight = false;
+                if (walker->obj->tile != walker->walkTargetTile) {
+                    NetWalkInterruptedPayload stopPayload;
+                    stopPayload.tile = walker->obj->tile;
+                    stopPayload.elevation = walker->obj->elevation;
+                    NetSendPacket(walker->peer, NET_CHANNEL_RELIABLE,
+                        NET_PKT_WALK_INTERRUPTED, &stopPayload, sizeof(stopPayload));
+                    mpCombatSendMoveResult(walker, walker->obj->tile, walker->obj->elevation);
+                    MpLogAlways(MP_LOG_SYNC,
+                        "combat walk interrupted netId=%u target=%d tile=%d elev=%d stalled=%d busy=%d",
+                        walker->netId, walker->walkTargetTile,
+                        walker->obj->tile, walker->obj->elevation,
+                        stalled ? 1 : 0, animationIsBusy(walker->obj) != 0 ? 1 : 0);
+                }
+            }
+        }
+
         // Co-op cheats: refill after every spend/drain this pump so the state
         // broadcast below carries the refilled values. MpTick does not run in
         // the blocking combat loops, so this is the only per-frame hook there.
@@ -891,6 +974,12 @@ void MpCombatOnStartedPacket()
     // update snaps him hard back to the combat-start tile. Safe here: no
     // combat-flagged sequence can exist yet (isInCombat was false until this
     // packet), so _combat_turn_running cannot go negative.
+    if (gDude != nullptr) {
+        reg_anim_clear(gDude);
+        gDude->x = 0;
+        gDude->y = 0;
+    }
+    MpCombatClearMoveIntent();
     animationStop();
     keyboardReset();
     inputEventQueueReset();
@@ -998,6 +1087,7 @@ void MpCombatOnEndDenied()
     if (!gMpIsClient || !gMpActive) {
         return;
     }
+    gMpCombat.endRequestPending = false;
     combatShowEndDeniedMessage();
     MpLogAlways(MP_LOG_COMBAT, "end denied received");
 }
@@ -1058,6 +1148,7 @@ int MpCombatClientTurnLoop()
     while ((gCombatState & COMBAT_STATE_PLAYER_TURN) != 0) {
         MpCombatPump();
         mpCombatUpdateCards();
+        MpDebugCheatsTick();
 
         if (!gMpCombat.inCombat) {
             rc = -1;
@@ -1071,6 +1162,16 @@ int MpCombatClientTurnLoop()
             break;
         }
         if ((dude->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT | DAM_LOSE_TURN)) != 0) {
+            break;
+        }
+        // The host can end this turn without our TURN_END — a revive drains
+        // all AP and the host moves straight on to the next actor. The next
+        // TURN_START (whoseTurn != us) arriving while our loop still runs is
+        // that signal; without it a Bonus-Move player would sit in a phantom
+        // turn with 0 AP until they press end-turn manually.
+        if (gMpCombat.turnStartPending && gMpCombat.whoseTurn != gMpSession.localNetId) {
+            MpLog(MP_LOG_COMBAT, "client turn over (host moved on) whoseTurn=%u",
+                gMpCombat.whoseTurn);
             break;
         }
 
@@ -1109,6 +1210,7 @@ int MpCombatClientTurnLoop()
 
     gCombatState &= ~COMBAT_STATE_PLAYER_TURN;
     gMpCombat.turnActive = false;
+    gMpCombat.endRequestPending = false;
 
     if (gMpCombat.inCombat) {
         // Turn over, combat still on: fall into the wait posture until the
@@ -1290,7 +1392,6 @@ void MpCombatForceExit()
         keyboardReset();
         inputEventQueueReset();
         interfaceBarEndButtonsHide(true);
-        interfaceBarEndButtonsRenderRedLights();
         // Mirror the vanilla _combat_over HUD restore so the bar returns to
         // its normal out-of-combat state (AP panel, mouse mode, armor class).
         gDude->data.critter.combat.ap = critterGetStat(gDude, STAT_MAXIMUM_ACTION_POINTS);
@@ -1301,6 +1402,11 @@ void MpCombatForceExit()
         // hover/combat highlights survive the ENDED packet.
         _combat_outline_off();
         interfaceRenderActionPoints(0, 0);
+        InterfaceItemAction leftItemAction;
+        InterfaceItemAction rightItemAction;
+        interfaceGetItemActions(&leftItemAction, &rightItemAction);
+        interfaceUpdateItems(true, leftItemAction, rightItemAction);
+        interfaceBarRefresh();
         gameUiEnable();
         // gameUiEnable restores the interface but never the 2D cursor, and
         // the mirror almost always ends on WAIT_WATCH. Restore the move
@@ -1600,6 +1706,12 @@ void MpCombatTick()
         // attacked critter second. _combat blocks for the whole fight, so a
         // stack csd is valid for its entire duration.
         if (gMpCombat.pendingStart) {
+            if (MpDebugMenuIsOpen() || MpChatIsOpen() || MpLanBrowserIsOpen() || MpLootSessionOpen()) {
+                // Do not enter _combat synchronously while nested inside a modal background pump.
+                // The open modal will detect pendingStart and close itself;
+                // this start will execute on the next top-level main game loop tick.
+                return;
+            }
             gMpCombat.pendingStart = false;
             Object* attacker = gPendingStartAttacker;
             uint32_t targetNetId = gPendingStartTargetNetId;
@@ -1640,14 +1752,16 @@ void MpCombatTick()
         }
     } else {
         // Deferred blocking turn (from COMBAT_TURN_START). Never run it while
-        // the client's loot modal is open: MpLootLoopTick pumps MpTick inside
-        // the loot window, so the turn loop would nest inside the modal and
-        // the player would be stuck in the loot screen through the combat.
-        // MpLootLoopTick closes the session when combat turns active, then the
-        // next top-level tick runs the deferred turn here.
+        // any modal is open (loot, debug, chat, lan): the modal loop tick pumps
+        // MpTick inside the modal, so the turn loop would nest inside the modal.
+        // The modal closes when combat turns active, then the next top-level
+        // tick runs the deferred turn here.
         if (gMpCombat.turnStartPending && gMpCombat.inCombat
             && gMpCombat.whoseTurn == gMpSession.localNetId
-            && !MpLootSessionOpen()) {
+            && !MpLootSessionOpen()
+            && !MpDebugMenuIsOpen()
+            && !MpChatIsOpen()
+            && !MpLanBrowserIsOpen()) {
             MpCombatClientTurnLoop();
         }
     }

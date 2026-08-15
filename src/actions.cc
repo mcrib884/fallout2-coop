@@ -1583,7 +1583,7 @@ int actionUseSkill(Object* user, Object* target, Skill skill)
         animationRegisterMoveToObject(performer, target, performer->data.critter.combat.ap, 0);
     } else {
         reg_anim_begin(user == gDude ? ANIMATION_REQUEST_RESERVED : ANIMATION_REQUEST_UNRESERVED);
-        if (target != gDude) {
+        if (target != performer) {
             if (!objectWithinWalkDistance(performer, target)) {
                 animationRegisterRunToObject(performer, target, -1, 0);
             } else {

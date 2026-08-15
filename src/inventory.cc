@@ -1605,6 +1605,21 @@ static int inventoryMessageListFree()
 // 0x46E7B0
 void inventoryOpen()
 {
+    inventoryResetDude();
+
+    debugFilePrint("MP[INVEN]: inventoryOpen dude=%p _inven_dude=%p items=%d inCombat=%d",
+        (void*)gDude, (void*)_inven_dude,
+        _inven_dude != nullptr ? _inven_dude->data.inventory.length : -1,
+        isInCombat() ? 1 : 0);
+    if (_inven_dude != nullptr) {
+        for (int i = 0; i < _inven_dude->data.inventory.length; i++) {
+            Object* it = _inven_dude->data.inventory.items[i].item;
+            debugFilePrint("MP[INVEN]: pre-prep item[%d]: pid=0x%X flags=0x%X qty=%d",
+                i, it != nullptr ? it->pid : 0, it != nullptr ? (int)it->flags : 0,
+                _inven_dude->data.inventory.items[i].quantity);
+        }
+    }
+
     if (isInCombat()) {
         if (gMpActive) {
             MpLog(MP_LOG_COMBAT, "open attempt client=%d invenDudeIsDude=%d cost=%d ap=%d qp=%d",
@@ -2149,6 +2164,8 @@ static void _exit_inventory(bool shouldEnableIso)
         itemAdd(_inven_dude, gInventoryArmor, 1);
     }
 
+    MpSyncCritterWeaponFid(_inven_dude);
+
     gInventoryRightHandItem = nullptr;
     gInventoryArmor = nullptr;
     gInventoryLeftHandItem = nullptr;
@@ -2213,6 +2230,10 @@ static void _exit_inventory(bool shouldEnableIso)
 // 0x46FDF4 display_inventory
 static void _display_inventory(int stackOffset, int dragSlotIndex, int inventoryWindowType)
 {
+    debugFilePrint("MP[INVEN]: display_inventory type=%d stackOffset=%d pudLen=%d leftHand=%p rightHand=%p armor=%p",
+        inventoryWindowType, stackOffset, _pud != nullptr ? _pud->length : -1,
+        (void*)gInventoryLeftHandItem, (void*)gInventoryRightHandItem, (void*)gInventoryArmor);
+
     unsigned char* windowBuffer = windowGetBuffer(gInventoryWindow);
     int pitch;
 
@@ -3166,6 +3187,8 @@ static void _adjust_fid()
 // 0x4717E4 use_inventory_on
 void inventoryOpenUseItemOn(Object* targetObj)
 {
+    inventoryResetDude();
+
     if (inventoryCommonInit() == -1) {
         return;
     }

@@ -1089,18 +1089,16 @@ void _GNW95_process_message()
             keyboardData.key = e.key.keysym.scancode;
             keyboardData.down = (e.key.state & SDL_PRESSED) != 0;
             bool syntheticSfallKey = sfall_kb_consume_synthetic_key_event(keyboardData.key, keyboardData.down);
-            if (!keyboardIsDisabled()) {
-                if (!e.key.repeat && !syntheticSfallKey) {
-                    int keyOverride = sfall_kb_handle_key_pressed(keyboardData.key, keyboardData.down);
-                    if (keyOverride == SDL_SCANCODE_UNKNOWN) {
-                        break;
-                    }
-                    if (keyOverride != -1) {
-                        keyboardData.key = keyOverride;
-                    }
+            if (!e.key.repeat && !syntheticSfallKey) {
+                int keyOverride = sfall_kb_handle_key_pressed(keyboardData.key, keyboardData.down);
+                if (keyOverride == SDL_SCANCODE_UNKNOWN) {
+                    break;
                 }
-                _GNW95_process_key(&keyboardData);
+                if (keyOverride != -1) {
+                    keyboardData.key = keyOverride;
+                }
             }
+            _GNW95_process_key(&keyboardData);
             break;
         }
         case SDL_WINDOWEVENT:
@@ -1140,7 +1138,7 @@ void _GNW95_process_message()
 
     touch_process_gesture();
 
-    if (gProgramIsActive && !keyboardIsDisabled()) {
+    if (gProgramIsActive) {
         // NOTE: Uninline
         int tick = getTicks();
 

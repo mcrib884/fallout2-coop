@@ -322,7 +322,20 @@ static bool captureModelFiles(MpPlayerProfile* profile)
         return true;
     }
 
-    int modelId = profile->prototypeFid & 0xFFF;
+    int modelId = artListIndex(OBJ_TYPE_CRITTER, profile->modelName);
+    if (modelId >= 0 && gArtCritterBaseLength > 0 && modelId < gArtCritterBaseLength) {
+        // Vanilla model: already present in all game installations.
+        // Skip scanning and transmitting 14-16MB of files over the network.
+        profile->modelHash = hashBytes(profile->modelName, strlen(profile->modelName), 0x811C9DC5u);
+        profile->modelFiles.clear();
+        MpLog(MP_LOG_PROFILE, "capture model files skipped (vanilla model) name='%s' modelId=%d hash=%08X",
+            profile->modelName, modelId, profile->modelHash);
+        return true;
+    }
+
+    if (modelId < 0) {
+        modelId = profile->prototypeFid & 0xFFF;
+    }
     std::unordered_set<std::string> seenPaths;
     size_t totalBytes = 0;
     int probed = 0;
@@ -437,7 +450,7 @@ static bool installModelFiles(MpPlayerProfile* profile)
     // files installed under a picked name rendered as the default look).
     {
         int modelId = artListIndex(OBJ_TYPE_CRITTER, profile->modelName);
-        if (modelId >= 0 && modelId < artGetCritterModelCount()) {
+        if (modelId >= 0 && (gArtCritterBaseLength <= 0 || modelId < gArtCritterBaseLength)) {
             profile->localModelIndex = modelId;
             MpLog(MP_LOG_MODEL, "install model by name='%s' index=%d (vanilla, no install)",
                 profile->modelName, modelId);
@@ -1629,15 +1642,21 @@ bool MpProfileBindLocal(uint8_t netId, const MpPlayerProfile& profile, Object* o
         MpLogAlways(MP_LOG_PROFILE, "bind local failed validate netId=%u obj=%p", netId, (void*)object);
         return false;
     }
-    MpProfileDestroyRuntime(netId);
-    MpPlayerRuntime runtime;
-    runtime.profile = profile;
-    runtime.object = object;
-    runtime.syntheticPid = -1;
-    auto inserted = gRuntimes.emplace(netId, std::move(runtime));
-    if (!inserted.second) {
-        MpLogAlways(MP_LOG_PROFILE, "bind local failed duplicate netId=%u", netId);
-        return false;
+    auto it = gRuntimes.find(netId);
+    if (it != gRuntimes.end()) {
+        it->second.profile = profile;
+        it->second.object = object;
+        it->second.syntheticPid = -1;
+    } else {
+        MpPlayerRuntime runtime;
+        runtime.profile = profile;
+        runtime.object = object;
+        runtime.syntheticPid = -1;
+        auto inserted = gRuntimes.emplace(netId, std::move(runtime));
+        if (!inserted.second) {
+            MpLogAlways(MP_LOG_PROFILE, "bind local failed duplicate netId=%u", netId);
+            return false;
+        }
     }
     gObjectToRuntime[object] = netId;
     if (gMpIsClient && netId > 0 && netId <= NET_MAX_PLAYERS) {
@@ -1842,7 +1861,7 @@ bool MpProfileApplyRuntimeUpdate(uint8_t netId, const MpPlayerProfile& profile,
     return true;
 }
 
-void MpProfileGrantCombatXp(int xp)
+void MpProfileGrantExperience(int xp)
 {
     if (xp <= 0 || !gMpIsHost || !gMpActive) {
         return;
@@ -1861,9 +1880,14 @@ void MpProfileGrantCombatXp(int xp)
             continue;
         }
         proto->critter.data.experience += xp;
-        MpLog(MP_LOG_PROFILE, "combat xp granted netId=%u xp=%d total=%d",
+        MpLog(MP_LOG_PROFILE, "xp granted netId=%u xp=%d total=%d",
             player->netId, xp, proto->critter.data.experience);
     }
+}
+
+void MpProfileGrantCombatXp(int xp)
+{
+    MpProfileGrantExperience(xp);
 }
 
 bool MpProfileApplyLocal(const MpPlayerProfile& profile, bool applyPcStats,
@@ -1987,6 +2011,7 @@ bool MpProfileApplyLocal(const MpPlayerProfile& profile, bool applyPcStats,
         // The inventory was rebuilt from the profile — the FID's weapon slot
         // never went through inven_wield, so re-derive it from the hands.
         MpSyncCritterWeaponFid(gDude);
+        inventoryResetDude();
     }
     MpLog(MP_LOG_PROFILE, "apply local done name='%s' items=%zu hp=%d",
         profile.name, profile.inventory.size(), profile.hp);
@@ -2077,18 +2102,6 @@ void MpProfileDestroyRuntime(uint8_t netId)
             mpProfileDestroyObjectItems(runtime.object);
             runtime.object->flags &= ~OBJECT_NO_REMOVE;
             objectDestroy(runtime.object, nullptr);
-        } else {
-            // The LOCAL dude survives gameReset (never destroyed here), but
-            // his session inventory was rebuilt from the profile via
-            // objectCreateWithFidPid, which inserts the items into the world
-            // head list (tile == -1, owner set). Leaving them behind makes
-            // gameReset's _obj_remove_all free them while
-            // gDude->data.inventory still points at the dead slots; the
-            // later _proto_dude_init -> _obj_inven_free then double-frees
-            // them (silent heap fast-fail on Leave). Destroy the item graph
-            // now — children first, slots nulled, length zeroed — so the
-            // vanilla inventory free only frees the items array once.
-            mpProfileDestroyObjectItems(runtime.object);
         }
     }
     if (runtime.syntheticPid != -1) protoRemove(runtime.syntheticPid);

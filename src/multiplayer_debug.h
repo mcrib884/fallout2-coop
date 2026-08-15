@@ -37,6 +37,9 @@ constexpr uint32_t MP_DEBUG_CHEAT_ALL = MP_DEBUG_CHEAT_GOD_MODE
 // only the volatile runtime HP goes through a host command.
 void MpDebugMenuShow();
 
+// Returns true if any F11 debug menu, submenu or picker modal is active.
+bool MpDebugMenuIsOpen();
+
 // Client: request the host to heal this player's avatar (value <= 0 = full).
 void MpDebugSendHeal(int value);
 

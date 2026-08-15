@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "animation.h"
+#include "combat.h"
 #include "color.h"
 #include "debug.h"
 #include "game.h"
@@ -14,6 +14,7 @@
 #include "map.h"
 #include "mouse.h"
 #include "multiplayer.h"
+#include "multiplayer_combat.h"
 #include "multiplayer_menu.h"
 #include "net.h"
 #include "scripts.h"
@@ -23,6 +24,13 @@
 #include "window_manager_private.h"
 
 namespace fallout {
+
+static bool gMpLanBrowserOpen = false;
+
+bool MpLanBrowserIsOpen()
+{
+    return gMpLanBrowserOpen;
+}
 
 namespace {
 
@@ -160,10 +168,20 @@ int MpLanBrowserShow(int x, int y)
     uint32_t lastScanTick = 0;
     bool prevLeftButton = false;
 
+    gMpLanBrowserOpen = true;
+    bool lanOpenedInCombat = isInCombat() || MpCombatIsActive();
+
     int rc = 0;
     bool keepGoing = true;
     while (keepGoing) {
         sharedFpsLimiter.mark();
+        if (!lanOpenedInCombat
+            && (isInCombat() || MpCombatIsActive() || gMpCombat.pendingStart
+                || scriptsCombatRequestPending())) {
+            MpLog(MP_LOG_UI, "closing lan browser (combat initiated)");
+            keepGoing = false;
+            break;
+        }
 
         // Rescan on open and every ~2s so new hosts appear without a click.
         uint32_t now = getTicks();
@@ -322,6 +340,7 @@ int MpLanBrowserShow(int x, int y)
     }
 
     windowDestroy(win);
+    gMpLanBrowserOpen = false;
 
     if (rc == -1 && selected >= 0 && selected < hostCount) {
         const NetLanHostInfo* host = &hosts[selected];

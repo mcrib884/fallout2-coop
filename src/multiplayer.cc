@@ -216,7 +216,9 @@ static void mpDebugDumpWalls(const char* tag, int limit);
 static void mpDebugSnapshotPreSyncWalls();
 static void mpDebugReportMissingWalls();
 static MultiplayerPlayer* mpPlayerFindByPeer(ENetPeer* peer);
+static bool mpIsTileSafeAndWalkable(int tile, int elevation);
 static int mpFindPlayerSpawnTile(int preferredTile, int elevation);
+static int mpRandomSpawnAnchor(int preferredTile, int elevation);
 static void mpRefreshLanReply();
 static void mpBuildMapSyncPayload(NetMapSyncPayload* payload);
 static bool mpSendProfile(ENetPeer* peer, uint8_t netId, uint32_t objNetId,
@@ -1029,8 +1031,8 @@ static void mpBuildMapSyncPayload(NetMapSyncPayload* payload)
     payload->enteringTile = gMapHeader.enteringTile;
     payload->enteringElevation = gMapHeader.enteringElevation;
     payload->enteringRotation = gMapHeader.enteringRotation;
-    payload->centerTile = gCenterTile;
-    payload->elevation = gElevation;
+    payload->centerTile = (gDude != nullptr && hexGridTileIsValid(gDude->tile)) ? gDude->tile : gCenterTile;
+    payload->elevation = (gDude != nullptr && elevationIsValid(gDude->elevation)) ? gDude->elevation : gElevation;
     payload->flags = gMapHeader.flags;
     payload->darkness = gMapHeader.darkness;
     // The client's map script may not apply the same ambient (its script
@@ -1136,6 +1138,7 @@ static int mpClientLoadMap(const NetMapSyncPayload* payload)
     }
     gMpClientDeferMapEnterScript = false;
     mpSetDudeInventoryProtected(false);
+    inventoryResetDude();
     MpLog(MP_LOG_SYNC, "after map load: rc=%d dude=%p pid=0x%X pt=%d tile=%d elev=%d hidden=%d st=%d carry=%d weight=%d",
         rc, (void*)gDude,
         gDude != nullptr ? gDude->pid : 0,
@@ -1328,22 +1331,24 @@ static void mpClientTryFinishMapSync()
     // map file's default entering tile (which can be anywhere in the map).
     if (gDude != nullptr && gMpSession.clientMapMetadataValid) {
         const NetMapSyncPayload* spawnMeta = &gMpSession.clientMapMetadata;
-        int spawnTile = hexGridTileIsValid(spawnMeta->enteringTile)
-            ? spawnMeta->enteringTile
-            : gDude->tile;
-        int spawnElev = elevationIsValid(spawnMeta->enteringElevation)
-            ? spawnMeta->enteringElevation
-            : gDude->elevation;
+        int spawnTile = hexGridTileIsValid(spawnMeta->centerTile)
+            ? spawnMeta->centerTile
+            : (hexGridTileIsValid(spawnMeta->enteringTile) ? spawnMeta->enteringTile : gDude->tile);
+        int spawnElev = elevationIsValid(spawnMeta->elevation)
+            ? spawnMeta->elevation
+            : (elevationIsValid(spawnMeta->enteringElevation) ? spawnMeta->enteringElevation : gDude->elevation);
         int spawnRotation = spawnMeta->enteringRotation >= 0
             ? spawnMeta->enteringRotation
             : ROTATION_NE;
         int playerTile = mpFindPlayerSpawnTile(
             mpRandomSpawnAnchor(spawnTile, spawnElev), spawnElev);
-        if (hexGridTileIsValid(playerTile)) {
-            MpLog(MP_LOG_SYNC, "client spawn placed tile=%d elev=%d (host entering %d/%d)",
+        if (hexGridTileIsValid(playerTile) && elevationIsValid(spawnElev)) {
+            MpLog(MP_LOG_SYNC, "client spawn placed tile=%d elev=%d (host anchor %d/%d)",
                 playerTile, spawnElev, spawnTile, spawnElev);
             objectSetLocation(gDude, playerTile, spawnElev, nullptr);
             objectSetRotation(gDude, static_cast<Rotation>(spawnRotation), nullptr);
+            mapSetElevation(spawnElev);
+            tileSetCenter(playerTile, TILE_SET_CENTER_REFRESH_WINDOW | TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS);
             mpShowClientPlayer(gDude);
         }
     }
@@ -1777,22 +1782,50 @@ static uint8_t mpAllocPlayerSlot(ENetPeer* peer)
     return 0;
 }
 
+static bool mpIsTileSafeAndWalkable(int tile, int elevation)
+{
+    if (!hexGridTileIsValid(tile) || !elevationIsValid(elevation)) {
+        return false;
+    }
+    if (_square[elevation] == nullptr) {
+        return false;
+    }
+    int squareTile = squareTileFromTile(tile);
+    if (squareTile < 0 || squareTile >= SQUARE_GRID_SIZE) {
+        return false;
+    }
+    // Check floor tile art: FID 1 (or 0) represents the black empty void tile in Fallout 2.
+    int floorFid = _square[elevation]->field_0[squareTile] & 0xFFF;
+    if (floorFid <= 1) {
+        return false; // Out of bounds void
+    }
+    // Check if tile is blocked by walls, scenery, or critters.
+    if (_obj_blocking_at(nullptr, tile, elevation) != nullptr) {
+        return false;
+    }
+    // Check if tile is occupied by any other object.
+    if (_obj_occupied(tile, elevation)) {
+        return false;
+    }
+    return true;
+}
+
 static int mpFindPlayerSpawnTile(int preferredTile, int elevation)
 {
-    if (hexGridTileIsValid(preferredTile) && !_obj_occupied(preferredTile, elevation)) {
+    if (mpIsTileSafeAndWalkable(preferredTile, elevation)) {
         return preferredTile;
     }
 
-    for (int distance = 1; distance <= 3; distance++) {
+    for (int distance = 1; distance <= 5; distance++) {
         for (Rotation rotation = ROTATION_FIRST; rotation < ROTATION_COUNT; rotation++) {
             int tile = tileGetTileInDirection(preferredTile, rotation, distance);
-            if (hexGridTileIsValid(tile) && !_obj_occupied(tile, elevation)) {
+            if (mpIsTileSafeAndWalkable(tile, elevation)) {
                 return tile;
             }
         }
     }
 
-    return preferredTile;
+    return hexGridTileIsValid(preferredTile) ? preferredTile : gCenterTile;
 }
 
 // Randomize a spawn anchor within a small radius (1-2 hexes in a random
@@ -1808,7 +1841,7 @@ static int mpRandomSpawnAnchor(int preferredTile, int elevation)
         Rotation rotation = static_cast<Rotation>(randomBetween(0, ROTATION_COUNT - 1));
         int distance = randomBetween(1, 2);
         int tile = tileGetTileInDirection(preferredTile, rotation, distance);
-        if (hexGridTileIsValid(tile) && !_obj_occupied(tile, elevation)) {
+        if (mpIsTileSafeAndWalkable(tile, elevation)) {
             return tile;
         }
     }
@@ -2413,7 +2446,7 @@ static void mpHostSyncProfiles()
         // identity (hash) only.
         uint32_t changedSections = 0;
         for (int sectionId = PROFILE_SECTION_IDENTITY;
-            sectionId <= PROFILE_SECTION_SKILL_USE; sectionId++) {
+            sectionId <= PROFILE_SECTION_INVENTORY; sectionId++) {
             if (MpProfileSectionChanged(captured, stored, (uint8_t)sectionId)) {
                 changedSections |= (1u << (sectionId - 1));
             }
@@ -2522,7 +2555,7 @@ static void mpClientSyncLocalProfile()
 
     uint32_t changedSections = 0;
     for (int sectionId = PROFILE_SECTION_IDENTITY;
-        sectionId <= PROFILE_SECTION_SKILL_USE; sectionId++) {
+        sectionId <= PROFILE_SECTION_INVENTORY; sectionId++) {
         if (MpProfileSectionChanged(captured, gMpLastUploadedProfile,
                 (uint8_t)sectionId)) {
             changedSections |= (1u << (sectionId - 1));
@@ -3093,25 +3126,40 @@ void MpTick()
         // tile and then teleport back; tell it to stop and snap now. Only
         // meaningful while no combat is running (combat movement goes through
         // the AP-gated intent path, which never sets walkInFlight).
+        //
+        // A walk can also be interrupted WITHOUT the animation bookkeeping
+        // ever reporting idle (a trap/acid script stop can leave the walk
+        // sequence in limbo, never completing). A stall fallback catches it:
+        // no tile progress for a long stretch while short of the target means
+        // the avatar is stopped, whatever the animation state says.
         if (!MpCombatIsActive()) {
             for (int index = 1; index < NET_MAX_PLAYERS; index++) {
                 MultiplayerPlayer* walker = &gMpSession.players[index];
                 if (!walker->isConnected || !walker->walkInFlight || walker->obj == nullptr) {
                     continue;
                 }
-                if (animationIsBusy(walker->obj) == 0) {
-                    walker->walkInFlight = false;
-                    if (walker->obj->tile != walker->walkTargetTile) {
-                        NetWalkInterruptedPayload stopPayload;
-                        stopPayload.tile = walker->obj->tile;
-                        stopPayload.elevation = walker->obj->elevation;
-                        NetSendPacket(walker->peer, NET_CHANNEL_RELIABLE,
-                            NET_PKT_WALK_INTERRUPTED, &stopPayload, sizeof(stopPayload));
-                        MpLogAlways(MP_LOG_SYNC,
-                            "walk interrupted netId=%u target=%d tile=%d elev=%d",
-                            walker->netId, walker->walkTargetTile,
-                            walker->obj->tile, walker->obj->elevation);
-                    }
+                bool stalled = walker->obj->tile == walker->walkLastTile
+                    && getTicksSince(walker->walkLastTileChangeTick) >= MP_WALK_STALL_MS;
+                bool walkEnded = animationIsBusy(walker->obj) == 0 || stalled;
+                if (walker->obj->tile != walker->walkLastTile) {
+                    walker->walkLastTile = walker->obj->tile;
+                    walker->walkLastTileChangeTick = getTicks();
+                }
+                if (!walkEnded) {
+                    continue;
+                }
+                walker->walkInFlight = false;
+                if (walker->obj->tile != walker->walkTargetTile) {
+                    NetWalkInterruptedPayload stopPayload;
+                    stopPayload.tile = walker->obj->tile;
+                    stopPayload.elevation = walker->obj->elevation;
+                    NetSendPacket(walker->peer, NET_CHANNEL_RELIABLE,
+                        NET_PKT_WALK_INTERRUPTED, &stopPayload, sizeof(stopPayload));
+                    MpLogAlways(MP_LOG_SYNC,
+                        "walk interrupted netId=%u target=%d tile=%d elev=%d stalled=%d busy=%d",
+                        walker->netId, walker->walkTargetTile,
+                        walker->obj->tile, walker->obj->elevation,
+                        stalled ? 1 : 0, animationIsBusy(walker->obj) != 0 ? 1 : 0);
                 }
             }
         }
@@ -3659,6 +3707,8 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                         // interruption.
                         p->walkInFlight = true;
                         p->walkTargetTile = finalTile;
+                        p->walkLastTile = p->obj->tile;
+                        p->walkLastTileChangeTick = getTicks();
                     }
                     break;
                 }
@@ -3765,6 +3815,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                     return;
                 }
 
+                MpSetRemoteActionNetId(p->netId);
                 switch (action->action) {
                 case NET_PLAYER_ACTION_INSPECT:
                     // Co-op: run the examine on the host (authoritative script
@@ -3894,6 +3945,7 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
                 default:
                     break;
                 }
+                MpSetRemoteActionNetId(0);
                 break;
             }
             case NET_PKT_DISCONNECT: {
@@ -4626,6 +4678,19 @@ static void mpOnNetEvent(ENetPeer* peer, int eventType, const void* data, size_t
             }
             break;
         }
+        case NET_PKT_PALETTE_FADE: {
+            if (payloadLen != sizeof(NetPaletteFadePayload)) {
+                return;
+            }
+            const NetPaletteFadePayload* f = (const NetPaletteFadePayload*)payload;
+            MpLog(MP_LOG_SYNC, "palette fade received fadeIn=%d", f->fadeType);
+            if (f->fadeType != 0) {
+                paletteFadeTo(_cmap);
+            } else {
+                paletteFadeTo(gPaletteBlack);
+            }
+            break;
+        }
         case NET_PKT_ITEM_REMOVE: {
             if (payloadLen != sizeof(NetItemRemovePayload)) {
                 return;
@@ -4883,21 +4948,28 @@ void MpHostTeleportPlayer(uint8_t requesterNetId, uint8_t targetNetId)
     }
     MpLog(MP_LOG_UI, "teleport player=%u to player=%u tile=%d elev=%d",
         requesterNetId, targetNetId, target->obj->tile, target->obj->elevation);
+    int destTile = mpFindPlayerSpawnTile(mpRandomSpawnAnchor(target->obj->tile, target->obj->elevation), target->obj->elevation);
+    if (!hexGridTileIsValid(destTile)) {
+        destTile = target->obj->tile;
+    }
     reg_anim_clear(requester->obj);
     gMpSuppressExitGridCheck = true;
-    objectSetLocation(requester->obj, target->obj->tile, target->obj->elevation, nullptr);
+    objectSetLocation(requester->obj, destTile, target->obj->elevation, nullptr);
     objectSetRotation(requester->obj, target->obj->rotation, nullptr);
     gMpSuppressExitGridCheck = false;
-    requester->lastSafeTile = target->obj->tile;
+    requester->lastSafeTile = destTile;
     requester->lastSafeElevation = target->obj->elevation;
     requester->lastSafeRotation = target->obj->rotation;
+    if (requester->obj == gDude) {
+        tileSetCenter(destTile, 0);
+    }
     MpBroadcastPlayerStates();
     // Reliable ack with the resolved destination so the requester's client
     // snaps + centers the camera even if the unreliable state broadcast lags.
     if (requester->peer != nullptr) {
         NetTeleportToPayload ack;
         ack.targetNetId = requesterNetId;
-        ack.tile = target->obj->tile;
+        ack.tile = destTile;
         ack.elevation = target->obj->elevation;
         NetSendPacket(requester->peer, NET_CHANNEL_RELIABLE,
             NET_PKT_TELEPORT_TO, &ack, sizeof(ack));
@@ -4925,6 +4997,62 @@ void MpSendTeleportTo(uint8_t targetNetId)
     p.targetNetId = targetNetId;
     NetSendPacket(gMpSession.hostPeer, NET_CHANNEL_RELIABLE, NET_PKT_TELEPORT_TO, &p, sizeof(p));
     MpLog(MP_LOG_UI, "teleport request sent target=%u", targetNetId);
+}
+
+void MpHostTeleportPartyToTile(int anchorTile, int elevation, int rotation)
+{
+    if (!gMpIsHost || !gMpActive) {
+        return;
+    }
+    if (!hexGridTileIsValid(anchorTile) || !elevationIsValid(elevation)) {
+        return;
+    }
+    for (int i = 0; i < NET_MAX_PLAYERS; i++) {
+        MultiplayerPlayer* player = &gMpSession.players[i];
+        if (!player->isConnected || player->isLocal || player->obj == nullptr) {
+            continue;
+        }
+        int destTile = mpFindPlayerSpawnTile(mpRandomSpawnAnchor(anchorTile, elevation), elevation);
+        if (!hexGridTileIsValid(destTile)) {
+            destTile = anchorTile;
+        }
+        reg_anim_clear(player->obj);
+        gMpSuppressExitGridCheck = true;
+        objectSetLocation(player->obj, destTile, elevation, nullptr);
+        if (rotation != ROTATION_INVALID && rotation >= 0 && rotation < ROTATION_COUNT) {
+            objectSetRotation(player->obj, (Rotation)rotation, nullptr);
+            player->lastSafeRotation = rotation;
+        }
+        gMpSuppressExitGridCheck = false;
+        player->lastSafeTile = destTile;
+        player->lastSafeElevation = elevation;
+        if (player->peer != nullptr) {
+            NetTeleportToPayload ack;
+            ack.targetNetId = player->netId;
+            ack.tile = destTile;
+            ack.elevation = elevation;
+            NetSendPacket(player->peer, NET_CHANNEL_RELIABLE,
+                NET_PKT_TELEPORT_TO, &ack, sizeof(ack));
+            MpLogAlways(MP_LOG_SYNC, "party teleport sent to netId=%u tile=%d elev=%d",
+                player->netId, destTile, elevation);
+        }
+    }
+    MpBroadcastPlayerStates();
+}
+
+void MpBroadcastPaletteFade(bool fadeIn)
+{
+    if (!gMpIsHost || !gMpActive || gMpSession.enetHost == nullptr) {
+        return;
+    }
+    NetPaletteFadePayload p;
+    p.fadeType = fadeIn ? 1 : 0;
+    p.reserved[0] = 0;
+    p.reserved[1] = 0;
+    p.reserved[2] = 0;
+    NetBroadcastPacket(gMpSession.enetHost, NET_CHANNEL_RELIABLE,
+        NET_PKT_PALETTE_FADE, &p, sizeof(p));
+    MpLog(MP_LOG_SYNC, "palette fade broadcast fadeIn=%d", fadeIn ? 1 : 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -5123,6 +5251,76 @@ static void mpBroadcastPlayerStatus(uint8_t netId, bool downed, int32_t hp)
         netId, downed ? 1 : 0, hp);
 }
 
+void MpRestoreStandingVisual(Object* critter, int32_t origFid, bool refreshRect)
+{
+    mpRestoreStandingVisual(critter, origFid, refreshRect);
+}
+
+void MpBroadcastPlayerStatus(uint8_t netId, bool downed, int32_t hp)
+{
+    mpBroadcastPlayerStatus(netId, downed, hp);
+}
+
+bool MpCritterIsDownedPlayer(const Object* critter, MultiplayerPlayer** outPlayer)
+{
+    if (!gMpActive || !gMpIsHost || critter == nullptr) {
+        return false;
+    }
+    for (int i = 0; i < NET_MAX_PLAYERS; i++) {
+        MultiplayerPlayer* p = &gMpSession.players[i];
+        if (!p->isConnected) {
+            continue;
+        }
+        Object* pObj = p->obj != nullptr ? p->obj : gDude;
+        if (pObj == critter) {
+            if (outPlayer != nullptr) {
+                *outPlayer = p;
+            }
+            return p->downed || (critter->data.critter.combat.results & DAM_DEAD) != 0;
+        }
+    }
+    return false;
+}
+
+bool MpReviveDownedPlayerWithHp(Object* critter, int hp)
+{
+    if (!gMpActive || !gMpIsHost || critter == nullptr) {
+        return false;
+    }
+    MultiplayerPlayer* targetPlayer = nullptr;
+    if (!MpCritterIsDownedPlayer(critter, &targetPlayer) || targetPlayer == nullptr) {
+        return false;
+    }
+
+    targetPlayer->downed = false;
+    critter->data.critter.combat.results &= ~(DAM_DEAD | DAM_KNOCKED_OUT | DAM_KNOCKED_DOWN | DAM_LOSE_TURN);
+    int maxHp = critterGetStat(critter, STAT_MAXIMUM_HIT_POINTS);
+    if (hp <= 0) {
+        hp = maxHp * 5 / 100;
+        if (hp < 1) {
+            hp = 1;
+        }
+    }
+    if (hp > maxHp) {
+        hp = maxHp;
+    }
+    critter->data.critter.hp = hp;
+    reg_anim_clear(critter);
+    mpRestoreStandingVisual(critter, targetPlayer->downedOrigFid, true);
+    _dude_standup(critter);
+    targetPlayer->downedOrigFid = 0;
+    if (critter == gDude) {
+        interfaceRenderHitPoints(true);
+    }
+    if (MpCombatIsActive()) {
+        MpCombatMarkRevivedThisRound(targetPlayer->netId);
+    }
+    mpBroadcastPlayerStatus(targetPlayer->netId, false, hp);
+    MpLog(MP_LOG_COMBAT, "downed player revived with aid netId=%u hp=%d/%d fid=0x%X",
+        targetPlayer->netId, hp, maxHp, critter->fid);
+    return true;
+}
+
 // Host: every connected player is downed — the game is over. Broadcast and
 // exit through the normal quit path (mainLoop -> gameExit -> MpShutdown ->
 // main menu). The clients follow either via GAME_OVER or the disconnect.
@@ -5226,12 +5424,26 @@ void MpCombatEndReviveDowned()
     }
     for (int i = 0; i < NET_MAX_PLAYERS; i++) {
         MultiplayerPlayer* p = &gMpSession.players[i];
-        if (!p->isConnected || !p->downed) {
+        if (!p->isConnected) {
             continue;
         }
         Object* critter = p->obj != nullptr ? p->obj : gDude;
         if (critter == nullptr) {
             continue;
+        }
+        // A player is downed when the flag says so OR the avatar carries the
+        // downed markers — a kill path that bypassed MpPlayerDown (script
+        // damage, environmental death) leaves DAM_DEAD without the flag, and
+        // the body would stay down forever if only the flag were trusted.
+        bool downed = p->downed
+            || (critter->data.critter.combat.results & DAM_DEAD) != 0;
+        if (!downed) {
+            continue;
+        }
+        if (!p->downed) {
+            MpLogAlways(MP_LOG_COMBAT,
+                "revive by critter state netId=%u (downed flag was not set) pid=0x%X",
+                p->netId, critter->pid);
         }
 
         p->downed = false;
@@ -5332,7 +5544,10 @@ void MpApplyPlayerStatus(const NetPlayerStatusPayload* s)
 
     if (s->netId != gMpSession.localNetId) {
         // Remote player downed/revived — their visual arrives through the
-        // state broadcast; nothing to apply for a non-local avatar.
+        // state broadcast; nothing to apply for a non-local avatar, but keep
+        // the downed flag current so local UI (e.g. the revive click) knows
+        // who is downed.
+        p->downed = s->downed != 0;
         MpLog(MP_LOG_COMBAT, "player status remote netId=%u downed=%d hp=%d",
             s->netId, s->downed, s->hp);
         return;
@@ -6449,7 +6664,13 @@ void MpApplyPlayerState(const NetPlayerStateUpdatePayload* s)
     // range. Yield until the avatar actually reaches the intent tile (or the
     // authoritative move-result packet resolves otherwise).
     int moveIntentTile = -1;
-    const bool moveIntentInFlight = isLocalPlayer && MpCombatHasPendingMoveIntent(&moveIntentTile);
+    bool moveIntentInFlight = isLocalPlayer && MpCombatHasPendingMoveIntent(&moveIntentTile);
+    if (moveIntentInFlight && !localMovementIsActive && s->tile != moveIntentTile) {
+        // The local optimistic movement finished or was interrupted before reaching the intent tile:
+        // Clear the move intent so subsequent state snaps apply immediately.
+        MpCombatClearMoveIntent();
+        moveIntentInFlight = false;
+    }
     const bool moveIntentBlocksSnap = moveIntentInFlight && s->tile != moveIntentTile;
     // The very first state must snap the local player into place (the map
     // reload may have left him at the map's entering tile, off-screen from
@@ -6484,10 +6705,43 @@ void MpApplyPlayerState(const NetPlayerStateUpdatePayload* s)
         // avatars is a host-side walk concern only.
         mpApplyObjectTransform(obj, s->tile, s->x, s->y, s->rotation, s->fid, s->frame, s->elevation, 0, false);
         p->hasLastState = true;
+        if (isLocalPlayer) {
+            if (elevationIsValid(s->elevation) && s->elevation != gElevation) {
+                mapSetElevation(s->elevation);
+                if (hexGridTileIsValid(s->tile)) {
+                    tileSetCenter(s->tile, TILE_SET_CENTER_REFRESH_WINDOW | TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS);
+                }
+            }
+        }
         // The avatar reached the clicked destination: the intent's outcome is
         // fully applied — a later resolution must not snap anything.
         if (moveIntentInFlight && s->tile == moveIntentTile) {
             MpCombatClearMoveIntent();
+        }
+    } else if (isLocalPlayer && localMovementIsActive && !moveIntentBlocksSnap) {
+        // The local dude's optimistic walk is still running. A normal walk
+        // advances a hex every ~300-600ms; if the local tile has NOT changed
+        // for a long stretch AND the authoritative tile disagrees, the walk
+        // is stalled (the host stopped the avatar mid-path — acid/trap/script
+        // interrupt — and the interrupt packet was missed or the local walk
+        // animation never completed). Yielding to prediction would keep the
+        // dude frozen off-tile forever; stop the walk and snap to truth.
+        if (obj->tile != p->localWalkLastTile) {
+            p->localWalkLastTile = obj->tile;
+            p->localWalkLastTileChangeTick = getTicks();
+        } else if (getTicksSince(p->localWalkLastTileChangeTick) >= MP_WALK_STALL_MS
+            && s->tile != obj->tile) {
+            MpLogAlways(MP_LOG_SYNC, "local walk stall snap tile=%d->%d elev=%d (authoritative)",
+                obj->tile, s->tile, s->elevation);
+            if (animationIsBusy(obj) != 0) {
+                reg_anim_clear(obj);
+            }
+            // Zero the pixel offsets like MpOnWalkInterrupted — the cleared
+            // walk's accumulated x/y would otherwise displace the dude from
+            // the snapped tile until the next walk resets them.
+            mpApplyObjectTransform(obj, s->tile, 0, 0, s->rotation, s->fid, 0, s->elevation, 0, false);
+            p->localWalkLastTile = obj->tile;
+            p->localWalkLastTileChangeTick = getTicks();
         }
     }
     if (!isLocalPlayer) {
@@ -6643,15 +6897,18 @@ void MpOnWalkInterrupted(const NetWalkInterruptedPayload* payload)
     }
     MpLogAlways(MP_LOG_SYNC, "walk interrupt snap tile=%d elev=%d busy=%d",
         payload->tile, payload->elevation, animationIsBusy(dude) != 0 ? 1 : 0);
-    if (animationIsBusy(dude) != 0) {
-        reg_anim_clear(dude);
-    }
+    reg_anim_clear(dude);
+    MpCombatClearMoveIntent();
     // Same stale-offset trap as MpApplyLocalDudeSnap: the cleared walk's
     // accumulated obj->x/obj->y would otherwise be re-applied here and leave
     // the dude frozen displaced from the authoritative tile (underground /
     // floating) until his next walk. Snap to the exact tile.
     mpApplyObjectTransform(dude, payload->tile, 0, 0, dude->rotation,
         dude->fid, 0, payload->elevation, 0, false);
+    // Play hurt flinch animation immediately so the damage interruption feels natural.
+    reg_anim_begin(ANIMATION_REQUEST_RESERVED);
+    animationRegisterAnimate(dude, ANIM_HIT_FROM_FRONT, 0);
+    reg_anim_end();
 }
 
 // Co-op: keep a critter's FID weapon slot in sync with the weapon actually in
@@ -7401,6 +7658,10 @@ uint32_t MpGetObjNetId(Object* obj)
             return 0;
         }
         return it->second;
+    }
+
+    if (obj == gDude && gMpSession.localNetId >= 1 && gMpSession.localNetId <= NET_MAX_PLAYERS) {
+        return gMpSession.players[gMpSession.localNetId - 1].objNetId;
     }
 
     if (gMpSession.netIdToObj == nullptr) {

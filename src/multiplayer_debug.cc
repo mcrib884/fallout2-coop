@@ -23,6 +23,7 @@
 #include "map.h"
 #include "mouse.h"
 #include "multiplayer.h"
+#include "multiplayer_combat.h"
 #include "multiplayer_lan.h"
 #include "multiplayer_menu.h"
 #include "multiplayer_perf.h"
@@ -45,6 +46,41 @@
 #include "window_manager_private.h"
 
 namespace fallout {
+
+static int gDbgMenuOpenDepth = 0;
+static bool gDbgOpenedInCombat = false;
+
+bool MpDebugMenuIsOpen()
+{
+    return gDbgMenuOpenDepth > 0;
+}
+
+struct DbgMenuScope {
+    DbgMenuScope() {
+        if (gDbgMenuOpenDepth == 0) {
+            gDbgOpenedInCombat = isInCombat() || MpCombatIsActive();
+        }
+        gDbgMenuOpenDepth++;
+    }
+    ~DbgMenuScope() {
+        gDbgMenuOpenDepth--;
+        if (gDbgMenuOpenDepth == 0) {
+            gDbgOpenedInCombat = false;
+        }
+    }
+};
+
+static bool dbgShouldAutoCloseForCombat()
+{
+    if (gDbgOpenedInCombat) {
+        return false;
+    }
+    if (isInCombat() || MpCombatIsActive() || gMpCombat.pendingStart
+        || scriptsCombatRequestPending()) {
+        return true;
+    }
+    return false;
+}
 
 // Co-op: pump the game behind the debug modals (same pattern as the chat
 // modal). The world, animations, script requests and pending transitions
@@ -115,7 +151,7 @@ constexpr int DBG_BTN_SKIN_MODEL_NEXT = 746;
 constexpr int DBG_BTN_SKIN = 747;
 constexpr int DBG_BTN_NAME = 748;
 constexpr int DBG_BTN_COLOR = 749;
-constexpr int DBG_BTN_CURSOR_RESET = 750;
+constexpr int DBG_BTN_CURSOR_RESET = 622;
 // Multiplayer section (CO-OP SETTINGS): host options + session actions.
 // 751-759 reserved for the skin/cursor pickers; 770+ are picker bases.
 constexpr int DBG_BTN_HOST_MAX = 760;
@@ -139,7 +175,23 @@ constexpr int DBG_BTN_PERK_DEC = 852;
 constexpr int DBG_BTN_PERK_BACK = 853;
 constexpr int DBG_BTN_TRAITS = 621;
 constexpr int DBG_BTN_TRAIT_ROW_BASE = 860; // + 0..15 = the trait list
-constexpr int DBG_BTN_TRAIT_BACK = 861;
+constexpr int DBG_BTN_TRAIT_BACK = 880;
+constexpr int DBG_BTN_GVARS = 623;
+constexpr int DBG_BTN_GVAR_PREV = 960;
+constexpr int DBG_BTN_GVAR_NEXT = 961;
+constexpr int DBG_BTN_GVAR_JUMP_PREV_10 = 962;
+constexpr int DBG_BTN_GVAR_JUMP_NEXT_10 = 963;
+constexpr int DBG_BTN_GVAR_JUMP_PREV_50 = 964;
+constexpr int DBG_BTN_GVAR_JUMP_NEXT_50 = 965;
+constexpr int DBG_BTN_GVAR_DEC = 966;
+constexpr int DBG_BTN_GVAR_INC = 967;
+constexpr int DBG_BTN_GVAR_SET_0 = 968;
+constexpr int DBG_BTN_GVAR_SET_1 = 969;
+constexpr int DBG_BTN_GVAR_SET_2 = 970;
+constexpr int DBG_BTN_GVAR_SET_3 = 971;
+constexpr int DBG_BTN_GVAR_BACK = 972;
+
+#include "gvar_names_table.inl"
 
 constexpr int kDbgWindowWidth = 460;
 constexpr int kDbgWindowHeight = 305;
@@ -189,6 +241,7 @@ void dbgHeal(int amount)
     }
     if (gMpActive && gMpIsHost) {
         MpDebugApplyHeal(gDude, amount);
+        interfaceRenderHitPoints(true);
         return;
     }
     if (gMpActive && gMpIsClient) {
@@ -214,6 +267,8 @@ void dbgRefillAp()
     }
     if (gMpActive && gMpIsHost) {
         MpDebugApplyApRefill(gDude);
+        int maxAp = critterGetStat(gDude, STAT_MAXIMUM_ACTION_POINTS);
+        interfaceRenderActionPoints(maxAp, _combat_free_move);
         return;
     }
     if (gMpActive && gMpIsClient) {
@@ -221,6 +276,7 @@ void dbgRefillAp()
     }
     int maxAp = critterGetStat(gDude, STAT_MAXIMUM_ACTION_POINTS);
     gDude->data.critter.combat.ap = maxAp;
+    interfaceRenderActionPoints(maxAp, _combat_free_move);
     MpLog(MP_LOG_UI, "ap refill local ap=%d", maxAp);
 }
 
@@ -374,6 +430,7 @@ void dbgApplyCheats(Object* critter, uint32_t flags)
 
 void dbgCheatModal()
 {
+    DbgMenuScope scope;
     // Client gate: the whole cheats area is host-policy controlled — a
     // disabled client cannot even open the toggles.
     if (gMpActive && gMpIsClient && !gDbgClientCheatsEnabled) {
@@ -410,6 +467,11 @@ void dbgCheatModal()
     bool keepGoing = true;
     while (keepGoing) {
         sharedFpsLimiter.mark();
+        if (dbgShouldAutoCloseForCombat()) {
+            MpLog(MP_LOG_UI, "closing cheat toggles (combat initiated)");
+            keepGoing = false;
+            break;
+        }
         windowFill(win, 8, 132, kDbgCheatWindowWidth - 16, 56, COLOR_BLACK);
         char status1[128];
         char status2[128];
@@ -441,11 +503,18 @@ void dbgCheatModal()
         renderPresent();
         dbgPumpGameBehindModal();
         mouseShowCursor();
+        if (dbgShouldAutoCloseForCombat()) {
+            MpLog(MP_LOG_UI, "closing cheat toggles (combat initiated)");
+            keepGoing = false;
+            break;
+        }
 
         int keyCode = inputGetInput();
         switch (keyCode) {
         case KEY_ESCAPE:
             MpLog(MP_LOG_UI, "modal close via ESC menu='cheat-toggles'");
+            keepGoing = false;
+            break;
         case DBG_BTN_CHEAT_BACK:
             keepGoing = false;
             break;
@@ -698,6 +767,10 @@ int dbgSubmenuModal(int win, const SubmenuCallbacks* cb, int current)
     int rc = -1;
     while (rc == -1) {
         sharedFpsLimiter.mark();
+        if (dbgShouldAutoCloseForCombat()) {
+            rc = 0;
+            break;
+        }
 
         // Full-line clear must cover the whole glyph cell (the text at y=30
         // with the 16px default font spans to ~46) — a shorter rect leaves
@@ -725,6 +798,10 @@ int dbgSubmenuModal(int win, const SubmenuCallbacks* cb, int current)
         // modal. No-ops when not in a session.
         dbgPumpGameBehindModal();
         mouseShowCursor();
+        if (dbgShouldAutoCloseForCombat()) {
+            rc = 0;
+            break;
+        }
         int keyCode = inputGetInput();
         switch (keyCode) {
         case KEY_ESCAPE:
@@ -750,6 +827,7 @@ int dbgSubmenuModal(int win, const SubmenuCallbacks* cb, int current)
 // Opens a cycling editor submenu (skills / stats / perks).
 void dbgSubmenuShow(const SubmenuCallbacks* cb)
 {
+    DbgMenuScope scope;
     constexpr int kWidth = kDbgWindowWidth;
     constexpr int kHeight = 185;
     int winX, winY;
@@ -778,10 +856,13 @@ void dbgSubmenuShow(const SubmenuCallbacks* cb)
 
     int current = 0;
     for (;;) {
+        if (dbgShouldAutoCloseForCombat()) {
+            break;
+        }
         int choice = dbgSubmenuModal(win, cb, current);
         MpLog(MP_LOG_UI, "submenu %s choice=%d current=%d name='%s' value=%d",
             cb->title, choice, current, cb->name(current), cb->value(current));
-        if (choice == 0 || choice == DBG_BTN_BACK) {
+        if (choice == 0 || choice == DBG_BTN_BACK || dbgShouldAutoCloseForCombat()) {
             break;
         }
         switch (choice) {
@@ -803,6 +884,173 @@ void dbgSubmenuShow(const SubmenuCallbacks* cb)
     windowDestroy(win);
 }
 
+// Global Variables (GVARS) / Quest state editor submenu
+static void dbgGvarsSubmenuShow()
+{
+    DbgMenuScope scope;
+    constexpr int kWidth = 460;
+    constexpr int kHeight = 240;
+    int winX, winY;
+    dbgCenteredPos(kWidth, kHeight, &winX, &winY);
+
+    int win = windowCreate(winX, winY, kWidth, kHeight, COLOR_BLACK, WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
+    if (win == -1) {
+        return;
+    }
+    windowDrawBorder(win);
+
+    const char* title = "QUESTS & GLOBAL VARIABLES (GVARS)";
+    int titleX = (kWidth - fontGetStringWidth(title)) / 2;
+    windowDrawText(win, title, 0, titleX, 6, COLOR_WHITE);
+
+    _win_register_text_button(win, 30, 60, -1, -1, -1, DBG_BTN_GVAR_PREV, "Prev (-1)", 0);
+    _win_register_text_button(win, 170, 60, -1, -1, -1, DBG_BTN_GVAR_NEXT, "Next (+1)", 0);
+    _win_register_text_button(win, 310, 60, -1, -1, -1, DBG_BTN_GVAR_DEC, "Value -1", 0);
+
+    _win_register_text_button(win, 30, 90, -1, -1, -1, DBG_BTN_GVAR_JUMP_PREV_10, "-10", 0);
+    _win_register_text_button(win, 170, 90, -1, -1, -1, DBG_BTN_GVAR_JUMP_NEXT_10, "+10", 0);
+    _win_register_text_button(win, 310, 90, -1, -1, -1, DBG_BTN_GVAR_INC, "Value +1", 0);
+
+    _win_register_text_button(win, 30, 120, -1, -1, -1, DBG_BTN_GVAR_JUMP_PREV_50, "-50", 0);
+    _win_register_text_button(win, 170, 120, -1, -1, -1, DBG_BTN_GVAR_JUMP_NEXT_50, "+50", 0);
+    _win_register_text_button(win, 310, 120, -1, -1, -1, DBG_BTN_GVAR_SET_0, "Set 0", 0);
+
+    _win_register_text_button(win, 30, 150, -1, -1, -1, DBG_BTN_GVAR_SET_1, "Set 1", 0);
+    _win_register_text_button(win, 170, 150, -1, -1, -1, DBG_BTN_GVAR_SET_2, "Set 2", 0);
+    _win_register_text_button(win, 310, 150, -1, -1, -1, DBG_BTN_GVAR_SET_3, "Set 3", 0);
+
+    _win_register_text_button(win, 30, 185, -1, -1, -1, DBG_BTN_GVAR_BACK, "Back", 0);
+    windowRefresh(win);
+
+    static int current = 197; // Default to GVAR_SMILEY_STATUS (197)
+    if (current < 0 || current >= kDbgGvarCount) {
+        current = 0;
+    }
+
+    char buf[128];
+    for (;;) {
+        if (dbgShouldAutoCloseForCombat()) {
+            break;
+        }
+        int rc = -1;
+        while (rc == -1) {
+            sharedFpsLimiter.mark();
+            if (dbgShouldAutoCloseForCombat()) {
+                rc = 0;
+                break;
+            }
+
+            windowFill(win, 8, 24, kWidth - 16, 26, COLOR_BLACK);
+            int val = 0;
+            if (globalVariableIsValid(current)) {
+                val = gameGetGlobalVar(static_cast<GameGlobalVar>(current));
+            }
+            const char* gname = (current >= 0 && current < kDbgGvarCount) ? kDbgGvarNames[current] : "UNKNOWN_GVAR";
+            snprintf(buf, sizeof(buf), "[%d] %s = %d", current, gname, val);
+            int x = (kWidth - fontGetStringWidth(buf)) / 2;
+            if (x < 10) x = 10;
+            windowDrawText(win, buf, 0, x, 30, COLOR_WHITE);
+            windowRefresh(win);
+
+            windowRefreshAll(&_scr_size);
+            renderPresent();
+
+            dbgPumpGameBehindModal();
+            mouseShowCursor();
+            if (dbgShouldAutoCloseForCombat()) {
+                rc = 0;
+                break;
+            }
+
+            int keyCode = inputGetInput();
+            switch (keyCode) {
+            case KEY_ESCAPE:
+                MpLog(MP_LOG_UI, "modal close via ESC menu='gvars-menu'");
+                rc = 0;
+                break;
+            case DBG_BTN_GVAR_PREV:
+            case DBG_BTN_GVAR_NEXT:
+            case DBG_BTN_GVAR_JUMP_PREV_10:
+            case DBG_BTN_GVAR_JUMP_NEXT_10:
+            case DBG_BTN_GVAR_JUMP_PREV_50:
+            case DBG_BTN_GVAR_JUMP_NEXT_50:
+            case DBG_BTN_GVAR_DEC:
+            case DBG_BTN_GVAR_INC:
+            case DBG_BTN_GVAR_SET_0:
+            case DBG_BTN_GVAR_SET_1:
+            case DBG_BTN_GVAR_SET_2:
+            case DBG_BTN_GVAR_SET_3:
+            case DBG_BTN_GVAR_BACK:
+                rc = keyCode;
+                break;
+            default:
+                break;
+            }
+            sharedFpsLimiter.throttle();
+        }
+
+        if (rc == 0 || rc == DBG_BTN_GVAR_BACK || dbgShouldAutoCloseForCombat()) {
+            break;
+        }
+
+        switch (rc) {
+        case DBG_BTN_GVAR_PREV:
+            current = (current + kDbgGvarCount - 1) % kDbgGvarCount;
+            break;
+        case DBG_BTN_GVAR_NEXT:
+            current = (current + 1) % kDbgGvarCount;
+            break;
+        case DBG_BTN_GVAR_JUMP_PREV_10:
+            current = (current + kDbgGvarCount - 10) % kDbgGvarCount;
+            break;
+        case DBG_BTN_GVAR_JUMP_NEXT_10:
+            current = (current + 10) % kDbgGvarCount;
+            break;
+        case DBG_BTN_GVAR_JUMP_PREV_50:
+            current = (current + kDbgGvarCount - 50) % kDbgGvarCount;
+            break;
+        case DBG_BTN_GVAR_JUMP_NEXT_50:
+            current = (current + 50) % kDbgGvarCount;
+            break;
+        case DBG_BTN_GVAR_DEC:
+            if (globalVariableIsValid(current)) {
+                int curVal = gameGetGlobalVar(static_cast<GameGlobalVar>(current));
+                gameSetGlobalVar(static_cast<GameGlobalVar>(current), curVal - 1);
+            }
+            break;
+        case DBG_BTN_GVAR_INC:
+            if (globalVariableIsValid(current)) {
+                int curVal = gameGetGlobalVar(static_cast<GameGlobalVar>(current));
+                gameSetGlobalVar(static_cast<GameGlobalVar>(current), curVal + 1);
+            }
+            break;
+        case DBG_BTN_GVAR_SET_0:
+            if (globalVariableIsValid(current)) {
+                gameSetGlobalVar(static_cast<GameGlobalVar>(current), 0);
+            }
+            break;
+        case DBG_BTN_GVAR_SET_1:
+            if (globalVariableIsValid(current)) {
+                gameSetGlobalVar(static_cast<GameGlobalVar>(current), 1);
+            }
+            break;
+        case DBG_BTN_GVAR_SET_2:
+            if (globalVariableIsValid(current)) {
+                gameSetGlobalVar(static_cast<GameGlobalVar>(current), 2);
+            }
+            break;
+        case DBG_BTN_GVAR_SET_3:
+            if (globalVariableIsValid(current)) {
+                gameSetGlobalVar(static_cast<GameGlobalVar>(current), 3);
+            }
+            break;
+        }
+    }
+
+    windowDestroy(win);
+    MpLog(MP_LOG_UI, "gvars menu closed");
+}
+
 // Perk editor as a paged list: 3 columns x 14 rows = 42 perks per page;
 // PERK_COUNT (121) fits in 3 pages. The old single-item cycler needed up
 // to 120 clicks to reach the last perk.
@@ -811,6 +1059,7 @@ static void dbgPerkListShow()
     if (gDude == nullptr) {
         return;
     }
+    DbgMenuScope scope;
     constexpr int kPerkCols = 3;
     constexpr int kPerkRows = 14;
     constexpr int kPerkPageSize = kPerkCols * kPerkRows;
@@ -888,14 +1137,26 @@ static void dbgPerkListShow()
     bool keepGoing = true;
     while (keepGoing) {
         sharedFpsLimiter.mark();
+        if (dbgShouldAutoCloseForCombat()) {
+            MpLog(MP_LOG_UI, "closing perks menu (combat initiated)");
+            keepGoing = false;
+            break;
+        }
         // Keep the session alive behind the modal (same pattern as every
         // other debug modal).
         dbgPumpGameBehindModal();
         mouseShowCursor();
+        if (dbgShouldAutoCloseForCombat()) {
+            MpLog(MP_LOG_UI, "closing perks menu (combat initiated)");
+            keepGoing = false;
+            break;
+        }
         int keyCode = inputGetInput();
         switch (keyCode) {
         case KEY_ESCAPE:
             MpLog(MP_LOG_UI, "modal close via ESC menu='perks'");
+            keepGoing = false;
+            break;
         case DBG_BTN_PERK_BACK:
             keepGoing = false;
             break;
@@ -947,6 +1208,7 @@ static void dbgTraitListShow()
     if (gDude == nullptr) {
         return;
     }
+    DbgMenuScope scope;
     constexpr int kTraitCols = 2;
     constexpr int kTraitRows = 8;
     constexpr int kTraitWidth = kDbgWindowWidth;
@@ -1019,12 +1281,24 @@ static void dbgTraitListShow()
     bool keepGoing = true;
     while (keepGoing) {
         sharedFpsLimiter.mark();
+        if (dbgShouldAutoCloseForCombat()) {
+            MpLog(MP_LOG_UI, "closing traits menu (combat initiated)");
+            keepGoing = false;
+            break;
+        }
         dbgPumpGameBehindModal();
         mouseShowCursor();
+        if (dbgShouldAutoCloseForCombat()) {
+            MpLog(MP_LOG_UI, "closing traits menu (combat initiated)");
+            keepGoing = false;
+            break;
+        }
         int keyCode = inputGetInput();
         switch (keyCode) {
         case KEY_ESCAPE:
             MpLog(MP_LOG_UI, "modal close via ESC menu='traits'");
+            keepGoing = false;
+            break;
         case DBG_BTN_TRAIT_BACK:
             keepGoing = false;
             break;
@@ -1088,9 +1362,18 @@ static int dbgKillHostiles()
             Object* whoHitMe = probe->data.critter.combat.whoHitMe;
             bool hostile = false;
             if (inCombat) {
-                // Opposing team among the combatants — the vanilla hostile
-                // test, restricted to an actual fight.
-                hostile = probeTeam != dudeTeam;
+                // Opposing team test applied to ACTUAL combatants only — the
+                // vanilla end-combat check tests the combat list, not every
+                // critter on the map. A friendly NPC (e.g. Smiley) who is
+                // standing nearby with a different team must never count;
+                // only critters fighting in the current combat are hostile.
+                for (int combatIndex = 0;
+                    combatIndex < combatGetCombatantCount(); combatIndex++) {
+                    if (combatGetCombatant(combatIndex) == probe) {
+                        hostile = probeTeam != dudeTeam;
+                        break;
+                    }
+                }
             }
             // Even outside combat, a critter that has attacked the player or
             // a teammate is hostile.
@@ -1113,6 +1396,7 @@ static int dbgKillHostiles()
 // to the local dude in the current quantity. Stays open for repeated grabs.
 static void dbgItemBrowserShow()
 {
+    DbgMenuScope scope;
     // One-time enumeration: FO2 item protos live in the type-0 (item) pid
     // range — pid is the 1-based line index into PROTO\ITEM\ITEM.lst, i.e.
     // plain small integers. (The critter range starts at 0x1000000; that
@@ -1204,12 +1488,24 @@ static void dbgItemBrowserShow()
     bool keepGoing = true;
     while (keepGoing) {
         sharedFpsLimiter.mark();
+        if (dbgShouldAutoCloseForCombat()) {
+            MpLog(MP_LOG_UI, "closing items menu (combat initiated)");
+            keepGoing = false;
+            break;
+        }
         dbgPumpGameBehindModal();
         mouseShowCursor();
+        if (dbgShouldAutoCloseForCombat()) {
+            MpLog(MP_LOG_UI, "closing items menu (combat initiated)");
+            keepGoing = false;
+            break;
+        }
         int keyCode = inputGetInput();
         switch (keyCode) {
         case KEY_ESCAPE:
             MpLog(MP_LOG_UI, "modal close via ESC menu='items'");
+            keepGoing = false;
+            break;
         case DBG_BTN_ITEM_BACK:
             keepGoing = false;
             break;
@@ -1270,6 +1566,7 @@ static const char* kPlayerPaletteNames[8] = {
 // RETURN commits (empty = revert to the default name), ESC cancels.
 static void dbgNameEditorShow()
 {
+    DbgMenuScope scope;
     int winX;
     int winY;
     dbgCenteredPos(320, 120, &winX, &winY);
@@ -1291,8 +1588,18 @@ static void dbgNameEditorShow()
     bool keepGoing = true;
     while (keepGoing) {
         sharedFpsLimiter.mark();
+        if (dbgShouldAutoCloseForCombat()) {
+            MpLog(MP_LOG_UI, "closing name editor (combat initiated)");
+            keepGoing = false;
+            break;
+        }
         dbgPumpGameBehindModal();
         mouseShowCursor();
+        if (dbgShouldAutoCloseForCombat()) {
+            MpLog(MP_LOG_UI, "closing name editor (combat initiated)");
+            keepGoing = false;
+            break;
+        }
         windowFill(win, 8, 40, 304, 20, COLOR_BLACK);
         windowDrawText(win, nameBuf, 0, 16, 42, COLOR_WHITE);
         windowRefresh(win);
@@ -1333,6 +1640,7 @@ static void dbgNameEditorShow()
 // handler; the ring, floating name label, and combat card borders all use it.
 static void dbgColorPickerShow()
 {
+    DbgMenuScope scope;
     constexpr int kWindowWidth = 340;
     constexpr int kWindowHeight = 250;
     constexpr int DBG_BTN_R_DEC = DBG_BTN_COLOR_BASE + 10;
@@ -1402,8 +1710,18 @@ static void dbgColorPickerShow()
     bool keepGoing = true;
     while (keepGoing) {
         sharedFpsLimiter.mark();
+        if (dbgShouldAutoCloseForCombat()) {
+            MpLog(MP_LOG_UI, "closing color picker (combat initiated)");
+            keepGoing = false;
+            break;
+        }
         dbgPumpGameBehindModal();
         mouseShowCursor();
+        if (dbgShouldAutoCloseForCombat()) {
+            MpLog(MP_LOG_UI, "closing color picker (combat initiated)");
+            keepGoing = false;
+            break;
+        }
 
         // 1. Calculate live palette color from R, G, B
         int rgb24 = ((rVal & 0xFF) << 16) | ((gVal & 0xFF) << 8) | (bVal & 0xFF);
@@ -1668,6 +1986,7 @@ void MpDebugCheatsTick()
 static void dbgCheatsMenuShow()
 {
     MpLog(MP_LOG_UI, "cheats menu begin");
+    DbgMenuScope scope;
     // Client gate: the whole cheats area (money/heal/xp editors included) is
     // host-policy controlled — a disabled client gets no access at all.
     if (gMpActive && gMpIsClient && !gDbgClientCheatsEnabled) {
@@ -1719,6 +2038,7 @@ static void dbgCheatsMenuShow()
     _win_register_text_button(win, 170, 230, -1, -1, -1, DBG_BTN_STATS, "Stats...", 0);
     _win_register_text_button(win, 30, 255, -1, -1, -1, DBG_BTN_PERKS, "Perks...", 0);
     _win_register_text_button(win, 170, 255, -1, -1, -1, DBG_BTN_CHEATS, "Cheat Options...", 0);
+    _win_register_text_button(win, 310, 255, -1, -1, -1, DBG_BTN_GVARS, "GVARs...", 0);
     _win_register_text_button(win, 30, 280, -1, -1, -1, DBG_BTN_CLOSE, "Close", 0);
     _win_register_text_button(win, 170, 280, -1, -1, -1, DBG_BTN_TRAITS, "Traits...", 0);
     _win_register_text_button(win, 310, 280, -1, -1, -1, DBG_BTN_CURSOR_RESET, "Reset Cursor", 0);
@@ -1737,9 +2057,18 @@ static void dbgCheatsMenuShow()
 
     bool keepGoing = true;
     while (keepGoing) {
+        if (dbgShouldAutoCloseForCombat()) {
+            MpLog(MP_LOG_UI, "closing cheats menu (combat initiated)");
+            keepGoing = false;
+            break;
+        }
         int rc = -1;
         while (rc == -1) {
             sharedFpsLimiter.mark();
+            if (dbgShouldAutoCloseForCombat()) {
+                rc = 0;
+                break;
+            }
 
             // Keep the session alive behind the modal: the profile sync,
             // deferred drains and host detect all run from MpTick, which the
@@ -1747,6 +2076,10 @@ static void dbgCheatsMenuShow()
             // as the vote modal. No-ops when not in a session.
             dbgPumpGameBehindModal();
             mouseShowCursor();
+            if (dbgShouldAutoCloseForCombat()) {
+                rc = 0;
+                break;
+            }
             int keyCode = inputGetInput();
             switch (keyCode) {
             case KEY_ESCAPE:
@@ -1774,6 +2107,7 @@ static void dbgCheatsMenuShow()
             case DBG_BTN_ITEMS:
             case DBG_BTN_TRAITS:
             case DBG_BTN_CHEATS:
+            case DBG_BTN_GVARS:
             case DBG_BTN_CLOSE:
             case DBG_BTN_CURSOR_RESET:
                 rc = keyCode;
@@ -1871,6 +2205,9 @@ static void dbgCheatsMenuShow()
             break;
         case DBG_BTN_CHEATS:
             dbgCheatModal();
+            break;
+        case DBG_BTN_GVARS:
+            dbgGvarsSubmenuShow();
             break;
         case DBG_BTN_CURSOR_RESET:
             // Client-side cursor recovery. The engine has two cursor layers:
@@ -2085,6 +2422,7 @@ static int dbgBuildSettingsWindow(const DbgSettingsStatus* st)
 // technique as the multiplayer menus. Returns when closed.
 static void dbgPlayerListShow(int f11Win)
 {
+    DbgMenuScope scope;
     constexpr int kPanelWidth = 150;
     constexpr int kPanelHeight = 300;
     constexpr int kListX = 8;
@@ -2129,8 +2467,20 @@ static void dbgPlayerListShow(int f11Win)
     bool keepGoing = true;
     while (keepGoing) {
         sharedFpsLimiter.mark();
+        if (dbgShouldAutoCloseForCombat()) {
+            MpLog(MP_LOG_UI, "closing player list (combat initiated)");
+            rc = 0;
+            keepGoing = false;
+            break;
+        }
         dbgPumpGameBehindModal();
         mouseShowCursor();
+        if (dbgShouldAutoCloseForCombat()) {
+            MpLog(MP_LOG_UI, "closing player list (combat initiated)");
+            rc = 0;
+            keepGoing = false;
+            break;
+        }
 
         // Rows = connected players (skip the host's empty slots). The local
         // player is marked so teleporting to yourself is obviously a no-op.
@@ -2175,43 +2525,50 @@ static void dbgPlayerListShow(int f11Win)
         if (leftButton && !prevLeftButton) {
             int localX = mouseX - panelX;
             int localY = mouseY - panelY;
-            if (localX >= kListX && localY >= kListY) {
-                int row = (localY - kListY) / kRowHeight;
-                if (row >= 0 && row < count) {
-                    selected = row;
-                    uint32_t now = getTicks();
-                    if (row == lastClickRow && getTicksSince(lastClickTick) <= kDoubleClickMs) {
-                        // Double-click on the same row: teleport to it.
-                        int playerIndex = 0;
-                        int seen = 0;
-                        for (int index = 0; index < NET_MAX_PLAYERS; index++) {
-                            MultiplayerPlayer* p = &gMpSession.players[index];
-                            if (p->isConnected && p->obj != nullptr) {
-                                if (seen == row) {
-                                    playerIndex = index;
-                                    break;
+            if (localX >= 0 && localX < kPanelWidth && localY >= 0 && localY < kPanelHeight) {
+                if (localX >= kListX && localY >= kListY) {
+                    int row = (localY - kListY) / kRowHeight;
+                    if (row >= 0 && row < count) {
+                        selected = row;
+                        uint32_t now = getTicks();
+                        if (row == lastClickRow && getTicksSince(lastClickTick) <= kDoubleClickMs) {
+                            // Double-click on the same row: teleport to it.
+                            int playerIndex = 0;
+                            int seen = 0;
+                            for (int index = 0; index < NET_MAX_PLAYERS; index++) {
+                                MultiplayerPlayer* p = &gMpSession.players[index];
+                                if (p->isConnected && p->obj != nullptr) {
+                                    if (seen == row) {
+                                        playerIndex = index;
+                                        break;
+                                    }
+                                    seen++;
                                 }
-                                seen++;
                             }
-                        }
-                        MultiplayerPlayer* p = &gMpSession.players[playerIndex];
-                        if (!p->isLocal) {
-                            MpLog(MP_LOG_UI, "player list teleport to netId=%u name='%s'",
-                                p->netId, p->name);
-                            if (gMpIsHost) {
-                                MpHostTeleportPlayer(gMpSession.localNetId, p->netId);
-                            } else {
-                                MpSendTeleportTo(p->netId);
+                            MultiplayerPlayer* p = &gMpSession.players[playerIndex];
+                            if (!p->isLocal) {
+                                MpLog(MP_LOG_UI, "player list teleport to netId=%u name='%s'",
+                                    p->netId, p->name);
+                                if (gMpIsHost) {
+                                    MpHostTeleportPlayer(gMpSession.localNetId, p->netId);
+                                } else {
+                                    MpSendTeleportTo(p->netId);
+                                }
+                                rc = 0;
+                                keepGoing = false;
                             }
-                            rc = 0;
-                            keepGoing = false;
+                            lastClickRow = -1;
+                        } else {
+                            lastClickTick = now;
+                            lastClickRow = row;
                         }
-                        lastClickRow = -1;
-                    } else {
-                        lastClickTick = now;
-                        lastClickRow = row;
                     }
                 }
+            } else {
+                // Clicked outside the player list panel (e.g. on the F11 menu or another button):
+                // Close player list panel so F11 buttons work immediately without needing ESC.
+                rc = 0;
+                keepGoing = false;
             }
         }
         prevLeftButton = leftButton;
@@ -2291,6 +2648,7 @@ void MpDebugMenuShow()
     if (gDude == nullptr) {
         return;
     }
+    DbgMenuScope scope;
     bool cursorWasHidden = cursorIsHidden();
     if (cursorWasHidden) {
         mouseShowCursor();
@@ -2309,9 +2667,18 @@ void MpDebugMenuShow()
 
     bool keepGoing = true;
     while (keepGoing) {
+        if (dbgShouldAutoCloseForCombat()) {
+            MpLog(MP_LOG_UI, "closing debug menu (combat initiated)");
+            keepGoing = false;
+            break;
+        }
         int rc = -1;
         while (rc == -1) {
             sharedFpsLimiter.mark();
+            if (dbgShouldAutoCloseForCombat()) {
+                rc = 0;
+                break;
+            }
 
             // Keep the session alive behind the modal: the profile sync,
             // deferred drains and host detect all run from MpTick, which the
@@ -2319,6 +2686,10 @@ void MpDebugMenuShow()
             // as the vote modal. No-ops when not in a session.
             dbgPumpGameBehindModal();
             mouseShowCursor();
+            if (dbgShouldAutoCloseForCombat()) {
+                rc = 0;
+                break;
+            }
             int keyCode = inputGetInput();
             switch (keyCode) {
             case KEY_ESCAPE:
@@ -2797,6 +3168,7 @@ int MpPlayerColorFor(const Object* obj)
 
 void MpDebugModelPickerShow()
 {
+    DbgMenuScope scope;
     constexpr int kWidth = 640;
     constexpr int kHeight = 440;
     constexpr int kCatRows = 9;
@@ -2968,16 +3340,28 @@ void MpDebugModelPickerShow()
     bool keepGoing = true;
     while (keepGoing) {
         sharedFpsLimiter.mark();
+        if (dbgShouldAutoCloseForCombat()) {
+            MpLog(MP_LOG_UI, "closing skin picker (combat initiated)");
+            keepGoing = false;
+            break;
+        }
 
         // Keep the session alive behind the modal (profile sync runs from
         // MpTick, so a picked skin propagates even while the picker is open).
         dbgPumpGameBehindModal();
         mouseShowCursor();
+        if (dbgShouldAutoCloseForCombat()) {
+            MpLog(MP_LOG_UI, "closing skin picker (combat initiated)");
+            keepGoing = false;
+            break;
+        }
 
         int keyCode = inputGetInput();
         switch (keyCode) {
         case KEY_ESCAPE:
             MpLog(MP_LOG_UI, "modal close via ESC menu='skin-picker'");
+            keepGoing = false;
+            break;
         case DBG_BTN_SKIN_BACK:
             keepGoing = false;
             break;

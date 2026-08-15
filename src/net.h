@@ -99,6 +99,7 @@ enum NetPacketType {
     NET_PKT_WORLDMAP_DISCOVERY = 67, // host -> clients: discovered worldmap subtiles/areas (full snapshot or incremental)
     NET_PKT_ADDICTION_CHANGE = 68,  // client -> host: one per-player drug addiction write
     NET_PKT_TELEPORT_TO = 69,       // client -> host: teleport me to the given player's critter
+    NET_PKT_PALETTE_FADE = 70,      // host -> clients: script gfade_out/gfade_in relay
 };
 
 enum NetUnreliablePacketType {
@@ -274,6 +275,9 @@ enum NetPlayerActionType {
     // inventory), tile = the fuse seconds the client selected.
     NET_PLAYER_ACTION_USE_ITEM = 13,
     NET_PLAYER_ACTION_LOOK = 14, // hover look-at (mirrors vanilla look_at feedback)
+    // Client interacts with a downed player in combat to revive them
+    // (host-authoritative; drains all the reviver's AP and ends their turn).
+    NET_PLAYER_ACTION_REVIVE = 15,
 };
 
 typedef struct NetPlayerActionPayload {
@@ -503,6 +507,12 @@ typedef struct NetToHitResultPayload {
 typedef struct NetCheatPolicyPayload {
     uint8_t clientCheatsEnabled;
 } NetCheatPolicyPayload;
+
+// Host -> clients: palette fade transition (gfade_out/gfade_in relay)
+typedef struct NetPaletteFadePayload {
+    uint8_t fadeType; // 0 = fade out (black), 1 = fade in (normal cmap)
+    uint8_t reserved[3];
+} NetPaletteFadePayload;
 
 // Generic host -> client player event (reliable). Discrete player lifecycle
 // and combat outcomes ride this single route. (DEPRECATED: NET_PKT_PLAYER_STATUS,

@@ -38,6 +38,7 @@
 #include "multiplayer_chat.h"
 #include "multiplayer_debug.h"
 #include "multiplayer.h"
+#include "multiplayer_profile.h"
 #include "multiplayer_log.h"
 #include "multiplayer_worldmap.h"
 #include "mouse.h"

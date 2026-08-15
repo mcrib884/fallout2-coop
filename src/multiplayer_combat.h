@@ -119,6 +119,12 @@ void MpCombatSendMonitorMessageToPlayer(uint32_t netId, const char* text);
 // Network pump + deferred-queue drain + state broadcasts. Safe inside the
 // blocking combat loops; must NEVER run scripts/map transitions.
 void MpCombatPump();
+// Host: a player revived mid-combat may not act again until the next round
+// (their turn is skipped when the sequence reaches them). Mark on revive,
+// test in the round loop, clear at the round boundary.
+void MpCombatMarkRevivedThisRound(uint8_t netId);
+bool MpCombatWasRevivedThisRound(uint8_t netId);
+void MpCombatNewRound();
 
 } // namespace fallout
 

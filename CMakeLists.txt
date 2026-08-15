@@ -10,7 +10,7 @@ set(EXECUTABLE_NAME fallout2-ce)
 # validates the release against them. Bump the game version before a new
 # game release; the launcher keeps its own version and only moves when the
 # launcher itself changes.
-set(FALLOUT2COOP_VERSION "0.3.0")
+set(FALLOUT2COOP_VERSION "0.4.0")
 set(FALLOUT2COOP_LAUNCHER_VERSION "0.2.0")
 
 # Embeds VERSION as a Windows version resource into a target

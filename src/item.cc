@@ -2908,6 +2908,27 @@ UseItemResultCode drugItemTakeDrug(Object* critter, Object* item)
     }
 
     if (critterIsDead(critter)) {
+        if (gMpActive && gMpIsHost && MpCritterIsDownedPlayer(critter)) {
+            if (critterGetBodyType(critter) == BODY_TYPE_ROBOTIC) {
+                return USE_ITEM_RESULT_ERROR;
+            }
+            Proto* proto;
+            protoGetProto(item->pid, &proto);
+            int healAmount = 5;
+            if (item->pid == PROTO_ID_STIMPAK) {
+                healAmount = randomBetween(10, 20);
+            } else if (item->pid == PROTO_ID_SUPER_STIMPAK) {
+                healAmount = 75;
+            } else if (item->pid == PROTO_ID_HEALING_POWDER) {
+                healAmount = randomBetween(8, 18);
+            }
+            MpReviveDownedPlayerWithHp(critter, healAmount);
+            if (item->pid == PROTO_ID_SUPER_STIMPAK && proto != nullptr) {
+                _insert_drug_effect(critter, item, proto->item.data.drug.duration1, proto->item.data.drug.stat, proto->item.data.drug.amount1);
+                _insert_drug_effect(critter, item, proto->item.data.drug.duration2, proto->item.data.drug.stat, proto->item.data.drug.amount2);
+            }
+            return USE_ITEM_RESULT_REMOVE;
+        }
         return USE_ITEM_RESULT_ERROR;
     }
 

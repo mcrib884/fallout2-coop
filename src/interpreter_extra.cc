@@ -14,6 +14,7 @@
 #include "multiplayer.h"
 #include "multiplayer_combat.h"
 #include "multiplayer_dialog.h"
+#include "multiplayer_profile.h"
 #include "content_config.h"
 #include "critter.h"
 #include "debug.h"
@@ -476,9 +477,9 @@ static void opGiveExpPoints(Program* program)
     int xp = programStackPopInteger(program);
 
     // Co-op: every connected player gains XP (the host's own flows through
-    // the vanilla path below, remote players get the mirrored math).
-    if (gMpActive && gMpIsHost && MpDialogHostActive()) {
-        MpDialogGrantExperience(xp);
+    // the vanilla path below, remote players get the profile XP grant).
+    if (gMpActive && gMpIsHost) {
+        MpProfileGrantExperience(xp);
     }
 
     if (pcAddExperience(xp) != 0) {
@@ -846,6 +847,13 @@ static void opMoveTo(Program* program)
             if (tileBlockingEnabled) {
                 tileScrollBlockingEnable();
             }
+
+            // Co-op: when a script teleports gDude on the host, teleport all
+            // connected party members to neighboring tiles so the party stays
+            // together across cutscenes, rooms, and elevation changes.
+            if (gMpActive && gMpIsHost && newTile != -1) {
+                MpHostTeleportPartyToTile(tile, elevation, object->rotation);
+            }
         } else {
             Rect before;
             objectGetRect(object, &before);
@@ -1165,34 +1173,50 @@ static void opGetDude(Program* program)
             programStackPushPointer(program, dude);
             return;
         }
+        uint32_t remoteNetId = MpRemoteActionNetId();
+        if (remoteNetId > 0 && remoteNetId <= NET_MAX_PLAYERS) {
+            Object* remoteAvatar = gMpSession.players[remoteNetId - 1].obj;
+            if (remoteAvatar != nullptr) {
+                dude = remoteAvatar;
+                programStackPushPointer(program, dude);
+                return;
+            }
+        }
         int sid = scriptGetSid(program);
         Script* script = nullptr;
-        if (scriptGetScript(sid, &script) != -1 && script->target != nullptr
-            && objectTypeFromFid(script->target->fid) == OBJ_TYPE_CRITTER
-            && !MpCombatIsPlayerCritter(script->target)) {
-            Object* nearest = MpCombatGetNearestPlayerTo(script->target);
-            if (nearest != nullptr) {
-                dude = nearest;
+        if (scriptGetScript(sid, &script) != -1 && script != nullptr) {
+            if (script->source != nullptr && MpCombatIsPlayerCritter(script->source)) {
+                dude = script->source;
+                programStackPushPointer(program, dude);
+                return;
             }
-            // Throttled diagnostics: shows the vanilla proximity-check
-            // timeline (which player the enemy sees, at what distance).
-            static uint32_t gMpDudeObjLastLogTick = 0;
-            uint32_t now = getTicks();
-            if (now - gMpDudeObjLastLogTick > 1000) {
-                gMpDudeObjLastLogTick = now;
-                uint32_t netId = 0;
+            if (script->target != nullptr
+                && objectTypeFromFid(script->target->fid) == OBJ_TYPE_CRITTER
+                && !MpCombatIsPlayerCritter(script->target)) {
+                Object* nearest = MpCombatGetNearestPlayerTo(script->target);
                 if (nearest != nullptr) {
-                    netId = MpCombatGetCritterPlayerNetId(nearest);
-                    if (netId == 0 && nearest == gDude) {
-                        netId = 1; // host player is players[0].netId in practice
-                    }
+                    dude = nearest;
                 }
-                MpLog(MP_LOG_COMBAT, "dude_obj enemy sid=%d pid=0x%X tile=%d sees netId=%u tile=%d dist=%d",
-                    sid, script->target->pid, script->target->tile, netId,
-                    nearest != nullptr ? nearest->tile : -1,
-                    nearest != nullptr
-                        ? tileDistanceBetween(nearest->tile, script->target->tile)
-                        : -1);
+                // Throttled diagnostics: shows the vanilla proximity-check
+                // timeline (which player the enemy sees, at what distance).
+                static uint32_t gMpDudeObjLastLogTick = 0;
+                uint32_t now = getTicks();
+                if (now - gMpDudeObjLastLogTick > 1000) {
+                    gMpDudeObjLastLogTick = now;
+                    uint32_t netId = 0;
+                    if (nearest != nullptr) {
+                        netId = MpCombatGetCritterPlayerNetId(nearest);
+                        if (netId == 0 && nearest == gDude) {
+                            netId = 1; // host player is players[0].netId in practice
+                        }
+                    }
+                    MpLog(MP_LOG_COMBAT, "dude_obj enemy sid=%d pid=0x%X tile=%d sees netId=%u tile=%d dist=%d",
+                        sid, script->target->pid, script->target->tile, netId,
+                        nearest != nullptr ? nearest->tile : -1,
+                        nearest != nullptr
+                            ? tileDistanceBetween(nearest->tile, script->target->tile)
+                            : -1);
+                }
             }
         }
     }
@@ -4416,6 +4440,9 @@ static void opGameFadeOut(Program* program)
 
     if (data != 0) {
         paletteFadeTo(gPaletteBlack);
+        if (gMpActive && gMpIsHost) {
+            MpBroadcastPaletteFade(false);
+        }
     } else {
         scriptPredefinedError(program, "gfade_out", SCRIPT_ERROR_OBJECT_IS_NULL);
     }
@@ -4429,6 +4456,9 @@ static void opGameFadeIn(Program* program)
 
     if (data != 0) {
         paletteFadeTo(_cmap);
+        if (gMpActive && gMpIsHost) {
+            MpBroadcastPaletteFade(true);
+        }
     } else {
         scriptPredefinedError(program, "gfade_in", SCRIPT_ERROR_OBJECT_IS_NULL);
     }

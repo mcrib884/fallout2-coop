@@ -48,6 +48,10 @@
 #include "window_manager.h"
 #include "window_manager_private.h"
 #include "worldmap.h"
+#include "multiplayer_chat.h"
+#include "multiplayer_debug.h"
+#include "multiplayer_lan.h"
+#include "multiplayer_loot.h"
 #include "multiplayer_log.h"
 #include "multiplayer_worldmap.h"
 
@@ -1261,19 +1265,7 @@ static int scriptsHandleElevatorRequest(bool closeDoorsBeforeMapTransition)
 
     automapSaveCurrent();
 
-    if (map == gMapHeader.index) {
-        if (elevation != gElevation) {
-            scriptsCloseNearbyElevatorDoors();
-        }
-
-        reg_anim_clear(gDude);
-        objectSetRotation(gDude, ROTATION_SE, nullptr);
-        objectAttemptPlacement(gDude, tile, elevation, 0);
-
-        return 0;
-    }
-
-    if (closeDoorsBeforeMapTransition) {
+    if (closeDoorsBeforeMapTransition || elevation != gElevation) {
         scriptsCloseNearbyElevatorDoors();
     }
 
@@ -1288,6 +1280,11 @@ static int scriptsHandleElevatorRequest(bool closeDoorsBeforeMapTransition)
     mapSetTransition(&transition);
 
     return 0;
+}
+
+bool scriptsCombatRequestPending()
+{
+    return (gScriptsRequests & SCRIPT_REQUEST_COMBAT) != 0;
 }
 
 // 0x4A3FB4
@@ -1306,6 +1303,13 @@ int scriptsHandleRequests()
     }
 
     if ((gScriptsRequests & SCRIPT_REQUEST_COMBAT) != 0) {
+        if (MpDebugMenuIsOpen() || MpChatIsOpen() || MpLanBrowserIsOpen() || MpLootSessionOpen()) {
+            // Defer entering _combat synchronously while nested inside a modal background pump.
+            // The open modal will detect SCRIPT_REQUEST_COMBAT and close itself;
+            // this request will execute on the next top-level main game loop tick.
+            return 0;
+        }
+
         if (!_action_explode_running()) {
             // entering combat
             gScriptsRequests &= ~(SCRIPT_REQUEST_0x0400 | SCRIPT_REQUEST_COMBAT);
@@ -1489,15 +1493,13 @@ int scriptsRequestElevator(Object* obj, int elevatorType)
 {
     int elevatorLevel = gElevation;
 
-    // Co-op: the elevator modal and the level change are host-global. A remote
-    // player's USE on an elevator panel would open the modal on the host's
-    // screen (and could yank every player's dude around); reject the request
-    // and feed the notice back through the monitor relay so the acting client
-    // sees it.
+    // Co-op: the elevator GUI modal is presented locally on the acting player's
+    // screen. The remote player action on the host should not pop up a modal on
+    // the host's screen; when the client picks a floor, the selection is sent
+    // as a transition vote request.
     if (gMpActive && MpRemoteActionActive()) {
-        MpLog(MP_LOG_SYNC, "(remote action active)");
-        displayMonitorAddMessage("Elevators are not available in co-op.");
-        return -1;
+        MpLog(MP_LOG_SYNC, "remote elevator request handled client-side");
+        return 0;
     }
 
     int tile = obj->tile;

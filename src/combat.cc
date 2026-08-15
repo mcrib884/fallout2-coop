@@ -1963,6 +1963,21 @@ static Object** _combat_list;
 // 0x56D394 list_com
 static int _list_com;
 
+// Co-op: expose the current combat's participant list (the Kill Hostile
+// cheat filters on actual combatants, not every critter on the map).
+int combatGetCombatantCount()
+{
+    return _list_com;
+}
+
+Object* combatGetCombatant(int index)
+{
+    if (index < 0 || index >= _list_com || _combat_list == nullptr) {
+        return nullptr;
+    }
+    return _combat_list[index];
+}
+
 // Experience received for killing critters during current combat.
 //
 // 0x56D398 combat_exps
@@ -3769,6 +3784,16 @@ void _combat(CombatStartData* csd)
                     MpLog(MP_LOG_COMBAT, "sequence combatant pid=0x%X tile=%d netId=%u",
                         combatant->pid, combatant->tile, remoteNetId);
                     if (remoteNetId != 0) {
+                        // Co-op: a player revived mid-combat may not act
+                        // again until the next round — skip their remaining
+                        // turn of this round (the flag clears at the round
+                        // boundary, see MpCombatNewRound).
+                        if (MpCombatWasRevivedThisRound(remoteNetId)) {
+                            MpLog(MP_LOG_COMBAT, "remote turn skipped netId=%u (revived this round)",
+                                remoteNetId);
+                            _gcsd = nullptr;
+                            continue;
+                        }
                         // Co-op: a downed player cannot act — skip their turn
                         // entirely. Vanilla skips DAM_DEAD critters inside
                         // _combat_turn, but the remote path never reaches it;
@@ -3797,6 +3822,13 @@ void _combat(CombatStartData* csd)
                     // need to know whose turn it is.
                     if (combatant == gDude) {
                         uint8_t hostNetId = gMpSession.players[0].netId;
+                        // Co-op: the host was revived mid-combat — their turn
+                        // is skipped for the rest of this round, same rule as
+                        // remote players (next round they act normally).
+                        if (MpCombatWasRevivedThisRound(hostNetId)) {
+                            MpLog(MP_LOG_COMBAT, "host turn skipped (revived this round)");
+                            continue;
+                        }
                         int ap = gDude->data.critter.combat.ap;
                         int maxAp = critterGetStat(gDude, STAT_MAXIMUM_ACTION_POINTS);
                         NetCombatTurnStartPayload payload;
@@ -3843,6 +3875,8 @@ void _combat(CombatStartData* csd)
             _combat_sequence();
             curIndex = 0;
             _combatNumTurns += 1;
+            // Co-op: a new round — players revived mid-combat may act again.
+            MpCombatNewRound();
         } while (!_combat_should_end());
 
         if (_combat_end_due_to_load) {
@@ -3869,11 +3903,22 @@ void _combat(CombatStartData* csd)
             }
             _combat_over();
             // Co-op: the fight ended successfully — downed players get back
-            // up with 5% of their max HP. Skipped when the game is already
-            // over (quit request set: all players were downed).
+            // up with 5% of their max HP. Skipped only when the game is
+            // already over (all players downed sets the MAIN_MENU quit
+            // request before this point). A combat ended by request (ESC /
+            // script END_COMBAT) must still revive — the request only
+            // describes HOW it ended, and the request is cleared after this
+            // block.
             if (gMpIsHost && gMpActive
-                && _game_user_wants_to_quit == GAME_QUIT_REQUEST_NONE) {
+                && (_game_user_wants_to_quit == GAME_QUIT_REQUEST_NONE
+                    || _game_user_wants_to_quit == GAME_QUIT_REQUEST_END_COMBAT)) {
                 MpCombatEndReviveDowned();
+            }
+            // Co-op: mid-combat revives mark their player until the next
+            // round — a combat that ends mid-round must not leak that mark
+            // into the next fight (it would skip the player's first turn).
+            if (gMpIsHost && gMpActive) {
+                MpCombatNewRound();
             }
             scriptsExecMapUpdateProc();
         }
